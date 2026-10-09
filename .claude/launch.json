@@ -1,0 +1,28 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "-w",
+        "apps/api",
+        "run",
+        "dev"
+      ],
+      "port": 8787
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "-w",
+        "apps/web",
+        "run",
+        "dev"
+      ],
+      "port": 5180,
+      "autoPort": true
+    }
+  ]
+}

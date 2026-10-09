@@ -1,0 +1,56 @@
+name: daily boat pipeline
+on:
+  schedule:
+    - cron: '30 22 * * *' # 07:30 JST
+    - cron: '30 14 * * *' # 23:30 JST
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install ML dependencies
+        run: python -m pip install pandas numpy scikit-learn lightgbm lhafile
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Wrangler dependencies
+        run: npm ci
+      - name: Set cache date
+        id: cache-date
+        run: echo "date=$(TZ=Asia/Tokyo date +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore daily data and model cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/raw/boatrace
+            ml/data
+            ml/artifacts
+          key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
+          restore-keys: |
+            daily-${{ runner.os }}-
+      - name: Initialize backfill state
+        run: |
+          if [ ! -f ml/data/backfill_state.json ]; then
+            mkdir -p ml/data
+            cp ml/state/backfill_state.json ml/data/backfill_state.json
+          fi
+      - name: Bootstrap history on cache miss
+        if: hashFiles('ml/data/rows.json') == ''
+        env:
+          PYTHONPATH: ml
+        run: python -m edgelab backfill --from 2026-07-01 --to "$(TZ=Asia/Tokyo date -d yesterday +%F)"
+      - name: Run daily pipeline
+        env:
+          PYTHONPATH: ml
+          EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: python -m edgelab daily

@@ -1,0 +1,44 @@
+name: retrain models
+on:
+  schedule:
+    - cron: '41 2 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install ML dependencies
+        run: python -m pip install pandas numpy scikit-learn lightgbm lhafile
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Wrangler dependencies
+        run: npm ci
+      - name: Set cache date
+        id: cache-date
+        run: echo "date=$(TZ=Asia/Tokyo date +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore data and model cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/raw/boatrace
+            ml/data
+            ml/artifacts
+          key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
+          restore-keys: |
+            daily-${{ runner.os }}-
+      - name: Train and sync candidate model
+        env:
+          PYTHONPATH: ml
+          EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+        run: |
+          python -m edgelab train --sport boat
+          python -m edgelab sync --tables models

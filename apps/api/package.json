@@ -1,0 +1,16 @@
+{
+  "name": "@edgelab/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "db:reset": "rm -rf .wrangler/state && wrangler d1 migrations apply roi-plus --local && wrangler d1 execute roi-plus --local --file=../../db/seed/sample.sql",
+    "test": "vitest run",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@edgelab/shared": "*",
+    "hono": "^4.13.13"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "edgelab",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run db:reset && concurrently -n api,web \"npm -w apps/api run dev\" \"npm -w apps/web run dev\"",
+    "db:reset": "npm -w apps/api run db:reset",
+    "test": "npm -w packages/shared test && npm -w apps/api test && npm -w apps/web test",
+    "typecheck": "tsc -b packages/shared apps/api apps/web"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261009.1",
+    "@types/better-sqlite3": "^9.6.0",
+    "better-sqlite3": "^13.0.3",
+    "concurrently": "^10.0.6",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.149.0"
+  }
+}

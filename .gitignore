@@ -1,0 +1,17 @@
+node_modules
+dist
+.wrangler
+.dev.vars
+ml/.venv
+ml/artifacts/*
+!ml/artifacts/boat-win-lgbm-v1.pkl
+!ml/artifacts/boat-win-lgbm-v1.json
+!ml/artifacts/.gitkeep
+data/raw
+__pycache__
+.DS_Store
+.codex-logs
+ml/data
+
+# Official Boatrace source fixtures are private/local only
+data/private_fixtures/
