@@ -1,7 +1,7 @@
 name: daily boat pipeline
 on:
   schedule:
-    - cron: '30 22 * * *' # 07:30 JST
+    - cron: '30 0 * * *' # 09:30 JST（D1 の日次上限は UTC 0時 = 9:00 JST にリセット）
     - cron: '30 14 * * *' # 23:30 JST
   workflow_dispatch:
 permissions:
