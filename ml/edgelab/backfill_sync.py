@@ -21,8 +21,9 @@ from edgelab.venues import venue_rows
 STATE_PATH = Path("ml/data/backfill_state.json")
 # Measured on roi-plus: 53,302 write statements produced 130,506 rows written.
 WRITE_AMPLIFICATION = 2.6
-# Used when the live rows_written_24h metric cannot be read (runs twice a day).
-ASSUMED_USAGE_WITHOUT_METRICS = 40_000
+# D1 の書き込み上限（10万行/日）はアカウント内の全 DB 合計。ROI+ は最大約3.5万行/日に抑え、
+# 他の DB（reysonai など）に余裕を残す。指標が読めないときは使用済みをこの値と仮定する。
+ASSUMED_USAGE_WITHOUT_METRICS = 20_000
 RACE_TABLES = ("entries", "results", "payouts", "predictions")
 
 

@@ -102,7 +102,7 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     try:
         from edgelab.backfill_sync import run as backfill_run
         backfill = backfill_run(since="2026-07-01", until=(target - timedelta(days=1)).isoformat(),
-                                budget=int(__import__("os").environ.get("BACKFILL_BUDGET", "70000")),
+                                budget=int(__import__("os").environ.get("BACKFILL_BUDGET", "35000")),
                                 database="roi-plus")
     except Exception as exc:
         backfill = {"skipped": True, "reason": f"{type(exc).__name__}: {exc}"}
