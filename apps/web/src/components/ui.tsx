@@ -97,9 +97,20 @@ export function Loading({ rows = 3 }: { rows?: number }) {
 export function ErrorState({ error, onRetry }: { error: Error; onRetry?: () => void }) {
   return (
     <div className="flex flex-col items-start gap-2 p-4 text-sm">
-      <div className="text-neg">読み込みに失敗しました：{error.message}</div>
-      <div className="text-xs text-muted">API（npm run dev で :8787 に起動）が動いているか確認してください。</div>
-      {onRetry && <button className="btn-ghost h-8" onClick={onRetry}>再試行</button>}
+      {error.message === 'SESSION_EXPIRED' ? (
+        <>
+          <div className="text-warn">ログインの有効期限が切れました。</div>
+          <button className="btn-ghost h-8" onClick={() => window.location.reload()}>再読み込みしてログイン</button>
+        </>
+      ) : (
+        <>
+          <div className="text-neg">読み込みに失敗しました：{error.message}</div>
+          <div className="text-xs text-muted">
+            {import.meta.env.DEV ? 'API（npm run dev で :8787 に起動）が動いているか確認してください。' : 'しばらくしてから再試行してください。続く場合はページを再読み込みしてください。'}
+          </div>
+          {onRetry && <button className="btn-ghost h-8" onClick={onRetry}>再試行</button>}
+        </>
+      )}
     </div>
   )
 }

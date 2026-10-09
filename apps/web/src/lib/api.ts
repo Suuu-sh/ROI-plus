@@ -14,8 +14,13 @@ export class ApiError extends Error {
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}/api${path}`, {
     ...init,
+    redirect: 'manual',
     headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
   })
+  // Access のログイン切れでは /api がログイン画面へ転送される（JSON 以外が返る）
+  if (res.redirected || res.type === 'opaqueredirect' || !(res.headers.get('content-type') ?? '').includes('application/json')) {
+    throw new ApiError(401, 'SESSION_EXPIRED')
+  }
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new ApiError(res.status, (body as { error?: string }).error ?? res.statusText)
   return body as T
