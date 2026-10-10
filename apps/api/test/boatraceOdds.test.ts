@@ -10,7 +10,8 @@ import { D1SqliteAdapter } from './d1-adapter.js';
 const root = resolve(import.meta.dirname, '../../..');
 const privateOddsFixture = resolve(root, 'data/private_fixtures/boatrace/oddstf_24_12_20261009.html');
 const hasPrivateOddsFixture = (() => { try { readFileSync(privateOddsFixture); return true; } catch { return false; } })();
-const now = new Date('2026-10-09T01:00:00.000Z');
+const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const now = new Date(`${today}T03:00:00.000Z`);
 const stamp = (ms: number) => new Date(ms + 9 * 60 * 60_000).toISOString().replace('Z', '+09:00');
 let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
 beforeEach(() => {
@@ -21,7 +22,7 @@ beforeEach(() => {
 afterEach(() => sqlite.close());
 function race(id: string, post: number, origin = 'real', status = 'scheduled', no = 1) {
   sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at)
-    VALUES(?,'boat','24','2026-10-09',?,?,?, ?,?)`).run(id, no, stamp(post), status, origin, stamp(now.getTime()));
+    VALUES(?,'boat','24',?,?,?, ?,?,?)`).run(id, today, no, stamp(post), status, origin, stamp(now.getTime()));
 }
 
 describe('Boatrace win odds collection', () => {
@@ -41,7 +42,7 @@ describe('Boatrace win odds collection', () => {
     race('sample', now.getTime() + 5 * 60_000, 'sample', 'scheduled', 3);
     race('finished', now.getTime() + 5 * 60_000, 'real', 'finished', 4);
     race('fresh', now.getTime() + 5 * 60_000, 'real', 'scheduled', 5);
-    sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('fresh-o','fresh','win','1',2,?,'test','real')").run(stamp(now.getTime() - 9 * 60_000));
+    sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('fresh-o','fresh','win','1',2,?,'test','real')").run(stamp(now.getTime() - 30_000));
     for (let i = 0; i < 32; i++) race(`extra-${i}`, now.getTime() + 6 * 60_000, 'real', 'scheduled', i + 6);
     const targets = await selectOddsTargets(DB, now, 100);
     expect(targets).toHaveLength(30);
