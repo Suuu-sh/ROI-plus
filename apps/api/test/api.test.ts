@@ -242,7 +242,8 @@ describe('EdgeLab API',()=>{
  it('accepts only an intact, current ML-generated initial-baseline validation contract',async()=>{
   const validation=JSON.parse(readFileSync(resolve(root,'ml/tests/fixtures/initial_baseline_validation.synthetic.json'),'utf8')) as any;
   validation.validatedAt=new Date().toISOString();
-  validation.candidateBoatVenueSchemaVersion='boat-venue-v2';
+  validation.boatVenueSchemaVersion='boat-venue-v2';
+  validation.correctedTrainingDataSha256='f'.repeat(64);
   const id=validation.candidateModelId, active=sqlite.prepare("SELECT * FROM models WHERE id='boat-active'").get() as any;
   const metrics={promotionEligible:false,promotionReason:'initial baseline requires a separate human decision',
     initialBaselineEligible:true,initialBaselineReason:null,initialBaselineValidation:validation,
@@ -255,6 +256,26 @@ describe('EdgeLab API',()=>{
   const fingerprintPayload={...validation}; delete fingerprintPayload.fingerprint; delete fingerprintPayload.validatedAt;
   delete fingerprintPayload.initialBaselineEligible; delete fingerprintPayload.initialBaselineReason;
   validation.fingerprint=sha256Json(fingerprintPayload); metrics.initialBaselineValidation=validation;
+  sqlite.prepare('UPDATE models SET metrics_json=? WHERE id=?').run(JSON.stringify(metrics),id);
+  const rejectIdentity=async(schema:string|undefined,source:string|undefined)=>{
+    if(schema===undefined) delete validation.boatVenueSchemaVersion; else validation.boatVenueSchemaVersion=schema;
+    if(source===undefined) delete validation.correctedTrainingDataSha256; else validation.correctedTrainingDataSha256=source;
+    const fp={...validation}; delete fp.fingerprint; delete fp.validatedAt;
+    delete fp.initialBaselineEligible; delete fp.initialBaselineReason;
+    validation.fingerprint=sha256Json(fp); metrics.initialBaselineValidation=validation;
+    sqlite.prepare('UPDATE models SET metrics_json=? WHERE id=?').run(JSON.stringify(metrics),id);
+    const response=await app.request(`/api/models/${id}/promote`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:'initial_baseline',validationFingerprint:validation.fingerprint,confirmed:true})},env());
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({error:'validated artifact identity is incomplete'});
+  };
+  await rejectIdentity(undefined,'f'.repeat(64));
+  await rejectIdentity('boat-base-v1','f'.repeat(64));
+  await rejectIdentity('boat-venue-v2',undefined);
+  await rejectIdentity('boat-venue-v2','e'.repeat(64));
+  validation.boatVenueSchemaVersion='boat-venue-v2'; validation.correctedTrainingDataSha256='f'.repeat(64);
+  const finalFingerprint={...validation}; delete finalFingerprint.fingerprint; delete finalFingerprint.validatedAt;
+  delete finalFingerprint.initialBaselineEligible; delete finalFingerprint.initialBaselineReason;
+  validation.fingerprint=sha256Json(finalFingerprint); metrics.initialBaselineValidation=validation;
   sqlite.prepare('UPDATE models SET metrics_json=? WHERE id=?').run(JSON.stringify(metrics),id);
   const payload={mode:'initial_baseline',validationFingerprint:validation.fingerprint,confirmed:true};
   const promoted=await app.request(`/api/models/${id}/promote`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)},env());
