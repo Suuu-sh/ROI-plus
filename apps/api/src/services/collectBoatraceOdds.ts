@@ -1,5 +1,6 @@
 import { all, type Db, type Statement } from '../repo/db.js';
 import { isStablePool, oddsUrl, parseWinOdds, USER_AGENT } from './boatraceOdds.js';
+import { estimateOddsWriteUnits, reserveWriteBudget, utcDate } from './writeBudget.js';
 
 type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string };
 type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
@@ -8,12 +9,7 @@ export type CollectOddsOptions = {
   sleep?: (ms: number) => Promise<void>;
   fetch?: (input: string, init?: RequestInit) => Promise<FetchResponse>;
 };
-export const ODDS_DAILY_WRITE_BUDGET = 10_000;
-// At most six odds rows per boat race. Reserve 24 row writes per target for
-// the odds row plus its indexes, then another 24 for lock/settings/run-log
-// control rows and indexes. Unused reservations are intentionally not refunded.
-const ESTIMATED_WRITES_PER_TARGET = 24;
-const ESTIMATED_CONTROL_WRITES = 24;
+// Odds retain their 10k sub-cap inside the shared 20k Worker budget.
 const jstIso = (ms: number) => new Date(ms + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
 const jstDate = (ms: number) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -29,38 +25,6 @@ export async function selectOddsTargets(db: Db, now: Date, maxRequests = 30): Pr
     ORDER BY r.post_time ASC LIMIT ?`, jstDate(at), after, before, fresh, Math.min(30, Math.max(0, Math.floor(maxRequests))));
 }
 
-type OddsBudgetValue = { date: string; reserved: number };
-function parseOddsBudget(value: string): OddsBudgetValue | null {
-  try {
-    const parsed = JSON.parse(value) as Partial<OddsBudgetValue>;
-    if (typeof parsed.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.date) ||
-      !Number.isSafeInteger(parsed.reserved) || (parsed.reserved as number) < 0 || (parsed.reserved as number) > ODDS_DAILY_WRITE_BUDGET) return null;
-    return { date: parsed.date, reserved: parsed.reserved as number };
-  } catch { return null; }
-}
-
-/** Atomically reserve a conservative per-worker estimate before any fetches. A CAS conflict fails closed. */
-export async function reserveOddsWriteBudget(db: Db, date: string, requestedTargets: number): Promise<number> {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isSafeInteger(requestedTargets) || requestedTargets <= 0) return 0;
-  const current = await db.prepare(`SELECT value FROM settings WHERE key='odds_daily_write_budget'`).first<{ value: string }>();
-  if (!current) {
-    const targets = Math.min(requestedTargets, Math.floor((ODDS_DAILY_WRITE_BUDGET - ESTIMATED_CONTROL_WRITES) / ESTIMATED_WRITES_PER_TARGET));
-    if (targets <= 0) return 0;
-    const value = JSON.stringify({ date, reserved: ESTIMATED_CONTROL_WRITES + targets * ESTIMATED_WRITES_PER_TARGET });
-    const inserted = await db.prepare(`INSERT INTO settings(key,value) VALUES('odds_daily_write_budget',?) ON CONFLICT(key) DO NOTHING`).bind(value).run();
-    return inserted.meta?.changes === 1 ? targets : 0;
-  }
-  const parsed = parseOddsBudget(current.value);
-  if (!parsed || parsed.date > date) return 0;
-  const reserved = parsed.date === date ? parsed.reserved : 0;
-  const available = ODDS_DAILY_WRITE_BUDGET - reserved - ESTIMATED_CONTROL_WRITES;
-  const targets = Math.min(requestedTargets, Math.floor(available / ESTIMATED_WRITES_PER_TARGET));
-  if (targets <= 0) return 0;
-  const value = JSON.stringify({ date, reserved: reserved + ESTIMATED_CONTROL_WRITES + targets * ESTIMATED_WRITES_PER_TARGET });
-  const updated = await db.prepare(`UPDATE settings SET value=? WHERE key='odds_daily_write_budget' AND value=?`).bind(value, current.value).run();
-  return updated.meta?.changes === 1 ? targets : 0;
-}
-
 export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = {}) {
   const maxRequests = Math.min(30, Math.max(0, Math.floor(opts.maxRequests ?? 30)));
   const targets = await selectOddsTargets(db, now, maxRequests);
@@ -68,15 +32,16 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
   if (!targets.length) return { status: 'skipped' as const, records: 0, targets: 0 };
   // D1's daily quota resets at UTC midnight. Reserve before lock writes so an
   // exhausted budget causes no D1 writes at all; losing a later lock is charged conservatively.
-  const admitted = await reserveOddsWriteBudget(db, now.toISOString().slice(0, 10), targets.length);
-  if (!admitted) return { status: 'skipped' as const, records: 0, targets: 0, reason: 'daily odds write budget exhausted' };
+  const maxTargets = Math.min(targets.length, Math.floor((10_000 - 32) / (6 * 20)));
+  const admitted = maxTargets > 0 && await reserveWriteBudget(db, utcDate(now), estimateOddsWriteUnits(maxTargets), 'odds');
+  if (!admitted) return { status: 'skipped' as const, records: 0, targets: 0, reason: 'daily D1 write budget unavailable or exhausted' };
   // Cron の重複実行を避ける。正常終了時に解放し、異常終了時だけ5分で期限切れにする。
   const nowIso = jstIso(now.getTime()), staleIso = jstIso(now.getTime() - 5 * 60_000);
   await db.prepare(`INSERT INTO settings(key,value) VALUES('odds_lock','') ON CONFLICT(key) DO NOTHING`).run();
   const lock = await db.prepare(`UPDATE settings SET value=? WHERE key='odds_lock' AND value<?`).bind(nowIso, staleIso).run();
   if (!lock.meta?.changes) return { status: 'skipped' as const, records: 0, targets: 0 };
   try {
-    const admittedTargets = targets.slice(0, admitted);
+    const admittedTargets = targets.slice(0, maxTargets);
     const fetcher = opts.fetch ?? ((url, init) => fetch(url, init));
     const sleep = opts.sleep ?? pause;
     const statements: Statement[] = [];
@@ -106,7 +71,8 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
         for (const [n, odds] of parsed.odds) {
           if (odds === null || !Number.isFinite(odds)) continue;
           statements.push(db.prepare(`INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin)
-            VALUES(?,?,'win',?,?,?,?,'real') ON CONFLICT(race_id,bet_type,selection,captured_at) DO UPDATE SET odds=excluded.odds,source=excluded.source,data_origin='real'`)
+            VALUES(?,?,'win',?,?,?,?,'real') ON CONFLICT(race_id,bet_type,selection,captured_at) DO UPDATE SET odds=excluded.odds,source=excluded.source,data_origin='real'
+            WHERE odds_snapshots.odds IS NOT excluded.odds OR odds_snapshots.source IS NOT excluded.source OR odds_snapshots.data_origin IS NOT 'real'`)
             .bind(`${race.id}:win:${n}:${capturedAt}`, race.id, String(n), odds, capturedAt, source));
           records++;
         }

@@ -3,6 +3,7 @@ import { cors } from 'hono/cors';
 import { all, first, run, type Db, type Statement } from './repo/db.js';
 import { candidate, betId, payoutYen, settleValues, validateYenStake } from './services/logic.js';
 import { collectOdds } from './services/collectBoatraceOdds.js';
+import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, seedUnknownWriteBudget, utcDate, type IngestTable } from './services/writeBudget.js';
 import type { Sport, DataOrigin } from '@edgelab/shared';
 
 interface Env { DB: Db; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; PROXY_TOKEN?: string; }
@@ -24,6 +25,7 @@ app.use('*', async (c, next) => {
 const now = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
 const ODDS_MAX_AGE_MS = 10 * 60 * 1000;
 const oddsFreshAfter = () => new Date(Date.now() - ODDS_MAX_AGE_MS + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
+const reserveWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'worker');
 const validSport = (v: string | null): v is Sport => v === 'horse' || v === 'boat';
 const originFilter = (v: string | null | undefined) => v === 'sample' || v === 'real' ? v : null;
 const jsonError = (c: any, message: string, status = 400) => c.json({ error: message }, status);
@@ -64,8 +66,8 @@ const allowedColumns: Record<string,string[]> = {
 const updateColumns: Record<string,string[]> = {
   venues:['sport','name'],
   races:'sport venue_id race_date race_no name distance surface track_condition weather wind_speed wave_height post_time status data_origin updated_at'.split(' '),
-  entries:'id frame name jockey trainer weight_carried horse_weight racer_class national_win_rate local_win_rate motor_no motor_2rate boat_no boat_2rate exhibition_time start_exhibition features_json available_at data_origin'.split(' '),
-  odds_snapshots:'id odds source data_origin'.split(' '), results:['finish_order','data_origin'], predictions:'id probability prob_std data_origin'.split(' '),
+  entries:'frame name jockey trainer weight_carried horse_weight racer_class national_win_rate local_win_rate motor_no motor_2rate boat_no boat_2rate exhibition_time start_exhibition features_json available_at data_origin'.split(' '),
+  odds_snapshots:'odds source data_origin'.split(' '), results:['finish_order','data_origin'], predictions:'probability prob_std data_origin'.split(' '),
   payouts:'payout popularity data_origin'.split(' '),
   models:'sport bet_type version algorithm status train_from train_to valid_from valid_to test_from test_to n_train metrics_json trained_at notes'.split(' '),
   collection_runs:'source sport target_date started_at finished_at status records error reason'.split(' '),
@@ -73,7 +75,7 @@ const updateColumns: Record<string,string[]> = {
 async function ingest(c: any, name: string) {
   if (!auth(c)) return jsonError(c, 'unauthorized', 401);
   const config = ingestTables[name], rows = parseList(await c.req.json().catch(()=>null));
-  if (!config || !rows || rows.some(r => config.required.some(k => r[k] === undefined))) return jsonError(c, 'invalid payload');
+  if (!config || !rows || rows.length > 500 || rows.some(r => config.required.some(k => r[k] === undefined))) return jsonError(c, 'invalid payload (maximum 500 rows)');
   const table = config.table, allowed = allowedColumns[table], updates = updateColumns[table];
   const db: Db = c.env.DB, statements: Statement[] = [];
   if (['entries','odds_snapshots','results','payouts','predictions','ticket_predictions'].includes(table)) {
@@ -83,35 +85,75 @@ async function ingest(c: any, name: string) {
       if (Number(quarantined?.count??0)>0) return jsonError(c, 'source data for a quarantined race cannot be ingested');
     }
   }
+  const changedByTable: Partial<Record<IngestTable, number>> = {};
+  let sideEffectRows = 0;
   for (const row of rows) {
     if (table === 'races' && await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',row.id)) return jsonError(c, 'race is quarantined by a source-repair audit');
-    if (table === 'races' && row.updated_at === undefined) row.updated_at = now();
+    const generatedUpdatedAt = table === 'races' && row.updated_at === undefined;
+    if (generatedUpdatedAt) row.updated_at = now();
     if (table === 'models' && (row.status === 'active' || row.status === 'retired')) {
       const existing = await first<any>(c.env.DB, 'SELECT status FROM models WHERE id=?', row.id);
       if (!existing || existing.status !== row.status) return jsonError(c, 'ingest cannot change model lifecycle status');
     }
     if (table === 'models' && !['candidate','untrained','active','retired'].includes(String(row.status))) return jsonError(c, 'invalid model status');
-    const cols = Object.keys(row).filter(k => allowed.includes(k));
+    const cols = Object.keys(row).filter(k => allowed.includes(k) && row[k] !== undefined);
     if (config.required.some(k => !cols.includes(k))) return jsonError(c, 'missing required fields');
-    const updateSet = updates.filter(k=>cols.includes(k)).map(k=>`${k}=excluded.${k}`);
+    // IDs and server-generated updated_at are not natural-key data; avoid
+    // manufacturing writes when an upstream retry repeats an identical row.
+    const updateCols = updates.filter(k=>cols.includes(k) && k !== 'id');
+    const businessUpdateCols = updateCols.filter(k => k !== 'updated_at');
+    const keyCols = config.conflict.split(',');
+    const keyValues = keyCols.map(k => row[k]);
+    const previous = await first<any>(db, `SELECT * FROM ${table} WHERE ${keyCols.map(k=>`${k}=?`).join(' AND ')}`, ...keyValues);
+    let changed = !previous;
+    if (previous) {
+      if (table === 'models' && (previous.status === 'active' || previous.status === 'retired')) changed = false;
+      else changed = businessUpdateCols.some(k => {
+        if (table === 'races' && k === 'status' && ['finished','cancelled'].includes(previous.status)) return false;
+        return previous[k] !== row[k] && !(previous[k] == null && row[k] == null);
+      });
+    }
+    if (changed) {
+      const ingestTable = table as IngestTable;
+      changedByTable[ingestTable] = (changedByTable[ingestTable] ?? 0) + 1;
+    }
+    const updateSet = updateCols.map(k=>`${k}=excluded.${k}`);
     if (table === 'races' && cols.includes('status')) updateSet[updateSet.indexOf('status=excluded.status')] = "status=CASE WHEN races.status IN ('finished','cancelled') THEN races.status ELSE excluded.status END";
-    const protectLifecycle = table === 'models' ? " WHERE models.status NOT IN ('active','retired')" : '';
-    const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(()=>'?').join(',')}) ON CONFLICT(${config.conflict}) DO UPDATE SET ${updateSet.join(',') || `${config.conflict.split(',')[0]}=excluded.${config.conflict.split(',')[0]}`}${protectLifecycle}`;
-    statements.push(db.prepare(sql).bind(...cols.map(k=>row[k])));
+    const guardExpr = (k: string) => table === 'races' && k === 'status'
+      ? `CASE WHEN races.status IN ('finished','cancelled') THEN races.status ELSE excluded.status END IS NOT races.status`
+      : `${table}.${k} IS NOT excluded.${k}`;
+    const noOpGuard = businessUpdateCols.length ? `(${businessUpdateCols.map(guardExpr).join(' OR ')})` : '0';
+    const updateWhere = table === 'models' ? ` WHERE models.status NOT IN ('active','retired') AND ${noOpGuard}` : ` WHERE ${noOpGuard}`;
+    const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(()=>'?').join(',')}) ON CONFLICT(${config.conflict}) DO UPDATE SET ${updateSet.join(',') || `${config.conflict.split(',')[0]}=excluded.${config.conflict.split(',')[0]}`}${updateWhere}`;
+    if (changed) statements.push(db.prepare(sql).bind(...cols.map(k=>row[k])));
   }
   // 結果・払戻の入ったレースを確定にする（D1 の書き込み行数を抑えるためレース単位で1回、未確定のものだけ）
   if (name === 'payouts' || name === 'results') {
-    for (const id of new Set(rows.map(r => String(r.race_id)))) statements.push(db.prepare("UPDATE races SET status='finished' WHERE id=? AND status<>'finished'").bind(id));
+    for (const id of new Set(rows.map(r => String(r.race_id)))) {
+      const race = await first<any>(db, "SELECT 1 FROM races WHERE id=? AND status NOT IN ('finished','cancelled')", id);
+      if (race) { statements.push(db.prepare("UPDATE races SET status='finished' WHERE id=? AND status NOT IN ('finished','cancelled')").bind(id)); sideEffectRows++; }
+    }
+  }
+  const changedRows = Object.values(changedByTable).reduce((sum, count) => sum + (count ?? 0), 0) + sideEffectRows;
+  if (changedRows > 0 && !await reserveWriteBudget(db, utcDate(), estimateIngestWriteUnits(changedByTable, sideEffectRows), 'ingest')) {
+    const budget = await readWriteBudget(db);
+    return c.json({ error: 'daily D1 write budget unavailable or exhausted', code: budget.state === 'missing' || budget.state === 'invalid' ? 'd1_write_budget_unavailable' : 'd1_write_budget_exhausted', budget }, 429);
   }
   // D1 batch は1トランザクションで実行される（行ごとの往復を避ける）
-  if (db.batch) await db.batch(statements); else for (const s of statements) await s.run();
-  return c.json({ upserted: rows.length });
+  if (statements.length) {
+    if (db.batch) await db.batch(statements); else for (const s of statements) await s.run();
+  }
+  return c.json({ upserted: rows.length, changed: changedRows });
 }
 async function settleOpen(db: Db) {
   const bets = await all<any>(db, `SELECT b.*, r.status AS race_status, r.data_origin AS race_origin FROM bets b JOIN races r ON r.id=b.race_id WHERE b.status='open' AND r.status IN ('finished','cancelled') AND b.data_origin=r.data_origin AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) AND ${nonQuarantinedBet()}`);
   let settled = 0;
   for (const b of bets) {
-    if (b.race_status === 'cancelled') { await run(db, `UPDATE bets SET status='void',payout=0,profit=0,settled_at=? WHERE id=?`, now(), b.id); settled++; continue; }
+    if (b.race_status === 'cancelled') {
+      if (!await reserveWorkerWrites(db, 1)) break;
+      const result = await run(db, `UPDATE bets SET status='void',payout=0,profit=0,settled_at=? WHERE id=? AND status='open'`, now(), b.id);
+      settled += Number(result.meta?.changes ?? 0); continue;
+    }
     const integrity = await first<any>(db, `SELECT
       (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin=?) entry_count,
       (SELECT COUNT(*) FROM results res WHERE res.race_id=? AND res.data_origin=?) result_count,
@@ -134,9 +176,13 @@ async function settleOpen(db: Db) {
         || integrity.paid_winner_count !== integrity.winner_count) continue;
     const pay = await first<any>(db, 'SELECT payout FROM payouts WHERE race_id=? AND data_origin=? AND bet_type=? AND selection=? AND payout>0', b.race_id, b.data_origin, b.bet_type, b.selection);
     const values = settleValues(b.stake, pay?.payout ?? null, !!pay);
-    await run(db, `UPDATE bets SET status=?,payout=?,profit=?,final_odds=?,settled_at=? WHERE id=?`, pay ? 'won' : 'lost', values.payout, values.profit, values.finalOdds, now(), b.id);
-    if (b.expected_roi > 0 && values.finalOdds !== null && b.predicted_prob * values.finalOdds - 1 <= 0) await run(db, `UPDATE bets SET ev_lost=1 WHERE id=?`, b.id);
-    settled++;
+    const evLost = b.expected_roi > 0 && values.finalOdds !== null && b.predicted_prob * values.finalOdds - 1 <= 0;
+    if (!await reserveWorkerWrites(db, evLost ? 2 : 1)) break;
+    const result = await run(db, `UPDATE bets SET status=?,payout=?,profit=?,final_odds=?,settled_at=? WHERE id=? AND status='open'`, pay ? 'won' : 'lost', values.payout, values.profit, values.finalOdds, now(), b.id);
+    if (Number(result.meta?.changes ?? 0) > 0) {
+      if (evLost) await run(db, `UPDATE bets SET ev_lost=1 WHERE id=? AND ev_lost<>1`, b.id);
+      settled++;
+    }
   }
   return settled;
 }
@@ -172,6 +218,7 @@ async function autoBet(db: Db, enabled: boolean) {
       predicted_prob:row.probability,odds_at_bet:row.odds,expected_roi:row.edgeData.expectedRoi,edge_label:row.edgeData.edge,
       model_id:row.model_id,placed_at:placedAt,data_origin:row.data_origin,candidate_rank:row.candidateRank,
       candidate_count:row.candidateCount,odds_captured_at:row.odds_captured_at,predicted_at_at_bet:row.predicted_at}));
+    if (!await reserveWorkerWrites(db, payload.length * 2)) break;
     const inserted=await run(db,`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin,bet_group_id,candidate_rank,candidate_count,odds_captured_at,predicted_at_at_bet)
       SELECT json_extract(value,'$.id'),json_extract(value,'$.race_id'),json_extract(value,'$.sport'),'win',json_extract(value,'$.selection'),json_extract(value,'$.stake'),'auto',json_extract(value,'$.predicted_prob'),json_extract(value,'$.odds_at_bet'),json_extract(value,'$.expected_roi'),json_extract(value,'$.edge_label'),json_extract(value,'$.model_id'),json_extract(value,'$.placed_at'),'open',json_extract(value,'$.data_origin'),?,json_extract(value,'$.candidate_rank'),json_extract(value,'$.candidate_count'),json_extract(value,'$.odds_captured_at'),json_extract(value,'$.predicted_at_at_bet')
       FROM json_each(?) WHERE ${availableBankrollSql}>=? AND NOT EXISTS(SELECT 1 FROM bets WHERE race_id=? AND mode='auto')
@@ -184,10 +231,24 @@ async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false) {
   if (oddsEnabled) await collectOdds(db, new Date());
   const settled=await settleOpen(db), bought=await autoBet(db,autoEnabled);
   const cutoff=new Date(Date.now()-30*86400000).toISOString();
-  await run(db, `DELETE FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at)`, cutoff).catch(()=>{});
+  const oldRows=await first<any>(db, `SELECT COUNT(*) count FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at)`, cutoff);
+  const cleanupCount=Math.min(10,Number(oldRows?.count??0));
+  if(cleanupCount>0&&await reserveWorkerWrites(db,cleanupCount)) await run(db, `DELETE FROM odds_snapshots WHERE rowid IN (SELECT rowid FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at) LIMIT 10)`, cutoff).catch(()=>{});
   return {settled,bought};
 }
-app.get('/health', c=>c.json({ok:true,service:'edgelab-api'}));
+app.get('/health', async c=>c.json({ok:true,service:'edgelab-api',d1WriteBudget:await readWriteBudget(c.env.DB)}));
+app.get('/ingest/write-budget', async c=>{
+  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
+  return c.json(await readWriteBudget(c.env.DB));
+});
+app.post('/ingest/write-budget/seed', async c=>{
+  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
+  const body = await c.req.json().catch(()=>null) as any;
+  if (!body || body.date !== utcDate() || body.confirmed !== true) return jsonError(c, 'explicit current-UTC-day budget seed confirmation is required');
+  const inserted = await seedUnknownWriteBudget(c.env.DB, body.date);
+  if (!inserted) return c.json({ error:'budget seed already exists or could not be written', code:'d1_write_budget_seed_conflict', budget:await readWriteBudget(c.env.DB) }, 409);
+  return c.json(await readWriteBudget(c.env.DB), 201);
+});
 app.get('/races', async c=>{
   const db=c.env.DB, sport=c.req.query('sport'), date=c.req.query('date'), origin=originFilter(c.req.query('origin'));
   if (sport && !validSport(sport)) return jsonError(c,'invalid sport');
@@ -264,6 +325,18 @@ app.post('/bets',async c=>{
    predicted_prob:row.probability,odds_at_bet:row.odds,expected_roi:row.rankData.expectedRoi,edge_label:row.rankData.edge,model_id:row.model_id,
    placed_at:placedAt,data_origin:race.data_origin,candidate_rank:row.candidateRank,candidate_count:row.candidateCount,
    odds_captured_at:row.odds_captured_at,predicted_at_at_bet:row.predicted_at}));
+ if(!await reserveWorkerWrites(db,payload.length*2)){
+   const repeated=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY selection',groupId);
+   const requested=[...selections].sort((a:any,b:any)=>a.selection.localeCompare(b.selection));
+   if(repeated.length){
+     if(repeated.length===requested.length&&repeated.every((b:any,i:number)=>b.race_id===body.raceId&&b.mode==='manual'&&b.selection===requested[i].selection&&b.stake===requested[i].stake))return c.json({groupId,bets:repeated.map(mapBet)});
+     return jsonError(c,'requestId was already used for a different bet group',409);
+   }
+   const available=await first<any>(db,`SELECT ${availableBankrollSql} available`);
+   if(Number(available?.available??0)<totalStake)return jsonError(c,'insufficient bankroll');
+   const budget=await readWriteBudget(db);
+   return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);
+ }
  const inserted=await run(db,`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin,bet_group_id,candidate_rank,candidate_count,odds_captured_at,predicted_at_at_bet)
    SELECT json_extract(value,'$.id'),json_extract(value,'$.race_id'),json_extract(value,'$.sport'),'win',json_extract(value,'$.selection'),json_extract(value,'$.stake'),'manual',json_extract(value,'$.predicted_prob'),json_extract(value,'$.odds_at_bet'),json_extract(value,'$.expected_roi'),json_extract(value,'$.edge_label'),json_extract(value,'$.model_id'),json_extract(value,'$.placed_at'),'open',json_extract(value,'$.data_origin'),?,json_extract(value,'$.candidate_rank'),json_extract(value,'$.candidate_count'),json_extract(value,'$.odds_captured_at'),json_extract(value,'$.predicted_at_at_bet')
    FROM json_each(?) WHERE ${availableBankrollSql}>=? AND NOT EXISTS(SELECT 1 FROM bets WHERE bet_group_id=?)
@@ -277,12 +350,38 @@ app.post('/bets',async c=>{
  const bets=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY candidate_rank',groupId);
  return c.json(legacyRequest?mapBet(bets[0]):{groupId,bets:bets.map(mapBet)},201);
 });
-function mapBet(b:any){return {id:b.id,raceId:b.race_id,sport:b.sport,betType:b.bet_type,selection:b.selection,stake:b.stake,mode:b.mode,predictedProb:b.predicted_prob,oddsAtBet:b.odds_at_bet,expectedRoi:b.expected_roi,edgeLabel:b.edge_label,modelId:b.model_id,placedAt:b.placed_at,status:b.status,payout:b.payout??null,profit:b.profit??null,finalOdds:b.final_odds??null,settledAt:b.settled_at??null,dataOrigin:b.data_origin,groupId:b.bet_group_id??null,candidateRank:b.candidate_rank??null,candidateCount:b.candidate_count??null,oddsCapturedAt:b.odds_captured_at??null,predictedAtAtBet:b.predicted_at_at_bet??null};}
+function resultWaitReason(b:any){
+ if(b.data_origin==='sample')return 'sampledata';
+ if(b.race_status==='cancelled')return 'cancelled';
+ if(b.status!=='open')return null;
+ if(b.finish_code==='失格'||b.finish_code==='転覆'||b.finish_code==='妨害'||b.finish_code==='落水'||b.finish_code==='エンスト'||b.finish_code==='不完走')return 'disqualified';
+ if(b.finish_code==='欠場'||b.finish_code==='欠')return 'withdrawn';
+ if(b.post_time){const postTime=Date.parse(b.post_time);if(Number.isFinite(postTime)&&postTime>Date.now())return 'notstarted';}
+ if(b.race_status==='scheduled'||b.race_status==='closed')return 'unknown';
+ if(!b.entry_count||b.result_count!==b.entry_count||b.distinct_result_count!==b.entry_count||b.matched_result_count!==b.entry_count||!b.winner_count){
+   return b.result_collection_status==='failed'||b.result_collection_status==='partial'?'collectionfailed':'officialresultmissing';
+ }
+ if(b.paid_winner_count!==b.winner_count)return 'payoutmissing';
+ return 'settlementpending';
+}
+function mapBet(b:any){return {id:b.id,raceId:b.race_id,sport:b.sport,betType:b.bet_type,selection:b.selection,stake:b.stake,mode:b.mode,predictedProb:b.predicted_prob,oddsAtBet:b.odds_at_bet,expectedRoi:b.expected_roi,edgeLabel:b.edge_label,modelId:b.model_id,placedAt:b.placed_at,status:b.status,payout:b.payout??null,profit:b.profit??null,finalOdds:b.final_odds??null,settledAt:b.settled_at??null,dataOrigin:b.data_origin,groupId:b.bet_group_id??null,candidateRank:b.candidate_rank??null,candidateCount:b.candidate_count??null,oddsCapturedAt:b.odds_captured_at??null,predictedAtAtBet:b.predicted_at_at_bet??null,resultWaitReason:b.race_status==null?undefined:resultWaitReason(b),resultCollectionSource:b.result_collection_source??null,resultCollectionStatus:b.result_collection_status??null,resultCollectionLastAttemptAt:b.result_collection_last_attempt_at??null,resultCollectionLastSuccessAt:b.result_collection_last_success_at??null};}
 async function quarantineSummary(db: Db, sport: string | null, origin: string | null) {
  return await first<any>(db, `SELECT COUNT(*) count,COALESCE(SUM(b.stake),0) stake,COALESCE(SUM(b.payout),0) payout,COALESCE(SUM(b.profit),0) profit FROM bets b WHERE EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=b.id) AND (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?)`, sport, sport, origin, origin) ?? {count:0,stake:0,payout:0,profit:0};
 }
 app.get('/bets/quarantine-summary',async c=>{const sport=c.req.query('sport'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');return c.json(await quarantineSummary(c.env.DB,sport||null,origin));});
-app.get('/bets',async c=>{const sport=c.req.query('sport'),status=c.req.query('status'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');const rows=await all<any>(c.env.DB,`SELECT b.*,v.name venue_name,r.race_no FROM bets b JOIN races r ON r.id=b.race_id JOIN venues v ON v.id=r.venue_id WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.status=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at DESC`,sport||null,sport||null,status||null,status||null,origin,origin);return c.json(rows.map(b=>({...mapBet(b),venueName:b.venue_name,raceNo:b.race_no})));});
+app.get('/bets',async c=>{const sport=c.req.query('sport'),status=c.req.query('status'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');const rows=await all<any>(c.env.DB,`SELECT b.*,v.name venue_name,r.race_no,r.status race_status,r.post_time,r.race_date,
+ (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin) entry_count,
+ (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin) result_count,
+ (SELECT COUNT(DISTINCT x.number) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin) distinct_result_count,
+ (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin AND EXISTS(SELECT 1 FROM entries e WHERE e.race_id=x.race_id AND e.number=x.number AND e.data_origin=x.data_origin)) matched_result_count,
+ (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin AND x.finish_order=1) winner_count,
+ (SELECT COUNT(*) FROM results x JOIN payouts p ON p.race_id=x.race_id AND p.data_origin=x.data_origin AND p.bet_type='win' AND p.selection=CAST(x.number AS TEXT) AND p.payout>0 WHERE x.race_id=r.id AND x.data_origin=r.data_origin AND x.finish_order=1) paid_winner_count,
+ (SELECT CASE WHEN json_valid(e.features_json) THEN json_extract(e.features_json,'$.finish_code') END FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin AND CAST(e.number AS TEXT)=b.selection LIMIT 1) finish_code,
+ (SELECT cr.source FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_source,
+ (SELECT cr.status FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_status,
+ (SELECT cr.started_at FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_attempt_at,
+ (SELECT COALESCE(cr.finished_at,cr.started_at) FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND cr.status='success' AND julianday(COALESCE(cr.finished_at,cr.started_at))<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_success_at
+ FROM bets b JOIN races r ON r.id=b.race_id JOIN venues v ON v.id=r.venue_id WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.status=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at DESC`,sport||null,sport||null,status||null,status||null,origin,origin);return c.json(rows.map(b=>({...mapBet(b),venueName:b.venue_name,raceNo:b.race_no})));});
 app.get('/performance/rank-comparison',async c=>{
  const db=c.env.DB,origin=originFilter(c.req.query('origin'));
  const rows=await all<any>(db,`SELECT b.* FROM bets b JOIN races r ON r.id=b.race_id AND r.data_origin=b.data_origin
@@ -411,6 +510,7 @@ app.post('/models/:id/promote',async c=>{
    if(m.sport==='boat'&&metrics.promotionEligible!==true)return jsonError(c,'boat candidates require an eligible same-holdout comparison or explicit initial-baseline approval');
    if(!hasSafeBoatRuntime(m))return jsonError(c,'validated safe boat runtime schema is required before boat promotion');
  }
+ if(!await reserveWorkerWrites(db,2)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}
  if(db.batch){
    await db.batch([
      db.prepare("UPDATE models SET status='retired' WHERE sport=? AND bet_type=? AND status='active' AND id<>? AND EXISTS(SELECT 1 FROM models WHERE id=? AND status=? AND version=? AND metrics_json IS ?)").bind(m.sport,m.bet_type,id,id,m.status,m.version,m.metrics_json),
@@ -424,7 +524,7 @@ app.post('/models/:id/promote',async c=>{
  const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!updated||updated.status!=='active')return jsonError(c,'model promotion state changed; retry after review',409);
  return c.json(mapModel(updated));
 });
-app.post('/models/:id/rollback',async c=>{const db=c.env.DB,id=c.req.param('id'),m=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!m)return jsonError(c,'model not found',404);if(m.status!=='active')return jsonError(c,'model is not active');const old=await first<any>(db,"SELECT * FROM models WHERE sport=? AND bet_type=? AND status='retired' ORDER BY rowid DESC LIMIT 1",m.sport,m.bet_type);if(!old)return jsonError(c,'no retired model to rollback');if(!hasSafeBoatRuntime(old))return jsonError(c,'rollback target lacks validated safe boat runtime schema');if(db.batch){await db.batch([db.prepare("UPDATE models SET status='retired' WHERE id=? AND status='active'").bind(id),db.prepare("UPDATE models SET status='active' WHERE id=? AND status='retired'").bind(old.id)]);}else{await run(db,"UPDATE models SET status='retired' WHERE id=? AND status='active'",id);await run(db,"UPDATE models SET status='active' WHERE id=? AND status='retired'",old.id);}const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',old.id);if(!updated||updated.status!=='active')return jsonError(c,'rollback state changed; retry after review',409);return c.json(mapModel(updated));});
+app.post('/models/:id/rollback',async c=>{const db=c.env.DB,id=c.req.param('id'),m=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!m)return jsonError(c,'model not found',404);if(m.status!=='active')return jsonError(c,'model is not active');const old=await first<any>(db,"SELECT * FROM models WHERE sport=? AND bet_type=? AND status='retired' ORDER BY rowid DESC LIMIT 1",m.sport,m.bet_type);if(!old)return jsonError(c,'no retired model to rollback');if(!hasSafeBoatRuntime(old))return jsonError(c,'rollback target lacks validated safe boat runtime schema');if(!await reserveWorkerWrites(db,2)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}if(db.batch){await db.batch([db.prepare("UPDATE models SET status='retired' WHERE id=? AND status='active'").bind(id),db.prepare("UPDATE models SET status='active' WHERE id=? AND status='retired'").bind(old.id)]);}else{await run(db,"UPDATE models SET status='retired' WHERE id=? AND status='active'",id);await run(db,"UPDATE models SET status='active' WHERE id=? AND status='retired'",old.id);}const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',old.id);if(!updated||updated.status!=='active')return jsonError(c,'rollback state changed; retry after review',409);return c.json(mapModel(updated));});
 app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,'SELECT * FROM collection_runs ORDER BY started_at DESC'), tables=['venues','races','entries','odds_snapshots','results','payouts','models','predictions','bets','collection_runs','daily_summaries','settings'], tableCounts:Record<string,number>={};for(const t of tables)tableCounts[t]=(await first<any>(db,`SELECT COUNT(*) n FROM ${t}`))?.n??0;
  const sources=await all<any>(db,`SELECT source,sport,COUNT(*) runs,SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) successes,SUM(COALESCE(records,0)) records,MAX(started_at) lastRunAt,MAX(CASE WHEN status='success' THEN started_at END) lastSuccessAt,(SELECT cr.status FROM collection_runs cr WHERE cr.source=collection_runs.source AND cr.sport=collection_runs.sport ORDER BY cr.started_at DESC LIMIT 1) latestStatus FROM collection_runs GROUP BY source,sport`);
  return c.json({sources:sources.map(s=>({source:s.source,sport:s.sport,enabled:s.latestStatus==='skipped'||s.source==='jra' ? false : true,lastRunAt:s.lastRunAt,lastSuccessAt:s.lastSuccessAt,successRate:s.runs?s.successes/s.runs:null,runs:s.runs,records:s.records,freshnessMinutes:s.lastRunAt?Math.max(0,(Date.now()-Date.parse(s.lastRunAt))/60000):null,note:s.source==='jra'?'規約上自動取得不可':null})),errors:runs.filter(r=>r.status==='failed'||r.status==='partial').slice(0,50).map(r=>({at:r.started_at,source:r.source,error:r.error??r.reason??r.status})),tableCounts,freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowLimitNote:'D1 無料枠: 保存容量 5GB、日次読取 500万行、日次書込 10万行。件数はテーブル行数の合計で概算。'}});

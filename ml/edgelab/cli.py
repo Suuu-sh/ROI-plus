@@ -199,7 +199,7 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     try:
         from edgelab.backfill_sync import run as backfill_run
         backfill = backfill_run(since="2026-07-01", until=(target - timedelta(days=1)).isoformat(),
-                                budget=int(__import__("os").environ.get("BACKFILL_BUDGET", "35000")),
+                                budget=int(__import__("os").environ.get("BACKFILL_BUDGET", "20000")),
                                 database="roi-plus")
     except Exception as exc:
         backfill = {"skipped": True, "reason": f"{type(exc).__name__}: {exc}"}
@@ -508,7 +508,7 @@ def _parser() -> argparse.ArgumentParser:
     bf = sub.add_parser("backfill-sync", help="send historical race days to D1 within the daily write budget")
     bf.add_argument("--since", required=True)
     bf.add_argument("--until")
-    bf.add_argument("--budget", type=int, default=90_000, help="max rows_written_24h incl. current usage")
+    bf.add_argument("--budget", type=int, default=20_000, help="max estimated D1 rows for historical backfill (hard-capped at 20k)")
     bf.add_argument("--database", default="roi-plus")
     bf.add_argument("--dry-run", action="store_true")
     rebuild = sub.add_parser("rebuild", help="rebuild normalized rows from local raw Boatrace LZH files")

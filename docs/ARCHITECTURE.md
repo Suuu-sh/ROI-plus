@@ -9,7 +9,7 @@
 | 対象 | 競馬（JRA）とボートレース | 日次 Actions、公式データ収集、Worker Cron はボート中心。競馬はユーザー提供 CSV の取込・特徴量コードがあるが、JRA 自動収集はない。 |
 | 予測 | 出典のあるデータを用いた AI 予測 | Python / LightGBM が学習・推論を行い、Worker はモデルを実行しない。アプリコードに LLM / GPT API 呼び出しは見当たらない。毎週の自動学習対象は boat。 |
 | 購入 | 仮想運用のみ | `POST /api/bets` と Cron の自動購入は D1 の仮想 bet 記録のみ。投票・決済連携はない。現在の API の bet 操作は単勝 (`win`)。 |
-| オッズ | 取得許諾・頻度の制約を守る | Worker に公式単勝オッズ収集器がある。毎分トリガーは締切まで15分以内・JST当日の実データを対象にし、直近50秒の取得を除外、最大30レース・各対象1回リトライ・取得間隔3秒以上・1回最大49 fetch 試行。空対象ならDBへ書き込まない。`settings.odds_daily_write_budget` はUTC日ごとのオッズ収集器内の推定予約上限で、上限10,000行（1対象24行＋1回24行の制御余裕）、使い切ると停止する。日次同期・精算・他 Worker の書込は別であり、これはアカウント全体のD1残量を読み取るものではなく、実際の行書込数とも一致せず、対象カバレッジは保証しない。10分トリガーは精算・自動仮想購入・古いオッズ削除のみを行う。SPEC の単一Cron記述・25分以内・10分鮮度とは差分があり、SPEC は変更していない。`apps/api/wrangler.toml` のフラグ値は設定情報であり、デプロイ済み状態や許諾を意味しない。 |
+| オッズ | 取得許諾・頻度の制約を守る | Worker に公式単勝オッズ収集器がある。毎分トリガーは締切まで15分以内・JST当日の実データを対象にし、直近50秒の取得を除外、最大30レース・各対象1回リトライ・取得間隔3秒以上・1回最大49 fetch 試行。空対象ならDBへ書き込まない。`settings.roi_d1_write_budget_utc` の推定共有予約上限は20,000 unit/UTC日、オッズ専用内数は10,000 unit/日である。日次同期・精算・他 Worker の書込は別であり、これはアカウント全体のD1残量を読み取るものではなく、実際の行書込数とも一致せず、対象カバレッジは保証しない。10分トリガーは精算・自動仮想購入・古いオッズ削除のみを行う。SPEC の単一Cron記述・25分以内・10分鮮度とは差分があり、SPEC は変更していない。`apps/api/wrangler.toml` のフラグ値は設定情報であり、デプロイ済み状態や許諾を意味しない。 |
 | モデル管理 | 評価後に人が昇格・ロールバック | 学習結果は `candidate` として同期される。Worker API に手動昇格・ロールバック操作があり、学習 Action は昇格しない。 |
 
 ## システム構成
@@ -32,9 +32,21 @@ GitHub Actions / ローカル Python (ml/)
 - **API**: Hono の base path は `/api`。Web/API の永続 DB は D1（ML pipeline は別途ローカル JSON store を使う）で、スキーマ変更は `db/migrations/`。Worker の Service Binding 経由の閲覧 API は `PROXY_TOKEN` を検証し、ingest と `/admin/settle` は `INGEST_TOKEN` を Bearer 認証する。`/health` はヘルス確認用。
 - **D1 / 共有ロジック**: スキーマ・初期設定は `db/migrations/`、サンプル投入は `db/seed/`。型と EV 判定は `packages/shared/`。行の自然キーに UNIQUE 制約があり、ingest は upsert を行う。
 
+### D1 日次書込予算
+
+- API Worker は、`settings.roi_d1_write_budget_utc` の UTC 日別カウンターで、この Worker が行う D1 書込を推定 20,000 unit/日以下に抑える。Cloudflare アカウント全体や他アプリの D1 quota を計測・予約する仕組みではなく、他サービスに残る実 quota は保証しない。移行・管理画面など Worker 外の D1 書込もカウンター対象外。
+- オッズ収集には共有上限の内数として 10,000 unit/日を設ける。残りを ingest、精算、仮想購入、古いオッズ削除、モデル昇格・rollback 用に確保する。レコードとテーブル索引数をもとに保守的に見積もり、予約は再試行・途中失敗でも返却しない。
+- `/api/ingest/*` は自然キーの既存行を索引検索し、NULL 安全な比較で変更がない場合は SQL を発行しない。上流の合成 `id`、同一内容の再送、race のみ変化した `updated_at` は更新根拠にしない。入力は最大500行/リクエスト。最大でも予約量が上限に達する場合は、HTTP 429 と `d1_write_budget_exhausted` を返す。カウンター欠落・破損・CAS 競合も fail-closed（欠落/破損は `d1_write_budget_unavailable`）とし、quota 増額や自動初期化はしない。
+- オッズ収集、精算、auto/manual bet、古いオッズの削除、モデル昇格・rollback も同じ予約を通る。settlement はオッズ収集エラーと独立して動くが、共有予算が不明または尽きた場合は書込みを止める。
+- 認証付き `GET /api/ingest/write-budget` で当日 UTC 日付・上限・予約済み・残量・状態を参照できる。未登録の初期化は人手の運用操作とし、旧利用量が不明な日は当日の全上限（20,000、うち odds 10,000）を予約する `POST /api/ingest/write-budget/seed` を使う。その UTC 日が終われば次の日付への CAS 予約でカウンターが切り替わる。ローカル DB ではテスト fixture が予算を明示的に seed する。
+
 ### API の主な面
 
 `GET /api/races`, `/api/races/:id`, `/api/rankings`, `/api/bets`, `/api/performance/*`, `/api/models`, `/api/collection/status` が読み取り面。`GET /api/ingest/models` は `INGEST_TOKEN` 認証付きのモデルレジストリ読み取りで、Pythonが人手昇格後の状態を確認する。`POST /api/bets` は仮想単勝で、複数選択は `{raceId, betType:'win', requestId?, selections:[{selection, stake}, ...]}`（1回1〜6件）を受け付け、ticket group 全体を1ステートメントで残高ガード付き記録する。`requestId` を指定すると同じ payload の再送は冪等、同じ ID の別 payload は409。旧 `{selection, stake}` 形式も互換用に受け付ける。`GET /api/performance/rank-comparison` は購入時に保存した rank 1 を使い、全券確定・rank 1 を含む複数選択 group を同じレース集合・同じ総賭け金で比較する。順位の根拠は `candidate_rank/count`, `predicted_at_at_bet`, `odds_captured_at`, `bet_group_id` に保存し、後から再推定しない。旧 bet は順位不明として同比較から除外する。`POST /api/models/:id/promote|rollback` はモデル管理、`POST /api/ingest/{venues,races,entries,results,payouts,odds,predictions,models,collection-runs}` は Python 等からの冪等同期。`POST /api/admin/settle` は認証付き精算操作。多くの読み取り API は `origin=sample|real|all` で出所を絞れる。実際の入出力契約は `apps/api/src/index.ts` と `packages/shared/src/types.ts` が根拠。
+
+### 仮想購入履歴の結果待ち
+
+`GET /api/bets` は購入時の情報を変更せず、未精算購入に限り `resultWaitReason` を返す。理由はレース状態・発走時刻、同じ出所の出走数と結果数（重複・出走外の結果も確認）、1着結果とその払戻、および精算状態から導く。区分は発走前、公式結果未取得、払戻未取得、結果収集失敗/一部失敗の記録あり、精算待ち、状況不明、中止、失格、欠場。失敗記録は当該レースの欠損原因を証明しない。結果収集の試行・成功時刻は、実データのボートで対象日と `mbrace-boat` ソースが一致する場合だけ返す（試行は開始、成功は完了時刻。未来時刻の記録は除外）。他の競技・サンプルには公式結果の収集状況を推定しない。サンプル購入は「サンプル（公式結果ではありません）」と明示し、公式結果待ちと混同しない。
 
 ## AI・データフロー
 
