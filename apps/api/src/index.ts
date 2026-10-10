@@ -352,5 +352,11 @@ app.get('/ingest/models',async c=>{
  return c.json({models});
 });
 app.post('/admin/settle',async c=>{if(!auth(c))return jsonError(c,'unauthorized',401);return c.json({settled:await settleOpen(c.env.DB)});});
-export default { fetch: app.fetch, scheduled: async (_event: unknown, env: Env) => { await cron(env.DB, env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true', env.ENABLE_BOATRACE_ODDS_SCRAPE==='true'); } };
+export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env) => {
+  if (event.cron === '* * * * *') {
+    if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true') await collectOdds(env.DB, new Date());
+    return;
+  }
+  await cron(env.DB, env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true');
+} };
 export { app, cron, settleOpen, autoBet };
