@@ -4,6 +4,14 @@ import type { OriginFilter } from './origin'
 // サンプルモデルは version を 'sample-' で始める規約（db/seed/generate.mjs）
 export const isSampleModel = (m: ModelInfo) => m.version.startsWith('sample-')
 
+export function promotionAvailability(metrics: Pick<ModelInfo['metrics'], 'promotionEligible' | 'promotionReason'>) {
+  if (metrics.promotionEligible !== false) return { enabled: true, reason: null }
+  return {
+    enabled: false,
+    reason: metrics.promotionReason || 'この候補は昇格条件を満たしていません。',
+  }
+}
+
 const rank = { active: 0, candidate: 1, retired: 2, untrained: 3 } as const
 
 /** 表示中のデータ出所に対応する代表モデル（稼働中 > 昇格候補 > 退役）。 */

@@ -1,7 +1,7 @@
 import { Bar, BarChart, CartesianGrid, Legend, Line, ComposedChart, ReferenceLine, ResponsiveContainer, Scatter, Tooltip, XAxis, YAxis } from 'recharts'
 import type { Breakdown } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
-import { useOrigin } from '../lib/origin'
+import { useOrigin, type OriginFilter } from '../lib/origin'
 import { useAsync } from '../lib/useAsync'
 import { odds, pct, signedYen, tone, yen } from '../lib/format'
 import { t } from '../i18n'
@@ -25,10 +25,14 @@ export function PerformancePage() {
         <p className="mt-1 text-sm text-muted">回収率だけでなく、予測確率の校正と期待値帯ごとの実績で評価します。</p>
       </div>
 
+      <ProfitabilityNotice
+        origin={origin}
+        settledBets={bets.filter((bet) => bet.status === 'won' || bet.status === 'lost').length}
+      />
+
       {origin === 'real' && bd.bySport.length === 0 && (
         <div className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-muted">
-          実データの仮想購入はまだありません。ボートレースのオッズ自動取得は許諾未確認のため既定で無効、競馬は自動取得できる無料ソースがないため、
-          実データでは期待収益率を計算できず購入候補が出ません。予測精度（校正・Log Loss）は下のグラフとモデル管理で確認できます。
+          実データの仮想購入履歴がまだありません。オッズや予測が未取得の場合、期待収益率や購入候補は算出できません。収益性は、確定した実データの履歴とモデル管理の評価を分けて確認してください。
         </div>
       )}
 
@@ -83,6 +87,22 @@ export function PerformancePage() {
 
       <Section title="仮想購入履歴"><BetsTable bets={bets} /></Section>
     </div>
+  )
+}
+
+export function ProfitabilityNotice({ origin, settledBets }: { origin: OriginFilter; settledBets: number }) {
+  return (
+    <aside className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-muted" aria-label="収益性の評価について">
+      <p className="font-medium text-primary">期待収益率はモデル上の推定値であり、真のプラス期待値や利益を証明するものではありません。</p>
+      <p className="mt-1">個々の購入の負けだけで予測の誤りとは判断できません。収益性の評価には、事前オッズを使った十分な out-of-sample 予測と、確定した実データの長期成績が必要です。</p>
+      {origin === 'sample' ? (
+        <p className="mt-1">サンプルデータの成績は、実際の利益を示す証拠にはなりません。</p>
+      ) : origin === 'real' && settledBets === 0 ? (
+        <p className="mt-1">現在の表示条件では確定した実データ購入がまだなく、回収率で収益性を検証できません。</p>
+      ) : origin === 'all' ? (
+        <p className="mt-1">サンプルと実データは区別して評価してください。サンプルの成績は実際の利益を示す証拠にはなりません。</p>
+      ) : null}
+    </aside>
   )
 }
 

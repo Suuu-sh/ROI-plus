@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -14,6 +15,23 @@ from edgelab.storage import DEFAULT_STORE, load_rows, merge_rows, save_rows
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _coerce_dt(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def _apply_model_registry(rows: dict[str, Any], registry: list[dict[str, Any]]) -> set[str]:
+    """Replace cached lifecycle claims with the authenticated registry snapshot."""
+    remote = {str(model.get("id")): model for model in registry if model.get("id")}
+    # Keep only locally-created candidates absent from the registry; never retain
+    # a stale cached active/retired claim as authoritative state.
+    local_candidates = [model for model in rows.get("models", [])
+                        if model.get("status") in {"candidate", "untrained"}
+                        and str(model.get("id")) not in remote]
+    rows["models"] = [*local_candidates, *remote.values()]
+    return set(remote)
 
 
 def _date_range(start: str, end: str):
@@ -34,21 +52,27 @@ def _predict_boat_date(rows: dict[str, list[dict[str, Any]]], day: str, cutoff: 
     models = [m for m in rows.get("models", []) if m.get("sport") == "boat"]
     selected = next((m for m in models if m.get("status") == "active"), None)
     if selected is None:
-        candidates = [m for m in models if m.get("status") == "candidate"]
-        selected = max(candidates, key=lambda m: str(m.get("trained_at") or ""), default=None)
-    model_id = str((selected or {}).get("id") or "boat-win-lgbm-v1")
+        raise RuntimeError("no active model in authoritative local registry; candidate models are evaluation-only")
+    model_id = str(selected["id"])
     artifact = artifact_dir / f"{model_id}.pkl"
     if not artifact.is_file():
         raise FileNotFoundError(f"model artifact not found: {artifact}; restore ml/artifacts cache or run train first")
     race_map = {r["id"]: r for r in rows.get("races", [])
-                if r.get("sport") == "boat" and r.get("race_date") == day}
+                if r.get("sport") == "boat" and r.get("race_date") == day
+                and r.get("data_origin") == "real"}
     grouped: dict[str, list[dict[str, Any]]] = {}
+    cutoff_dt = _coerce_dt(cutoff)
     for entry in rows.get("entries", []):
         rid = entry.get("race_id")
-        if rid in race_map:
-            grouped.setdefault(str(rid), []).append({**entry,
-                "wind_speed": race_map[rid].get("wind_speed"), "wave_height": race_map[rid].get("wave_height")})
-    entries = [dict(entry, **feature) for rid, group in grouped.items()
+        race = race_map.get(rid)
+        post_time = _coerce_dt(str(race["post_time"])) if race and race.get("post_time") else None
+        if (race and entry.get("data_origin") == "real"
+                and race.get("status") not in {"finished", "closed", "cancelled"}
+                and post_time and post_time > cutoff_dt):
+            grouped.setdefault(str(rid), []).append(dict(entry))
+    from edgelab.features.boat import FEATURE_COLUMNS
+    entries = [{**{k: v for k, v in entry.items() if k not in FEATURE_COLUMNS}, **feature}
+               for rid, group in grouped.items()
                for entry, feature in zip(group, build_boat_features(group, race_date=day, predicted_at=cutoff))]
     predictions = predict_rows(entries, load_artifact(artifact), predicted_at=cutoff)
     # Deterministic natural keys make reruns idempotent.
@@ -65,6 +89,9 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     previous = (target - timedelta(days=1)).isoformat()
     collect_boat(previous, day)
     rows = load_rows()
+    from edgelab.sync import fetch_model_registry
+    registry = fetch_model_registry()
+    _apply_model_registry(rows, registry)
     # Stable run identifiers prevent duplicate collection-run writes on retries.
     daily_run_by_date = {}
     other_runs = []
@@ -77,7 +104,14 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         run["id"] = f"daily-boat-{run_day}"
         other_runs.append(run)
     rows["collection_runs"] = other_runs
-    predictions = _predict_boat_date(rows, day, cutoff)
+    prediction_error = None
+    try:
+        predictions = _predict_boat_date(rows, day, cutoff)
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        # A missing/legacy active artifact blocks inference only; daily data
+        # collection, sync, and feedback must continue for recovery.
+        predictions = []
+        prediction_error = f"{type(exc).__name__}: {exc}"
     save_rows(rows)
     prev_ids = {r.get("id") for r in rows.get("races", []) if r.get("race_date") == previous}
     today_ids = {r.get("id") for r in rows.get("races", []) if r.get("race_date") == day}
@@ -106,15 +140,20 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
                                 database="roi-plus")
     except Exception as exc:
         backfill = {"skipped": True, "reason": f"{type(exc).__name__}: {exc}"}
+    from edgelab.learning import score_feedback
+    learning_report = score_feedback(rows)
     return {"date": day, "cutoff": cutoff, "collected_dates": [previous, day],
-            "predictions": len(predictions), "sync": synced, "backfill": backfill}
+            "predictions": len(predictions), "sync": synced, "backfill": backfill,
+            "feedback_models": len(learning_report["models"]), "prediction_error": prediction_error}
 
 
 def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str) -> list[dict[str, Any]]:
     outcomes = {(row.get("race_id"), row.get("number")): row.get("finish_order")
-                for row in store.get("results", [])}
-    races = {row.get("id"): row for row in store.get("races", []) if row.get("sport") == sport}
-    entries = [row for row in store.get("entries", []) if row.get("race_id") in races]
+                for row in store.get("results", []) if row.get("data_origin") == "real"}
+    races = {row.get("id"): row for row in store.get("races", [])
+             if row.get("sport") == sport and row.get("data_origin") == "real"}
+    entries = [row for row in store.get("entries", [])
+               if row.get("race_id") in races and row.get("data_origin") == "real"]
     if sport == "boat":
         from edgelab.features.boat import build_boat_features
         grouped: dict[str, list[dict[str, Any]]] = {}
@@ -123,19 +162,41 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str) -> l
         enriched = []
         for race_id, group in grouped.items():
             race = races[race_id]
+            # Historical training uses B-file base features only. K-file exhibition
+            # and weather fields are not assumed safe just because B availability is known.
             features = build_boat_features(group, race_date=race["race_date"])
-            enriched.extend({**entry, **feature} for entry, feature in zip(group, features))
+            from edgelab.features.boat import FEATURE_COLUMNS
+            enriched.extend({**{k: v for k, v in entry.items() if k not in FEATURE_COLUMNS}, **feature}
+                            for entry, feature in zip(group, features))
         entries = enriched
+    cohort_ids = set()
+    by_race: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        by_race.setdefault(str(entry.get("race_id")), []).append(entry)
+    for race_id, group in by_race.items():
+        race = races.get(race_id)
+        post = race.get("post_time") if race else None
+        timestamp = _coerce_dt(str(post)) if post else None
+        numbers = {int(e["number"]) for e in group if e.get("number") is not None}
+        results = {int(n): outcomes.get((race_id, n)) for n in numbers}
+        if (race and race.get("status") == "finished" and timestamp and numbers
+                and set(results) == numbers and all(v is not None for v in results.values())
+                and len({str(v) for v in results.values()}) == len(results)
+                and sum(1 for v in results.values() if str(v) == "1") == 1
+                and all(__import__("edgelab.normalization.availability", fromlist=["available_by"])
+                        .available_by(e, timestamp.isoformat()) for e in group)):
+            cohort_ids.add(race_id)
     result = []
     for entry in entries:
         race = races[entry["race_id"]]
+        if str(entry.get("race_id")) not in cohort_ids:
+            continue
         finish = outcomes.get((entry["race_id"], entry.get("number")))
         if finish is None:
             continue
         row = {**entry, "race_date": race.get("race_date"),
-               "wind_speed": race.get("wind_speed"), "wave_height": race.get("wave_height"),
                "finish_order": finish,
-               "winner": finish == 1, "target": finish == 1}
+               "winner": str(finish) == "1", "target": str(finish) == "1"}
         post_time = race.get("post_time")
         if post_time:
             try:
@@ -281,6 +342,8 @@ def _parser() -> argparse.ArgumentParser:
     daily = sub.add_parser("daily", help="run the idempotent daily boat pipeline")
     daily.add_argument("--date", default=None, help="JST date (defaults to today)")
     daily.add_argument("--now", help="ISO timestamp cutoff (defaults to current time)")
+    sub.add_parser("feedback", help="score saved real predictions against completed outcomes")
+    sub.add_parser("learn", help="train/evaluate a candidate after enough new real outcomes")
     return parser
 
 
@@ -312,6 +375,56 @@ def main(argv: list[str] | None = None) -> int:
                           max_requests=args.max_requests)
         print(json.dumps(result, ensure_ascii=False))
         return 0
+    if args.command == "feedback":
+        from edgelab.learning import score_feedback
+        report = score_feedback(load_rows())
+        print(json.dumps({"report": "ml/data/learning/report.json",
+                          "models": len(report["models"])}, ensure_ascii=False))
+        return 0
+    if args.command == "learn":
+        from edgelab.learning import guarded_candidate, score_feedback
+        from edgelab.sync import fetch_model_registry, sync_rows
+        rows = load_rows()
+        registry = fetch_model_registry()
+        authoritative_ids = _apply_model_registry(rows, registry)
+        training_rows = _make_training_rows(rows, "boat")
+        digest = hashlib.sha256("|".join(sorted({str(r.get("race_id")) for r in training_rows})).encode()).hexdigest()[:8]
+        model_id = f"boat-win-lgbm-{datetime.now(timezone.utc):%Y%m%d}-{digest}"
+        result = guarded_candidate(rows, training_rows, model_id=model_id,
+                                  authoritative_model_ids=authoritative_ids)
+        if result.get("status") == "candidate":
+            # guarded_candidate already wrote this unique artifact; reproduce only the metadata row.
+            metadata = json.loads((Path("ml/artifacts") / f"{model_id}.json").read_text(encoding="utf-8"))
+            metadata.setdefault("metrics", {})["promotionEligible"] = bool(result.get("promotionEligible"))
+            if not result.get("promotionEligible"):
+                metadata["metrics"]["promotionReason"] = result.get("promotionReason") or "no eligible incumbent comparison"
+            (Path("ml/artifacts") / f"{model_id}.json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+            model_row = {"id": model_id, "sport": "boat", "bet_type": "win", "version": metadata.get("version", "v1"),
+                         "algorithm": metadata.get("algorithm", "LightGBM"), "status": "candidate",
+                         "train_from": metadata.get("trainFrom"), "train_to": metadata.get("trainTo"),
+                         "valid_from": metadata.get("validFrom"), "valid_to": metadata.get("validTo"),
+                         "test_from": metadata.get("testFrom"), "test_to": metadata.get("testTo"),
+                         "n_train": metadata.get("nTrain", 0), "metrics_json": json.dumps(metadata.get("metrics", {})),
+                         "trained_at": metadata.get("trainedAt"), "notes": "guarded unattended candidate; manual promotion only"}
+            merge_rows(rows, {"models": [model_row]})
+            save_rows(rows)
+            sync_rows({"models": [model_row]})
+            from edgelab.learning import LEARNING_STATE, _atomic_json
+            _atomic_json(LEARNING_STATE, {"version": 1, "trainedRaceIds": result.get("evaluatedRaceIds", []),
+                                          "lastModelId": model_id, "updatedAt": datetime.now(timezone.utc).isoformat()})
+        elif result.get("status") == "existing_registered_id":
+            # Recover state if an earlier run synced successfully but was interrupted before checkpoint.
+            registered = next((m for m in rows.get("models", []) if m.get("id") == model_id), None)
+            if registered and registered.get("status") == "candidate":
+                from edgelab.learning import LEARNING_STATE, _atomic_json
+                _atomic_json(LEARNING_STATE, {"version": 1, "trainedRaceIds": result.get("evaluatedRaceIds", []),
+                                              "lastModelId": model_id, "updatedAt": datetime.now(timezone.utc).isoformat()})
+        report = {"learning": result, "feedback": score_feedback(rows)}
+        from edgelab.learning import _atomic_json
+        _atomic_json(Path("ml/data/learning/report.json"), report)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     if args.command == "sync":
         from edgelab.sync import sync_rows
         rows = load_rows()
@@ -327,8 +440,11 @@ def main(argv: list[str] | None = None) -> int:
         from edgelab.models.train import train_model
         rows = load_rows()
         training_rows = _make_training_rows(rows, args.sport)
+        dates = sorted({str(r.get("race_date")) for r in training_rows if r.get("race_date")})
+        fingerprint = hashlib.sha256("|".join(dates + sorted({str(r.get("race_id")) for r in training_rows})).encode()).hexdigest()[:8]
+        model_id = f"{args.sport}-win-lgbm-{datetime.now(timezone.utc):%Y%m%d}-{fingerprint}"
         result = train_model(training_rows, sport=args.sport,
-                             model_id=f"{args.sport}-win-lgbm-v1")
+                             model_id=model_id)
         model_row = {
             "id": result["id"], "sport": result.get("sport", args.sport),
             "bet_type": result.get("betType", "win"), "version": result.get("version", "v1"),
@@ -348,29 +464,41 @@ def main(argv: list[str] | None = None) -> int:
         from edgelab.predict import load_artifact, predict_rows
         rows = load_rows()
         race_ids = {race["id"] for race in rows.get("races", [])
-                    if race.get("sport") == args.sport and race.get("race_date") == args.date}
-        entries = [entry for entry in rows.get("entries", []) if entry.get("race_id") in race_ids]
+                    if race.get("sport") == args.sport and race.get("race_date") == args.date
+                    and race.get("data_origin") == "real"}
+        entries = [entry for entry in rows.get("entries", [])
+                   if entry.get("race_id") in race_ids and entry.get("data_origin") == "real"]
         if args.sport == "boat":
             from edgelab.features.boat import build_boat_features
             race_by_id = {race["id"]: race for race in rows.get("races", []) if race.get("id") in race_ids}
-            entries = [{**entry,
-                        "wind_speed": race_by_id.get(entry.get("race_id"), {}).get("wind_speed"),
-                        "wave_height": race_by_id.get(entry.get("race_id"), {}).get("wave_height")}
-                       for entry in entries]
+            entries = [dict(entry) for entry in entries]
             by_race: dict[str, list[dict[str, Any]]] = {}
             for entry in entries:
                 by_race.setdefault(str(entry["race_id"]), []).append(entry)
+            from edgelab.features.boat import FEATURE_COLUMNS
             entries = [
-                {**entry, **feature}
+                {**{k: v for k, v in entry.items() if k not in FEATURE_COLUMNS}, **feature}
                 for race_id, group in by_race.items()
                 for feature, entry in zip(build_boat_features(
                     group, race_date=args.date, predicted_at=args.cutoff or _now()), group)
             ]
-        artifact = Path("ml/artifacts") / f"{args.sport}-win-lgbm-v1.pkl"
+        active = next((m for m in rows.get("models", [])
+                       if m.get("sport") == args.sport and m.get("status") == "active"), None)
+        if active is None:
+            raise RuntimeError("no active model in local registry; candidate models are evaluation-only")
+        artifact = Path("ml/artifacts") / f"{active['id']}.pkl"
         predicted_at = args.cutoff or _now()
         if not artifact.is_file():
             raise FileNotFoundError(f"model artifact not found: {artifact}; run train first")
-        predictions = predict_rows(entries, load_artifact(artifact), predicted_at=predicted_at)
+        eligible = []
+        race_lookup = {r["id"]: r for r in rows.get("races", []) if r.get("id") in race_ids}
+        cutoff_dt = _coerce_dt(str(predicted_at))
+        for entry in entries:
+            race = race_lookup.get(entry.get("race_id")) or {}
+            post = _coerce_dt(str(race["post_time"])) if race.get("post_time") else None
+            if race.get("status") not in {"finished", "closed", "cancelled"} and post and post > cutoff_dt:
+                eligible.append(entry)
+        predictions = predict_rows(eligible, load_artifact(artifact), predicted_at=predicted_at)
         merge_rows(rows, {"predictions": predictions})
         save_rows(rows)
         print(f"predictions: {len(predictions)}")

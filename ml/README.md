@@ -22,9 +22,15 @@ ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab li
 リクエスト間隔は最低3秒とします。同一レースの直近10分以内の取得と確定オッズは
 再取得しません。運営負荷を避け、定期実行は10分間隔を超えて頻繁に行わないでください。
 
-GitHub Actions の `daily.yml` は毎日 07:30/23:30 JST に日次収集・推論・差分同期・
-可能な場合の履歴 backfill を実行します。`retrain.yml` は週次で再学習し、候補
-モデル行を同期しますが、自動昇格しません。必要な Actions secrets:
+GitHub Actions の `daily.yml` は日次収集・推論・差分同期・可能な場合の履歴
+backfill と保存予測の feedback scoring を行います。`retrain.yml` は週次に
+`python -m edgelab learn` を実行し、新しい完了実データが30レース以上ある場合に
+限り別IDの候補artifactを作成・同一 temporal holdout で評価します。比較不能・
+非改善の候補は `metrics_json.promotionEligible=false` になり、手動昇格も拒否されます。
+どのActionも自動昇格しません。日次は認証済みモデルレジストリからactive IDを
+読み、artifact欠損・旧late-feature列の場合は推論だけを止めて結果収集/同期を続けます。
+feedback artifactは各Actionの `learning-feedback-*` / `learning-report-*` として保存されます。
+必要な Actions secrets:
 
 - `EDGELAB_API_URL`: ingest API のベース URL
 - `INGEST_TOKEN`: ingest API bearer token
@@ -61,6 +67,19 @@ EDGELAB_API_URL=http://127.0.0.1:8787 INGEST_TOKEN='<.dev.vars と同じ値>' PY
 ```sh
 ml/.venv/bin/python -m pytest ml/tests -q
 ```
+
+ローカル保存予測の採点は network-free です:
+
+```sh
+PYTHONPATH=ml ml/.venv/bin/python -m edgelab feedback
+```
+
+レポートは `ml/data/learning/report.json`、replay-safe な採点記録と学習checkpointは
+`ml/data/learning/` に保存されます。実データ・全艇の結果・完全な事前予測cohort・
+安全なartifact feature schemaを検証できない予測は除外します。旧v1の遅い特徴列を
+使った可能性がある履歴は採点対象にしません。ROIは事前の実オッズと記録済み勝者払戻を
+使う counterfactual replay で、実購入や本番auto-betの利益を証明しません。詳細は
+[docs/LEARNING.md](../docs/LEARNING.md)。
 
 ユーザー提供の競馬 CSV のみを取り込みます。サンプルの競馬データは同梱・生成
 しません。予測・払戻・オッズ等、ソースで得られない値は欠損として残します。

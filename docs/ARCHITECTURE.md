@@ -34,7 +34,7 @@ GitHub Actions / ローカル Python (ml/)
 
 ### API の主な面
 
-`GET /api/races`, `/api/races/:id`, `/api/rankings`, `/api/bets`, `/api/performance/*`, `/api/models`, `/api/collection/status` が読み取り面。`POST /api/bets` は仮想単勝、`POST /api/models/:id/promote|rollback` はモデル管理、`POST /api/ingest/{venues,races,entries,results,payouts,odds,predictions,models,collection-runs}` は Python 等からの冪等同期。`POST /api/admin/settle` は認証付き精算操作。多くの読み取り API は `origin=sample|real|all` で出所を絞れる。実際の入出力契約は `apps/api/src/index.ts` と `packages/shared/src/types.ts` が根拠。
+`GET /api/races`, `/api/races/:id`, `/api/rankings`, `/api/bets`, `/api/performance/*`, `/api/models`, `/api/collection/status` が読み取り面。`GET /api/ingest/models` は `INGEST_TOKEN` 認証付きのモデルレジストリ読み取りで、Pythonが人手昇格後の状態を確認する。`POST /api/bets` は仮想単勝、`POST /api/models/:id/promote|rollback` はモデル管理、`POST /api/ingest/{venues,races,entries,results,payouts,odds,predictions,models,collection-runs}` は Python 等からの冪等同期。`POST /api/admin/settle` は認証付き精算操作。多くの読み取り API は `origin=sample|real|all` で出所を絞れる。実際の入出力契約は `apps/api/src/index.ts` と `packages/shared/src/types.ts` が根拠。
 
 ## AI・データフロー
 
@@ -42,8 +42,10 @@ GitHub Actions / ローカル Python (ml/)
 2. `features/` は許可した数値特徴量だけを作る。`available_at <= predicted_at` と同日・未来情報の除外を検査する。結果／払戻などを特徴量に混入させないため、特徴量列は allowlist で制限される。
 3. `ml/edgelab/models/train.py` は時系列で train / validation / test を分割して LightGBM を学習し、検証データで温度校正する。レース単位 bootstrap の出力ばらつきが `prob_std`。十分なデータがない場合は暗黙に代替モデルを使わず `untrained` とする。成果物は `ml/artifacts/`。
 4. `ml/edgelab/predict.py` は確率と不確実性を出し、`ml/edgelab/sync.py` が 500 行以下のチャンクで ingest API へ送る。Worker は予測を再計算せず、`packages/shared/src/ev.ts` の規則に沿う評価・候補表示と仮想運用を行う。
-5. 日次 Action の `python -m edgelab daily` は前日・当日の B/K 収集、当日の予測、同期を行い、その後に履歴 backfill を試みる。予測には active モデルがあればそれを使い、なければ最新 candidate を選ぶ。対応する artifact がない場合は fail closed する。
-6. 週次 Action は `python -m edgelab train --sport boat` とモデル行の同期のみ。候補モデルの本番昇格・ロールバックは人が画面/APIから行う。
+5. 日次 Action の `python -m edgelab daily` は前日・当日の B/K 収集、当日の予測、同期を行い、その後に履歴 backfill と実データのフィードバック採点を行う。予測は認証付きレジストリで確認した active モデルだけを使い、candidateを稼働モデルの代わりにはしない。対応する artifact がない・後日情報の特徴列を持つ場合は推論を停止し、結果同期とフィードバックは継続する。
+6. 週次 Action の `python -m edgelab learn` は新規完了レースの増分を確認し、別IDの候補モデルを再学習する。同じ時間順holdout上で比較できる安全な稼働モデルとの比較を記録し、`promotionEligible=false` の候補は画面・APIとも昇格を拒否する。holdoutは週次評価で再利用されるため、独立した最終的な利益の証明とはしない。候補モデルの本番昇格・ロールバックは人が画面/APIから行う。
+
+ボートの新規学習・推論入力は、生成したBファイル由来の事前特徴量に限定し、元の出走行から後日取得の展示・ST・気象を再混入させない。旧v1は互換性検査で除外する。`ml/edgelab/learning.py` の採点は、実データ・全艇の予測と結果・締切前時刻がそろうコホートを対象とする。オッズを用いた仮想リプレイと実際の仮想購入履歴の成績は区別する。詳細と不足条件は [LEARNING](LEARNING.md)、既存モデルの監査結果は [EV_AUDIT](EV_AUDIT.md) を参照。
 
 Worker の `*/10 * * * *` Cron は、オッズ収集フラグが有効なら対象レースの公式単勝オッズを取得し、open bet 精算、自動**仮想**購入、古いオッズ削除を順に行う。実装上、オッズ取得には締切前の時間窓、最大リクエスト数、間隔、重複防止ロックがある。許諾・本番の設定状態はコードだけでは確認できない。
 
@@ -52,6 +54,8 @@ Worker の `*/10 * * * *` Cron は、オッズ収集フラグが有効なら対�
 - 初期値は `initial_bankroll=100000` 円、`unit_stake=100` 円。どちらも D1 の `settings` で管理される。
 - 手動・自動とも単勝の仮想 bet のみ。手動 bet は正の `unit_stake` 倍数、自動 bet は1単位を stake にする。投票サイトや決済には接続しない。
 - 自動購入は Worker の `ENABLE_AUTO_BET=true` または D1 `auto_bet_enabled=true` のどちらかで有効になる。最新予測のモデルが `active` で、オッズがあり、`min_expected_roi`（初期値 0.05）以上かつ `HIGH_EDGE` / `POSITIVE_EDGE` 判定の候補だけを対象とする。`max_prob_std`（初期値 0.05）を超える予測は edge 判定で除外される。週次学習で作られた `candidate` モデルは自動購入に使われない。
+- 手動・自動の購入は、利用可能なactive予測と10分以内のオッズ、解析可能な未来の締切時刻を要求する。締切後・未来の予測やオッズを候補に使わず、異なるUTCオフセットはSQLiteの時刻変換で比較する。出走・予測・オッズ・結果の出所はレースと一致させる。これは収益保証ではなく、誤った時点の判断を防ぐ追加ガード。
+- モデルingestはactive/retired行の状態・評価を上書きしない。古い番組表を再同期してもfinished/cancelledレースをscheduledに戻さない。
 - bet を挿入する SQL 自体が利用可能額を条件にする。利用可能額は `初期 bankroll + 確定 bet の profit 合計 - open bet の stake 合計`。判定と挿入を同じ SQL 文で行い、同時実行で残高上限をすり抜けないようにしている。自動 bet はさらにレースごとの一意制約で重複を防ぐ。
 - `/performance/overview` の `bankroll` は確定分の損益だけを初期値に加えた表示で、open bet の stake を差し引いた「今すぐ使える額」とは別。利用可能額の判定根拠は `apps/api/src/index.ts` の `availableBankrollSql`。
 - `void` は払戻 0・profit 0 で精算される。open stake は精算まで利用可能額から控除される。
@@ -69,7 +73,8 @@ Worker の `*/10 * * * *` Cron は、オッズ収集フラグが有効なら対�
 ## GitHub Actions と変数名
 
 - `.github/workflows/daily.yml`: cron は UTC `00:30`, `02:00`, `04:00`, `14:30`（JST 09:30, 11:00, 13:00, 23:30）と手動実行。朝の複数回は GitHub schedule の遅延・欠落に備える。Python 3.12 / Node 20 で日次 pipeline を実行する。
-- `.github/workflows/retrain.yml`: 毎週月曜 UTC `02:41`（JST 11:41）と手動実行。boat モデルを学習し、`models` 行だけを同期する。
+- `.github/workflows/retrain.yml`: 毎週月曜 UTC `02:41`（JST 11:41）と手動実行。boat の候補学習と比較を行い、候補の `models` 行だけを同期する。
+- 両workflowは学習state/cacheの競合を避ける共通concurrency groupを使う。`ml/data` と `ml/artifacts` をcacheで持ち越し、採点・学習レポートをActions artifactへ保存する。外部サービスのスケジュール実行は常時稼働や実行時刻を保証しない。
 - Actions Secret 名は `EDGELAB_API_URL`, `INGEST_TOKEN`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`。値、アカウント ID の実値、ローカル保管場所は文書・ログ・チャットに書かない。Cloudflare Access の設定や Worker Secret はコード外で管理する。
 
 ## 開発・テスト・デプロイ

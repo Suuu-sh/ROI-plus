@@ -5,6 +5,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: boat-learning-state
+  cancel-in-progress: false
 jobs:
   retrain:
     runs-on: ubuntu-latest
@@ -35,11 +38,18 @@ jobs:
           key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
           restore-keys: |
             daily-${{ runner.os }}-
-      - name: Train and sync candidate model
+      - name: Clear stale report
+        run: rm -f ml/data/learning/report.json
+      - name: Guarded learning and sync
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
-        run: |
-          python -m edgelab train --sport boat
-          python -m edgelab sync --tables models
+        run: python -m edgelab learn
+      - name: Archive learning report
+        if: always() && hashFiles('ml/data/learning/report.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: learning-report-${{ github.run_id }}
+          path: ml/data/learning/report.json
+          if-no-files-found: ignore

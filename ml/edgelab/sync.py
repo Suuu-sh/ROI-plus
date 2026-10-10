@@ -23,6 +23,26 @@ ENDPOINTS = {
 SEND_ORDER = ("venues", "races", "entries", "results", "payouts", "odds_snapshots", "models", "predictions", "collection_runs")
 
 
+def fetch_model_registry(*, base_url: str | None = None, token: str | None = None) -> list[dict[str, Any]]:
+    """Read authoritative model lifecycle state; this never writes remote data."""
+    base_url = (base_url or os.environ.get("EDGELAB_API_URL", "")).rstrip("/")
+    token = token or os.environ.get("INGEST_TOKEN", "")
+    if not base_url or not token:
+        raise RuntimeError("EDGELAB_API_URL and INGEST_TOKEN are required")
+    req = Request(f"{base_url}/api/ingest/models", headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/json",
+        "User-Agent": "EdgeLab-ML/0.1"}, method="GET")
+    try:
+        with urlopen(req, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        raise RuntimeError(f"model registry read failed: {type(exc).__name__}") from exc
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        raise RuntimeError("model registry response has no models array")
+    return [row for row in models if isinstance(row, dict)]
+
+
 def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False,
               output_dir: str | Path = "ml/outbox", base_url: str | None = None,
               token: str | None = None) -> dict[str, Any]:

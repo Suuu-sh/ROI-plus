@@ -10,6 +10,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: boat-learning-state
+  cancel-in-progress: false
 jobs:
   daily:
     runs-on: ubuntu-latest
@@ -40,6 +43,8 @@ jobs:
           key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
           restore-keys: |
             daily-${{ runner.os }}-
+      - name: Clear stale report
+        run: rm -f ml/data/learning/report.json
       - name: Initialize backfill state
         run: |
           if [ ! -f ml/data/backfill_state.json ]; then
@@ -71,3 +76,10 @@ jobs:
       - name: Mark success
         if: success() && steps.guard.outputs.skip != 'true'
         run: touch "ml/data/daily_ok_$(TZ=Asia/Tokyo date +%F)"
+      - name: Archive learning feedback report
+        if: always() && hashFiles('ml/data/learning/report.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: learning-feedback-${{ github.run_id }}
+          path: ml/data/learning/report.json
+          if-no-files-found: ignore
