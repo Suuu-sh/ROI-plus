@@ -16,6 +16,12 @@ beforeEach(()=>{
  sqlite.exec(readFileSync(resolve(root,'db/seed/sample.sql'),'utf8'));
 });
 afterEach(()=>sqlite.close());
+const addBetInputs=(raceId:string,prefix:string)=>{
+ const entry=sqlite.prepare('SELECT number FROM entries WHERE race_id=? ORDER BY number LIMIT 1').get(raceId) as {number:number};
+ sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES(?,?,'win',?,10,?,'test','sample')").run(`${prefix}-odds`,raceId,String(entry.number),jstIso(Date.now()-5000));
+ sqlite.prepare("INSERT INTO predictions(id,race_id,model_id,number,probability,prob_std,predicted_at,data_origin) VALUES(?,?,'boat-active',?,0.5,0.01,?,'sample')").run(`${prefix}-prediction`,raceId,entry.number,jstIso(Date.now()-10000));
+ return String(entry.number);
+};
 describe('EdgeLab API',()=>{
  it('health and date-filtered sample races respond',async()=>{
   expect((await app.request('/api/health',{},env())).status).toBe(200);
@@ -94,6 +100,43 @@ describe('EdgeLab API',()=>{
   sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,popularity,data_origin) VALUES(?,'win',?,450,1,'sample')").run(race.id,String(entry.number));
   expect(await settleOpen(DB)).toBe(1);
   const settled=sqlite.prepare('SELECT * FROM bets WHERE id=?').get(bet.id) as any;expect(settled.status).toBe('won');expect(settled.payout).toBe(450);expect(settled.profit).toBe(350);expect(settled.final_odds).toBe(4.5);
+ });
+ it('auto bets reserve available bankroll and stop at the cap, including existing open stakes',async()=>{
+  sqlite.exec('DELETE FROM bets');
+  sqlite.prepare("UPDATE settings SET value='200' WHERE key='initial_bankroll'").run();
+  const races=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 2").all() as {id:string}[];
+  expect(races).toHaveLength(2);
+  for(const [i,race] of races.entries())addBetInputs(race.id,`auto-cap-${i}`);
+  sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES('existing-open',?,'boat','win','99',100,'manual','INSUFFICIENT_DATA',?,'open','sample')").run(races[0].id,jstIso());
+
+  expect(await autoBet(DB,true)).toBe(1);
+  expect(await autoBet(DB,true)).toBe(0);
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE mode='auto' AND status='open'").get()).toMatchObject({n:1});
+  expect(sqlite.prepare("SELECT SUM(stake) stake FROM bets WHERE status='open'").get()).toMatchObject({stake:200});
+ });
+ it('manual placement rejects a stake that would exceed bankroll after open stakes',async()=>{
+  sqlite.exec('DELETE FROM bets');
+  sqlite.prepare("UPDATE settings SET value='200' WHERE key='initial_bankroll'").run();
+  const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 1").get() as {id:string};
+  const selection=addBetInputs(race.id,'manual-cap');
+  sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES('manual-existing-open',?,'boat','win','99',100,'manual','INSUFFICIENT_DATA',?,'open','sample')").run(race.id,jstIso());
+  const response=await app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId:race.id,betType:'win',selection,stake:200})},env());
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({error:'insufficient bankroll'});
+  expect(sqlite.prepare("SELECT SUM(stake) stake FROM bets WHERE status='open'").get()).toMatchObject({stake:100});
+ });
+ it('manual bankroll reservation is atomic across concurrent placements',async()=>{
+  sqlite.exec('DELETE FROM bets');
+  sqlite.prepare("UPDATE settings SET value='100' WHERE key='initial_bankroll'").run();
+  const races=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 2").all() as {id:string}[];
+  expect(races).toHaveLength(2);
+  const requests=races.map((race,i)=>{
+   const selection=addBetInputs(race.id,`manual-race-${i}`);
+   return app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId:race.id,betType:'win',selection,stake:100})},env());
+  });
+  const responses=await Promise.all(requests);
+  expect(responses.map(response=>response.status).sort()).toEqual([201,400]);
+  expect(sqlite.prepare("SELECT SUM(stake) stake FROM bets WHERE status='open'").get()).toMatchObject({stake:100});
  });
  it('settles unmatched bets as lost and cancelled-race bets as void',async()=>{
   const races=sqlite.prepare("SELECT id,status FROM races WHERE data_origin='sample' AND sport='boat' AND status='scheduled' LIMIT 2").all() as any[];

@@ -27,6 +27,9 @@ const jsonError = (c: any, message: string, status = 400) => c.json({ error: mes
 async function setting(db: Db, key: string, fallback: string): Promise<string> {
   return (await first<{value:string}>(db, 'SELECT value FROM settings WHERE key=?', key))?.value ?? fallback;
 }
+const availableBankrollSql = `(COALESCE((SELECT CAST(value AS REAL) FROM settings WHERE key='initial_bankroll'), 100000)
+  + COALESCE((SELECT SUM(CASE WHEN status IN ('won','lost') THEN profit ELSE 0 END) FROM bets), 0)
+  - COALESCE((SELECT SUM(CASE WHEN status='open' THEN stake ELSE 0 END) FROM bets), 0))`;
 function auth(c: any) { const token = c.env.INGEST_TOKEN; return !!token && c.req.header('Authorization') === `Bearer ${token}`; }
 function parseList(body: unknown): Record<string, unknown>[] | null {
   const rows = Array.isArray(body) ? body : body && typeof body === 'object' && Array.isArray((body as any).items) ? (body as any).items : null;
@@ -111,7 +114,10 @@ async function autoBet(db: Db, enabled: boolean) {
     const result = candidate(x.probability,x.odds,x.prob_std,x.model_status,maxStd);
     if (!x.odds || !result.expectedRoi || result.expectedRoi < minRoi || !['HIGH_EDGE','POSITIVE_EDGE'].includes(result.edge)) continue;
     const id=betId();
-    const inserted=await run(db, `INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin) VALUES(?,?,?,'win',?,?,'auto',?,?,?,?,?,?,'open',?) ON CONFLICT(race_id) WHERE mode='auto' DO NOTHING`, id,x.race_id,x.sport,String(x.number),cfg,x.probability,x.odds,result.expectedRoi,result.edge,x.model_id,now(),x.data_origin);
+    const inserted=await run(db, `INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin)
+      SELECT ?,?,?, 'win', ?,?,'auto',?,?,?,?,?,?,'open',?
+      WHERE ${availableBankrollSql} >= ?
+      ON CONFLICT(race_id) WHERE mode='auto' DO NOTHING`, id,x.race_id,x.sport,String(x.number),cfg,x.probability,x.odds,result.expectedRoi,result.edge,x.model_id,now(),x.data_origin,cfg);
     if (inserted.meta?.changes) n++;
   }
   return n;
@@ -165,10 +171,13 @@ app.post('/bets',async c=>{
  const pred=await first<any>(db,`SELECT p.*,m.status model_status FROM predictions p JOIN models m ON m.id=p.model_id WHERE p.race_id=? AND p.number=? AND p.predicted_at<=? ORDER BY p.predicted_at DESC LIMIT 1`,body.raceId,entry.number,now());
  const odd=await first<any>(db,`SELECT * FROM odds_snapshots WHERE race_id=? AND bet_type='win' AND selection=? AND captured_at<=? ORDER BY captured_at DESC LIMIT 1`,body.raceId,body.selection,now());
  if(odd?.odds===null||odd?.odds===undefined)return jsonError(c,'odds are unavailable');
- const bankroll=Number(await setting(db,'initial_bankroll','100000')), totals=await first<any>(db,"SELECT COALESCE(SUM(CASE WHEN status IN ('won','lost') THEN profit ELSE 0 END),0) profit,COALESCE(SUM(CASE WHEN status='open' THEN stake ELSE 0 END),0) open_stake FROM bets"); if(bankroll+totals.profit-totals.open_stake<body.stake)return jsonError(c,'insufficient bankroll');
  const maxStd=Number(await setting(db,'max_prob_std','0.05')), x=candidate(pred?.probability??null,odd?.odds??null,pred?.prob_std??null,pred?.model_status??null,maxStd);
  const bet={id:betId(),race_id:race.id,sport:race.sport,bet_type:'win',selection:body.selection,stake:body.stake,mode:'manual',predicted_prob:pred?.probability??null,odds_at_bet:odd?.odds??null,expected_roi:x.expectedRoi,edge_label:x.edge,model_id:pred?.model_id??null,placed_at:now(),status:'open',data_origin:race.data_origin};
- await run(db,'INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',...Object.values(bet)); return c.json(mapBet(bet),201);
+ const inserted=await run(db,`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin)
+   SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+   WHERE ${availableBankrollSql} >= ?`,...Object.values(bet),body.stake);
+ if(!inserted.meta?.changes)return jsonError(c,'insufficient bankroll');
+ return c.json(mapBet(bet),201);
 });
 function mapBet(b:any){return {id:b.id,raceId:b.race_id,sport:b.sport,betType:b.bet_type,selection:b.selection,stake:b.stake,mode:b.mode,predictedProb:b.predicted_prob,oddsAtBet:b.odds_at_bet,expectedRoi:b.expected_roi,edgeLabel:b.edge_label,modelId:b.model_id,placedAt:b.placed_at,status:b.status,payout:b.payout??null,profit:b.profit??null,finalOdds:b.final_odds??null,settledAt:b.settled_at??null,dataOrigin:b.data_origin};}
 app.get('/bets',async c=>{const sport=c.req.query('sport'),status=c.req.query('status'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');const rows=await all<any>(c.env.DB,`SELECT b.*,v.name venue_name,r.race_no FROM bets b JOIN races r ON r.id=b.race_id JOIN venues v ON v.id=r.venue_id WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.status=?) AND (? IS NULL OR b.data_origin=?) ORDER BY b.placed_at DESC`,sport||null,sport||null,status||null,status||null,origin,origin);return c.json(rows.map(b=>({...mapBet(b),venueName:b.venue_name,raceNo:b.race_no})));});

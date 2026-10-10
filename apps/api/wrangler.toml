@@ -12,5 +12,5 @@ migrations_dir = "../../db/migrations"
 crons = ["*/10 * * * *"]
 
 [vars]
-ENABLE_AUTO_BET = "false"
+ENABLE_AUTO_BET = "true"
 ENABLE_BOATRACE_ODDS_SCRAPE = "true"
