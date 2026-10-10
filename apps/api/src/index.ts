@@ -98,11 +98,31 @@ async function ingest(c: any, name: string) {
   return c.json({ upserted: rows.length });
 }
 async function settleOpen(db: Db) {
-  const bets = await all<any>(db, `SELECT b.*, r.status AS race_status FROM bets b JOIN races r ON r.id=b.race_id WHERE b.status='open' AND r.status IN ('finished','cancelled')`);
+  const bets = await all<any>(db, `SELECT b.*, r.status AS race_status, r.data_origin AS race_origin FROM bets b JOIN races r ON r.id=b.race_id WHERE b.status='open' AND r.status IN ('finished','cancelled') AND b.data_origin=r.data_origin`);
   let settled = 0;
   for (const b of bets) {
     if (b.race_status === 'cancelled') { await run(db, `UPDATE bets SET status='void',payout=0,profit=0,settled_at=? WHERE id=?`, now(), b.id); settled++; continue; }
-    const pay = await first<any>(db, 'SELECT payout FROM payouts WHERE race_id=? AND bet_type=? AND selection=?', b.race_id, b.bet_type, b.selection);
+    const integrity = await first<any>(db, `SELECT
+      (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin=?) entry_count,
+      (SELECT COUNT(*) FROM results res WHERE res.race_id=? AND res.data_origin=?) result_count,
+      (SELECT COUNT(DISTINCT res.number) FROM results res WHERE res.race_id=? AND res.data_origin=?) distinct_result_count,
+      (SELECT COUNT(*) FROM results res WHERE res.race_id=? AND res.data_origin=? AND EXISTS(
+        SELECT 1 FROM entries e WHERE e.race_id=res.race_id AND e.number=res.number AND e.data_origin=res.data_origin
+      )) matched_result_count,
+      (SELECT COUNT(*) FROM results res WHERE res.race_id=? AND res.data_origin=? AND res.finish_order=1) winner_count,
+      (SELECT COUNT(*) FROM results res JOIN payouts p ON p.race_id=res.race_id
+        AND p.data_origin=res.data_origin AND p.bet_type='win'
+        AND p.selection=CAST(res.number AS TEXT) AND p.payout>0
+        WHERE res.race_id=? AND res.data_origin=? AND res.finish_order=1) paid_winner_count`,
+      b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,
+      b.race_id,b.data_origin,b.race_id,b.data_origin);
+    if (!integrity || integrity.entry_count <= 0
+        || integrity.result_count !== integrity.entry_count
+        || integrity.distinct_result_count !== integrity.entry_count
+        || integrity.matched_result_count !== integrity.entry_count
+        || integrity.winner_count <= 0
+        || integrity.paid_winner_count !== integrity.winner_count) continue;
+    const pay = await first<any>(db, 'SELECT payout FROM payouts WHERE race_id=? AND data_origin=? AND bet_type=? AND selection=? AND payout>0', b.race_id, b.data_origin, b.bet_type, b.selection);
     const values = settleValues(b.stake, pay?.payout ?? null, !!pay);
     await run(db, `UPDATE bets SET status=?,payout=?,profit=?,final_odds=?,settled_at=? WHERE id=?`, pay ? 'won' : 'lost', values.payout, values.profit, values.finalOdds, now(), b.id);
     if (b.expected_roi > 0 && values.finalOdds !== null && b.predicted_prob * values.finalOdds - 1 <= 0) await run(db, `UPDATE bets SET ev_lost=1 WHERE id=?`, b.id);

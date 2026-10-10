@@ -6,9 +6,11 @@ boolean or 0/1. Artifacts are pickle-compatible and accompanied by JSON metadata
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import pickle
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -79,9 +81,19 @@ def _choose_temperature(rows: Sequence[Mapping[str, Any]], scores: Sequence[floa
     return min(valid)[1] if valid else 1.0
 
 
+def candidate_version(model_id: str) -> str:
+    """Return a stable registry-unique version for an immutable candidate ID."""
+    match = re.fullmatch(r".*-(\d{8})-([a-fA-F0-9]{8,64})", model_id)
+    if match:
+        return f"candidate-{match.group(1)}-{match.group(2).lower()}"
+    digest = hashlib.sha256(model_id.encode("utf-8")).hexdigest()[:16]
+    return f"candidate-{digest}"
+
+
 def _untrained(model_id: str, model_path: Path, metadata_path: Path, reason: str,
+               version: str = "v1",
                rows: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
-    meta = {"id": model_id, "algorithm": "lightgbm", "status": "untrained", "reason": reason,
+    meta = {"id": model_id, "version": version, "algorithm": "lightgbm", "status": "untrained", "reason": reason,
             "nTrain": 0, "metrics": {"nRaces": 0, "logLossDefinition": "race_multiclass",
                                       "baselineLogLoss": None, "baselineUniformLogLoss": None},
             "trainedAt": datetime.now(timezone.utc).isoformat(),
@@ -165,11 +177,12 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
     train_races = {str(r["race_id"]) for r in train}
     if len(train_races) < min_train_races or not valid or not test:
         return _untrained(model_id, model_path, metadata_path,
-                          f"insufficient_temporal_data: train_races={len(train_races)}, valid={len(valid)}, test={len(test)}")
+                          f"insufficient_temporal_data: train_races={len(train_races)}, valid={len(valid)}, test={len(test)}",
+                          version=version)
     if len({_target(r) for r in train}) < 2:
-        return _untrained(model_id, model_path, metadata_path, "training data contains only one class")
+        return _untrained(model_id, model_path, metadata_path, "training data contains only one class", version=version)
     if not columns:
-        return _untrained(model_id, model_path, metadata_path, "no numeric feature columns")
+        return _untrained(model_id, model_path, metadata_path, "no numeric feature columns", version=version)
     try:
         import lightgbm as lgb
         # LightGBM can be installed but unusable on a host missing its runtime dependency.
@@ -178,7 +191,8 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
             random_state=seed, verbosity=-1, n_jobs=1)
         classifier.fit(_features(train, columns), [_target(r) for r in train])
     except Exception as exc:
-        return _untrained(model_id, model_path, metadata_path, f"lightgbm_unavailable_or_fit_failed: {type(exc).__name__}: {exc}")
+        return _untrained(model_id, model_path, metadata_path,
+                          f"lightgbm_unavailable_or_fit_failed: {type(exc).__name__}: {exc}", version=version)
 
     valid_scores = _score(classifier, valid, columns)
     temperature = _choose_temperature(valid, valid_scores)

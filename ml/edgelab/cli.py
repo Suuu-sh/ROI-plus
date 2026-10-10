@@ -124,8 +124,10 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         "races": [r for r in rows.get("races", []) if r.get("id") in prev_ids | today_ids],
         "entries": [r for r in rows.get("entries", []) if r.get("race_id") in today_ids],
         "predictions": predictions,
-        "results": [r for r in rows.get("results", []) if r.get("race_id") in prev_ids],
-        "payouts": [r for r in rows.get("payouts", []) if r.get("race_id") in prev_ids],
+        # K files can already contain same-day finished races during midday or
+        # late-night runs; settle those alongside yesterday's outcomes.
+        "results": [r for r in rows.get("results", []) if r.get("race_id") in prev_ids | today_ids],
+        "payouts": [r for r in rows.get("payouts", []) if r.get("race_id") in prev_ids | today_ids],
         "collection_runs": [r for r in rows.get("collection_runs", []) if r.get("id") in run_ids],
         "venues": __import__("edgelab.venues", fromlist=["venue_rows"]).venue_rows(),
         "models": rows.get("models", []),
@@ -437,14 +439,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(sync_rows(payload, dry_run=args.dry_run, output_dir=args.output_dir), ensure_ascii=False))
         return 0
     if args.command == "train":
-        from edgelab.models.train import train_model
+        from edgelab.models.train import candidate_version, train_model
         rows = load_rows()
         training_rows = _make_training_rows(rows, args.sport)
         dates = sorted({str(r.get("race_date")) for r in training_rows if r.get("race_date")})
         fingerprint = hashlib.sha256("|".join(dates + sorted({str(r.get("race_id")) for r in training_rows})).encode()).hexdigest()[:8]
         model_id = f"{args.sport}-win-lgbm-{datetime.now(timezone.utc):%Y%m%d}-{fingerprint}"
         result = train_model(training_rows, sport=args.sport,
-                             model_id=model_id)
+                             model_id=model_id, version=candidate_version(model_id))
         model_row = {
             "id": result["id"], "sport": result.get("sport", args.sport),
             "bet_type": result.get("betType", "win"), "version": result.get("version", "v1"),
