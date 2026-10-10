@@ -1,5 +1,5 @@
 import { all, type Db, type Statement } from '../repo/db.js';
-import { oddsUrl, parseWinOdds, USER_AGENT } from './boatraceOdds.js';
+import { isStablePool, oddsUrl, parseWinOdds, USER_AGENT } from './boatraceOdds.js';
 
 type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string };
 type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
@@ -13,7 +13,7 @@ const jstDate = (ms: number) => new Intl.DateTimeFormat('en-CA', { timeZone: 'As
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 export async function selectOddsTargets(db: Db, now: Date, maxRequests = 30): Promise<RaceTarget[]> {
-  const at = now.getTime(), after = jstIso(at), before = jstIso(at + 25 * 60_000), fresh = jstIso(at - 10 * 60_000);
+  const at = now.getTime(), after = jstIso(at), before = jstIso(at + 15 * 60_000), fresh = jstIso(at - 10 * 60_000);
   return all<RaceTarget>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date FROM races r
     WHERE r.data_origin='real' AND r.sport='boat' AND r.status='scheduled'
       AND r.post_time>=? AND r.post_time<=?
@@ -48,6 +48,7 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
       }
       if (requestError !== undefined) throw requestError;
       const parsed = parseWinOdds(html);
+      if (!parsed.final && !isStablePool(parsed.odds)) throw new Error('odds pool not stable (overround out of range)');
       const capturedAt = jstIso(now.getTime());
       const source = parsed.final ? 'boatrace-odds-tf-final' : 'boatrace-odds-tf';
       for (const [n, odds] of parsed.odds) {

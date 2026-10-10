@@ -19,7 +19,8 @@ afterEach(()=>sqlite.close());
 describe('EdgeLab API',()=>{
  it('health and date-filtered sample races respond',async()=>{
   expect((await app.request('/api/health',{},env())).status).toBe(200);
-  const today=jstDate();
+  // サンプルは生成日を「今日」として作られるため、シード内の最新日付を使う（実行日に依存させない）
+  const today=(sqlite.prepare("SELECT MAX(race_date) d FROM races WHERE data_origin='sample'").get() as {d:string}).d;
   const r=await app.request(`/api/races?sport=horse&date=${today}&origin=sample`,{},env());
   expect(r.status).toBe(200); const rows=await r.json() as any[]; expect(rows.length).toBeGreaterThanOrEqual(12); expect(rows.every(x=>x.dataOrigin==='sample')).toBe(true);
  });
