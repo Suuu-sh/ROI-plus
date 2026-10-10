@@ -228,6 +228,8 @@ def validate_initial_baseline(store: Mapping[str, Sequence[Mapping[str, Any]]], 
                               model_id: str = DEFAULT_MODEL_ID,
                               artifact_dir: str | Path = "ml/artifacts",
                               registry: Sequence[Mapping[str, Any]] | None = None,
+                              valid_fraction: float = .15,
+                              test_fraction: float = .15,
                               generated_at: str | None = None,
                               workflow_run_id: str | None = None) -> dict[str, Any]:
     """Evaluate an existing candidate without training, writing artifacts, or network access."""
@@ -333,7 +335,8 @@ def validate_initial_baseline(store: Mapping[str, Sequence[Mapping[str, Any]]], 
         checks["realOnly"] = bool(rows) and all(row.get("data_origin") == "real" for row in rows)
         if not checks["realOnly"]:
             raise ValueError("no usable real-only training rows")
-        train, valid, test = temporal_split(rows)
+        train, valid, test = temporal_split(rows, valid_fraction=valid_fraction,
+                                            test_fraction=test_fraction)
         dates = lambda values: sorted({str(row.get("race_date") or row.get("date"))[:10] for row in values
                                        if row.get("race_date") or row.get("date")})
         train_dates, valid_dates, test_dates = dates(train), dates(valid), dates(test)

@@ -13,6 +13,11 @@ on:
         description: 'Run ID of the validated model artifact bundle (after explicit approval only)'
         required: false
         type: string
+      validated_model_artifact_name:
+        description: 'Exact artifact name from that run; defaults to the legacy reviewed bundle'
+        required: false
+        type: string
+        default: candidate-model-artifact-boat-win-lgbm-20261010-ee79bc87
 permissions:
   contents: read
   actions: read
@@ -49,11 +54,23 @@ jobs:
           key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
           restore-keys: |
             daily-${{ runner.os }}-
+      - name: Validate manual artifact inputs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          MODEL_RUN_ID: ${{ inputs.validated_model_run_id }}
+          ARTIFACT_NAME: ${{ inputs.validated_model_artifact_name }}
+        run: |
+          set -euo pipefail
+          LEGACY_NAME='candidate-model-artifact-boat-win-lgbm-20261010-ee79bc87'
+          if [ -z "$MODEL_RUN_ID" ] && [ "$ARTIFACT_NAME" != "$LEGACY_NAME" ]; then
+            echo 'A non-default artifact name requires an explicit validated_model_run_id.' >&2
+            exit 1
+          fi
       - name: Restore explicitly approved validated model artifact
         if: github.event_name == 'workflow_dispatch' && inputs.validated_model_run_id != ''
         uses: actions/download-artifact@v4
         with:
-          name: candidate-model-artifact-boat-win-lgbm-20261010-ee79bc87
+          name: ${{ inputs.validated_model_artifact_name }}
           run-id: ${{ inputs.validated_model_run_id }}
           github-token: ${{ github.token }}
           path: ml/artifacts
@@ -70,6 +87,10 @@ jobs:
         env:
           PYTHONPATH: ml
         run: python -m edgelab backfill --from 2026-07-01 --to "$(TZ=Asia/Tokyo date -d yesterday +%F)"
+      - name: Migrate normalized cache to venue-safe v2 once
+        env:
+          PYTHONPATH: ml
+        run: python -m edgelab migrate-boat-venue-cache --raw data/raw/boatrace --marker ml/data/boat-venue-v2.json
       - name: Skip if this morning already succeeded
         id: guard
         run: |

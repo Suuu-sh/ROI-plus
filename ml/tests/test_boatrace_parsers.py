@@ -10,6 +10,12 @@ FIXTURES = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "boatrace
 PRIVATE_FIXTURES = Path(__file__).resolve().parents[2] / "data" / "private_fixtures" / "boatrace"
 
 
+def test_venue_heading_prefers_longest_name_when_names_overlap():
+    from edgelab.parsers.boatrace_b import _venue_from_line
+    assert _venue_from_line("ボートレース唐津") == "23"
+    assert _venue_from_line("ボートレース津") == "09"
+
+
 def test_fixture_b_program_rows():
     parsed = parse_b((FIXTURES / "b260901.txt").read_bytes())
     race_id = "boat-20260901-24-01"
