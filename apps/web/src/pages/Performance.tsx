@@ -13,10 +13,10 @@ const tip = { contentStyle: { background: 'rgb(var(--surface))', border: '1px so
 
 export function PerformancePage() {
   const { origin } = useOrigin()
-  const q = useAsync(() => Promise.all([api.breakdown(origin), api.bets(origin)]), [origin])
+  const q = useAsync(() => Promise.all([api.breakdown(origin), api.bets(origin), origin === 'all' ? Promise.resolve(null) : api.rankComparison(origin)]), [origin])
   if (q.error) return <div className="card"><ErrorState error={q.error} onRetry={q.reload} /></div>
   if (!q.data) return <div className="card"><Loading rows={6} /></div>
-  const [bd, bets] = q.data
+  const [bd, bets, rankComparison] = q.data
 
   return (
     <div className="space-y-5">
@@ -29,6 +29,22 @@ export function PerformancePage() {
         origin={origin}
         settledBets={bets.filter((bet) => bet.status === 'won' || bet.status === 'lost').length}
       />
+
+      <Section title="候補1位のみ vs 複数購入" right={<span className="text-xs text-muted">同一レース・同一購入総額で比較</span>}>
+        {origin === 'all' ? <div className="px-4 py-4 text-sm text-muted">比較対象を混ぜないため、「実データ」または「サンプル」を選択してください。</div>
+          : rankComparison == null ? <div className="px-4 py-4 text-sm text-muted">比較データを読み込めませんでした。</div>
+          : <>
+            <div className="grid gap-px bg-line sm:grid-cols-2">
+              <ComparisonMetric title="実際の複数購入" value={rankComparison.multiple} />
+              <ComparisonMetric title="候補1位のみ（同じ総額を仮定）" value={rankComparison.firstOnly} />
+            </div>
+            <div className="space-y-1 px-4 py-3 text-xs text-muted">
+              <p>比較グループ {rankComparison.comparedGroupCount.toLocaleString()}件・対象レース {rankComparison.comparedRaceCount.toLocaleString()}件・購入総額 {yen(rankComparison.totalStake)}。全券が精算済みで順位1位の結果が確定したグループを対象にしています。</p>
+              <p>結果待ち {rankComparison.excludedPendingGroupCount.toLocaleString()}グループ、順位1位なし {rankComparison.excludedMissingRankOneGroupCount.toLocaleString()}グループ、順位不明 {rankComparison.excludedUnknownRankBetCount.toLocaleString()}買い目などは除外。1位のみは同じ総額を順位1位の実際の結果（不的中は払戻0）に当てる反実仮想で、1円未満は切り捨てます。利益の証明ではありません。</p>
+              {rankComparison.note && <p>{rankComparison.note}</p>}
+            </div>
+          </>}
+      </Section>
 
       {origin === 'real' && bd.bySport.length === 0 && (
         <div className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-muted">
@@ -88,6 +104,16 @@ export function PerformancePage() {
       <Section title="仮想購入履歴"><BetsTable bets={bets} /></Section>
     </div>
   )
+}
+
+function ComparisonMetric({ title, value }: { title: string; value: { stake: number; payout: number; profit: number; roi: number | null } }) {
+  return <div className="bg-surface p-4">
+    <div className="text-sm font-medium">{title}</div>
+    <div className={`num mt-2 text-2xl font-semibold ${value.profit >= 0 ? 'text-pos' : 'text-neg'}`}>{signedYen(value.profit)}</div>
+    <div className="num mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+      <span>購入額 {yen(value.stake)}</span><span>払戻 {yen(value.payout)}</span><span>回収率 {pct(value.roi)}</span>
+    </div>
+  </div>
 }
 
 export function ProfitabilityNotice({ origin, settledBets }: { origin: OriginFilter; settledBets: number }) {

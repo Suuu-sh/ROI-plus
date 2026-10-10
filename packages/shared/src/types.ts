@@ -44,7 +44,15 @@ export interface Bet {
   mode: 'manual' | 'auto'; predictedProb: number | null; oddsAtBet: number | null; expectedRoi: number | null;
   edgeLabel: EdgeLabel; modelId: string | null; placedAt: string; status: BetStatus;
   payout: number | null; profit: number | null; finalOdds: number | null; settledAt: string | null;
-  dataOrigin: DataOrigin; venueName?: string; raceNo?: number;
+  dataOrigin: DataOrigin; groupId: string | null; candidateRank: number | null; candidateCount: number | null;
+  oddsCapturedAt: string | null; predictedAtAtBet: string | null; venueName?: string; raceNo?: number;
+}
+
+export interface RankComparisonMeasure { stake: number; payout: number; profit: number; roi: number | null }
+export interface RankComparison {
+  comparedGroupCount: number; comparedRaceCount: number; totalStake: number;
+  excludedPendingGroupCount: number; excludedMissingRankOneGroupCount: number; excludedUnknownRankBetCount: number;
+  multiple: RankComparisonMeasure; firstOnly: RankComparisonMeasure; note: string;
 }
 
 export interface Overview {

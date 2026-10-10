@@ -203,7 +203,7 @@ function RacePanel({ raceId, sport, onChanged, onDate }: { raceId: string; sport
 
       {buying && (
         <BetSheet race={r} entry={buying} onClose={() => setBuying(null)}
-          onPlaced={() => { setBuying(null); setToast(`${buying.number}番を仮想購入しました`); race.reload(); onChanged(); setTimeout(() => setToast(null), 2500) }} />
+          onPlaced={(count) => { setBuying(null); setToast(`${count}件を仮想購入として記録しました`); race.reload(); onChanged(); setTimeout(() => setToast(null), 2500) }} />
       )}
       {toast && <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-full bg-ink px-4 py-2 text-sm text-bg shadow-lg lg:bottom-8">{toast}</div>}
     </div>
