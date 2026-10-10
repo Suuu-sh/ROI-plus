@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import pickle
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -34,6 +35,48 @@ def _apply_model_registry(rows: dict[str, Any], registry: list[dict[str, Any]]) 
     return set(remote)
 
 
+def _safe_boat_schema_version(model_id: str, artifact_dir: Path = Path("ml/artifacts")) -> str | None:
+    """Return the runtime feature marker only for a matching, safe JSON/pickle pair."""
+    try:
+        from edgelab.features.boat import BASE_FEATURE_COLUMNS
+        from edgelab.predict import load_artifact
+        json_meta = json.loads((artifact_dir / f"{model_id}.json").read_text(encoding="utf-8"))
+        artifact = load_artifact(artifact_dir / f"{model_id}.pkl")
+        pkl_meta = artifact.get("metadata") or {}
+        columns = list(artifact.get("feature_columns") or [])
+        saved_columns = list(json_meta.get("featureColumns") or [])
+        stable_json = {k: v for k, v in json_meta.items() if k != "metrics"}
+        stable_pkl = {k: v for k, v in pkl_meta.items() if k != "metrics"}
+        json_metrics, pkl_metrics = json_meta.get("metrics") or {}, pkl_meta.get("metrics") or {}
+        metrics_match = all(json_metrics.get(k) == pkl_metrics.get(k)
+                            for k in ("logLoss", "brier", "ece"))
+        return ("boat-base-v1" if json_meta.get("id") == model_id
+                and pkl_meta.get("id") == model_id and stable_json == stable_pkl
+                and metrics_match
+                and columns == saved_columns and columns
+                and all(column in BASE_FEATURE_COLUMNS for column in columns)
+                and artifact.get("model") is not None and json_meta.get("status") == "candidate"
+                else None)
+    except (OSError, ValueError, TypeError, KeyError, pickle.UnpicklingError, EOFError):
+        return None
+
+
+def _verify_runtime_artifact(model_row: dict[str, Any], artifact_path: Path) -> None:
+    """Fail closed unless registry evidence binds the safe schema to these exact bytes."""
+    try:
+        metrics = model_row.get("metrics")
+        if not isinstance(metrics, dict):
+            metrics = json.loads(model_row.get("metrics_json") or "{}")
+        expected = metrics.get("boatArtifactSha256")
+        if metrics.get("boatFeatureSchemaVersion") != "boat-base-v1" or not expected:
+            raise RuntimeError("active boat model lacks verified safe-schema/artifact identity metadata")
+        actual = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        if actual != expected:
+            raise RuntimeError("active boat model artifact bytes do not match the registry-approved SHA256")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError("active boat model has invalid safe-schema/artifact identity metadata") from exc
+
+
 def _date_range(start: str, end: str):
     first, last = date.fromisoformat(start), date.fromisoformat(end)
     if first > last:
@@ -57,6 +100,7 @@ def _predict_boat_date(rows: dict[str, list[dict[str, Any]]], day: str, cutoff: 
     artifact = artifact_dir / f"{model_id}.pkl"
     if not artifact.is_file():
         raise FileNotFoundError(f"model artifact not found: {artifact}; restore ml/artifacts cache or run train first")
+    _verify_runtime_artifact(selected, artifact)
     race_map = {r["id"]: r for r in rows.get("races", [])
                 if r.get("sport") == "boat" and r.get("race_date") == day
                 and r.get("data_origin") == "real"}
@@ -346,6 +390,12 @@ def _parser() -> argparse.ArgumentParser:
     daily.add_argument("--now", help="ISO timestamp cutoff (defaults to current time)")
     sub.add_parser("feedback", help="score saved real predictions against completed outcomes")
     sub.add_parser("learn", help="train/evaluate a candidate after enough new real outcomes")
+    validation = sub.add_parser("validate-baseline", help="validate an existing initial baseline artifact without retraining")
+    validation.add_argument("--model-id", default="boat-win-lgbm-20261010-ee79bc87")
+    validation.add_argument("--artifact-dir", default="ml/artifacts")
+    validation.add_argument("--output", default="ml/data/learning/initial-baseline-report.json")
+    validation.add_argument("--sync-validation", action="store_true",
+                            help="refresh authenticated registry evidence and sync only this candidate's metrics")
     return parser
 
 
@@ -383,6 +433,69 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"report": "ml/data/learning/report.json",
                           "models": len(report["models"])}, ensure_ascii=False))
         return 0
+    if args.command == "validate-baseline":
+        from edgelab.baseline_validation import validate_initial_baseline
+        from edgelab.learning import _atomic_json
+        rows = load_rows()
+        registry, registry_error = None, None
+        if args.sync_validation:
+            from edgelab.sync import fetch_model_registry
+            try:
+                registry = fetch_model_registry()
+            except RuntimeError as exc:
+                registry_error = f"{type(exc).__name__}: {exc}"
+        validation = validate_initial_baseline(rows, model_id=args.model_id,
+            artifact_dir=args.artifact_dir, registry=registry,
+            workflow_run_id=__import__("os").environ.get("GITHUB_RUN_ID"))
+        report = {"version": 1, "generatedAt": validation["validatedAt"],
+                  "workflowRunId": validation.get("workflowRunId"),
+                  "modelId": args.model_id, "modelEvidenceEligible": validation["modelEvidenceEligible"],
+                  "initialBaselineEligible": validation["initialBaselineEligible"],
+                  "initialBaselineReason": validation["initialBaselineReason"],
+                  "initialBaselineValidation": validation}
+        if registry_error:
+            report["registryError"] = registry_error
+        if args.sync_validation and validation["initialBaselineEligible"]:
+            try:
+                remote = next((m for m in registry or [] if m.get("id") == args.model_id), None)
+                if not remote or remote.get("status") != "candidate":
+                    raise RuntimeError("candidate is absent from authenticated registry or is not a candidate")
+                if remote.get("version") != validation.get("artifact", {}).get("version"):
+                    raise RuntimeError("candidate version differs from authenticated registry")
+                marker = _safe_boat_schema_version(args.model_id, Path(args.artifact_dir))
+                if marker != "boat-base-v1":
+                    raise RuntimeError("candidate artifact pair failed safe boat schema identity check")
+                try:
+                    metrics = json.loads(remote.get("metrics_json") or "{}")
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError("registered candidate metrics are invalid") from exc
+                if not isinstance(metrics, dict):
+                    raise RuntimeError("registered candidate metrics are invalid")
+                metrics["promotionEligible"] = False
+                metrics["promotionReason"] = "initial baseline requires a separate human decision"
+                # This separate eligibility path is only evidence for explicit
+                # human approval; it must never alter ordinary promotion gates.
+                metrics["initialBaselineEligible"] = True
+                metrics["initialBaselineReason"] = None
+                metrics["initialBaselineValidation"] = validation
+                metrics["boatFeatureSchemaVersion"] = marker
+                metrics["boatArtifactSha256"] = validation["artifact"]["pickleSha256"]
+                candidate_row = {**remote, "metrics_json": json.dumps(metrics, ensure_ascii=False, allow_nan=False)}
+                from edgelab.sync import sync_rows
+                report["sync"] = sync_rows({"models": [candidate_row]})
+            except (RuntimeError, ValueError, TypeError) as exc:
+                # Preserve the offline evaluation report even if authenticated
+                # registry refresh/sync is unavailable or the row has changed.
+                report["syncError"] = f"{type(exc).__name__}: {exc}"
+                report["initialBaselineEligible"] = False
+                report["initialBaselineReason"] = report["syncError"]
+        _atomic_json(Path(args.output), report)
+        print(json.dumps({"report": args.output, "modelId": args.model_id,
+                          "modelEvidenceEligible": report["modelEvidenceEligible"],
+                          "initialBaselineEligible": report["initialBaselineEligible"],
+                          "initialBaselineReason": report["initialBaselineReason"],
+                          "synced": bool(report.get("sync"))}, ensure_ascii=False))
+        return 0
     if args.command == "learn":
         from edgelab.learning import guarded_candidate, score_feedback
         from edgelab.sync import fetch_model_registry, sync_rows
@@ -400,6 +513,14 @@ def main(argv: list[str] | None = None) -> int:
             metadata.setdefault("metrics", {})["promotionEligible"] = bool(result.get("promotionEligible"))
             if not result.get("promotionEligible"):
                 metadata["metrics"]["promotionReason"] = result.get("promotionReason") or "no eligible incumbent comparison"
+            schema_version = _safe_boat_schema_version(model_id)
+            if schema_version:
+                metadata["metrics"]["boatFeatureSchemaVersion"] = schema_version
+                metadata["metrics"]["boatArtifactSha256"] = hashlib.sha256(
+                    (Path("ml/artifacts") / f"{model_id}.pkl").read_bytes()).hexdigest()
+            else:
+                metadata["metrics"]["promotionEligible"] = False
+                metadata["metrics"]["promotionReason"] = "candidate artifact pair failed safe boat schema identity check"
             (Path("ml/artifacts") / f"{model_id}.json").write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
             model_row = {"id": model_id, "sport": "boat", "bet_type": "win", "version": metadata.get("version", "v1"),
@@ -447,6 +568,13 @@ def main(argv: list[str] | None = None) -> int:
         model_id = f"{args.sport}-win-lgbm-{datetime.now(timezone.utc):%Y%m%d}-{fingerprint}"
         result = train_model(training_rows, sport=args.sport,
                              model_id=model_id, version=candidate_version(model_id))
+        model_metrics = dict(result.get("metrics", {}))
+        if args.sport == "boat":
+            schema_version = _safe_boat_schema_version(model_id)
+            if schema_version:
+                model_metrics["boatFeatureSchemaVersion"] = schema_version
+                model_metrics["boatArtifactSha256"] = hashlib.sha256(
+                    (Path("ml/artifacts") / f"{model_id}.pkl").read_bytes()).hexdigest()
         model_row = {
             "id": result["id"], "sport": result.get("sport", args.sport),
             "bet_type": result.get("betType", "win"), "version": result.get("version", "v1"),
@@ -455,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
             "valid_from": result.get("validFrom"), "valid_to": result.get("validTo"),
             "test_from": result.get("testFrom"), "test_to": result.get("testTo"),
             "n_train": result.get("nTrain", 0),
-            "metrics_json": json.dumps(result.get("metrics", {}), ensure_ascii=False),
+            "metrics_json": json.dumps(model_metrics, ensure_ascii=False),
             "trained_at": result.get("trainedAt"), "notes": result.get("reason"),
         }
         merge_rows(rows, {"models": [model_row]})
@@ -492,6 +620,8 @@ def main(argv: list[str] | None = None) -> int:
         predicted_at = args.cutoff or _now()
         if not artifact.is_file():
             raise FileNotFoundError(f"model artifact not found: {artifact}; run train first")
+        if args.sport == "boat":
+            _verify_runtime_artifact(active, artifact)
         eligible = []
         race_lookup = {r["id"]: r for r in rows.get("races", []) if r.get("id") in race_ids}
         cutoff_dt = _coerce_dt(str(predicted_at))

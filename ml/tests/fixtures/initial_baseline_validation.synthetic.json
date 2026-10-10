@@ -1,0 +1,176 @@
+{
+  "policyVersion": "initial-baseline-v1",
+  "candidateModelId": "boat-win-lgbm-20261010-1234abcd",
+  "sport": "boat",
+  "betType": "win",
+  "dataOrigin": "real",
+  "validatedAt": "2026-04-20T00:00:00+00:00",
+  "status": "evaluated",
+  "thresholds": {
+    "minHeldoutRaces": 400,
+    "minHeldoutDays": 7,
+    "maxECE": 0.05,
+    "maxDateSliceLossRegression": 0.25,
+    "pairedRaceBootstrapUpperBoundMustBeBelow": 0.0,
+    "bootstrapSamples": 2000
+  },
+  "checks": {
+    "safeFeatureSchema": true,
+    "realOnly": true,
+    "completeFullRaceCohorts": true,
+    "probabilitiesFiniteNormalized": true,
+    "storedMetricsReproduced": true,
+    "temporalSplitMatchesArtifact": true,
+    "disjointRaceIds": true,
+    "fitAndValidationPrecedeHoldout": true,
+    "minHeldoutRaceCount": true,
+    "minHeldoutDateCount": true,
+    "pairedLogLossImprovement": true,
+    "pairedBrierImprovement": true,
+    "eceWithinThreshold": true,
+    "pairedLogLossDateClusterImprovement": true,
+    "pairedBrierDateClusterImprovement": true,
+    "noGrossDateSliceReversal": true,
+    "authenticatedRegistrySnapshot": true,
+    "candidateRegisteredAsCandidate": true,
+    "noCompatibleActiveModels": true
+  },
+  "activeModelSnapshot": {
+    "source": "authenticated_registry",
+    "models": [
+      {
+        "id": "legacy-synthetic-retired",
+        "version": "synthetic-v0",
+        "status": "retired",
+        "metricsSha256": "600bfa81b1561fa6281505a8630327ec94da208976f36c142c781b0b46a95725",
+        "artifactCompatibility": "unknown"
+      }
+    ],
+    "snapshotSha256": "2b3270f7295fa395a2b36c706122bf91fa290ae2a786d5b3c1e2302ec51e70ec"
+  },
+  "workflowRunId": "synthetic-test-run",
+  "candidateRegistryIdentity": {
+    "id": "boat-win-lgbm-20261010-1234abcd",
+    "version": "candidate-20261010-1234abcd",
+    "status": "candidate"
+  },
+  "sourceAvailability": "assumed_from_B_prerace_content_not_recorded",
+  "historyFeatures": "not_observed_or_used",
+  "limitations": [
+    "B available_at is a synthesized race-day midnight, not a measured source publication timestamp.",
+    "Evaluation is a retrospective temporal holdout, not a saved pre-race prediction.",
+    "No comparison to legacy v1 is valid; that artifact has a known late-feature leakage path.",
+    "Historical replay is not actual virtual-bet settlement or real profitability evidence."
+  ],
+  "artifact": {
+    "version": "candidate-20261010-1234abcd",
+    "jsonSha256": "f7179e3cef22ad9464293e806a710fdbc4d2e82fb53c99bc05e3fb0e85f529a5",
+    "pickleSha256": "5dfcd8312e7481684bb0bfac44f90348e5337f5dfab27a111c04ed317579e184",
+    "featureColumns": [
+      "national_win_rate"
+    ]
+  },
+  "temporal": {
+    "trainFrom": "2026-01-01",
+    "trainTo": "2026-03-11",
+    "validFrom": "2026-03-12",
+    "validTo": "2026-03-26",
+    "testFrom": "2026-03-27",
+    "testTo": "2026-04-10",
+    "trainRaceCount": 2100,
+    "validRaceCount": 450,
+    "testRaceCount": 450,
+    "disjointRaceIds": true,
+    "fitAndValidationPrecedeHoldout": true,
+    "splitMatchesArtifactMetadata": true
+  },
+  "cohort": {
+    "raceCount": 450,
+    "dayCount": 15,
+    "from": "2026-03-27",
+    "to": "2026-04-10",
+    "raceSetSha256": "3ac6d57424a936a81030abae10681679613c28379f16fb153345691399ef3bbb",
+    "dataRowsSha256": "f230730ae73b5bbc0f391d164921a26ab2f6f064f832cd19d86023a63cc72905"
+  },
+  "candidateMetrics": {
+    "nRaces": 450,
+    "logLoss": 0.08762453387721726,
+    "brier": 0.008446089835327244,
+    "ece": 0.027965073844402645,
+    "baselineLogLoss": 1.791759469228055
+  },
+  "laneBaselineMetrics": {
+    "nRaces": 450,
+    "logLoss": 1.791759469228055,
+    "brier": 0.8333333333333334,
+    "ece": 0.0,
+    "baselineLogLoss": 1.791759469228055
+  },
+  "pairedComparison": {
+    "method": "paired bootstrap by race; separate date-cluster bootstrap",
+    "raceCount": 450,
+    "logLossDelta": -1.7041349353508377,
+    "logLossCI95": [
+      -1.7041349353508377,
+      -1.7041349353508377
+    ],
+    "brierDelta": -0.8248872434980061,
+    "brierCI95": [
+      -0.8248872434980061,
+      -0.8248872434980061
+    ],
+    "dateClusterLogLossCI95": [
+      -1.7041349353508377,
+      -1.7041349353508377
+    ],
+    "dateClusterBrierCI95": [
+      -0.8248872434980061,
+      -0.8248872434980061
+    ]
+  },
+  "dateSlices": [
+    {
+      "period": "2026-W13",
+      "raceCount": 90,
+      "logLoss": 0.08762453387721726,
+      "brier": 0.008446089835327244,
+      "ece": 0.027965073844402645,
+      "deltaLogLossVsLane": -1.7041349353508375,
+      "deltaBrierVsLane": -0.8248872434980061
+    },
+    {
+      "period": "2026-W14",
+      "raceCount": 210,
+      "logLoss": 0.08762453387721725,
+      "brier": 0.008446089835327244,
+      "ece": 0.027965073844402666,
+      "deltaLogLossVsLane": -1.7041349353508377,
+      "deltaBrierVsLane": -0.8248872434980061
+    },
+    {
+      "period": "2026-W15",
+      "raceCount": 150,
+      "logLoss": 0.08762453387721726,
+      "brier": 0.008446089835327244,
+      "ece": 0.027965073844402645,
+      "deltaLogLossVsLane": -1.7041349353508377,
+      "deltaBrierVsLane": -0.8248872434980061
+    }
+  ],
+  "profitability": {
+    "status": "counterfactual_replay_unproven",
+    "basis": "retrospective frozen-model replay; authentic odds captured before race cutoff; not saved pre-race forecasts or real bets",
+    "selectionRule": "probability * authentic pre-race odds - 1 > 0.05",
+    "nBets": 0,
+    "nRaces": 0,
+    "empiricalROI": null,
+    "raceClusterConfidenceInterval95": null,
+    "skipped": {
+      "missing_authentic_pre_race_odds": 450
+    }
+  },
+  "modelEvidenceEligible": true,
+  "initialBaselineEligible": true,
+  "initialBaselineReason": null,
+  "fingerprint": "52b90d09a58ce7acd4780a270a6f76ccb8a4a454889e549d71810ddf4e486d78"
+}

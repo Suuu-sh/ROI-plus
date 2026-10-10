@@ -119,6 +119,8 @@ def run_live(target_date: str, *, window_min: int = 25, now: str | None = None,
         artifact_path = __import__("pathlib").Path("ml/artifacts") / f"{model['id']}.pkl"
         if artifact_path.is_file():
             try:
+                from edgelab.cli import _verify_runtime_artifact
+                _verify_runtime_artifact(model, artifact_path)
                 artifact = load_artifact(artifact_path)
                 existing = {(p.get("race_id"), p.get("model_id")) for p in store.get("predictions", [])}
                 target_ids = {r.get("id") for r in targets[:remaining]}
@@ -136,7 +138,7 @@ def run_live(target_date: str, *, window_min: int = 25, now: str | None = None,
                                   for e, f in zip(enriched, features)]
                     delta["predictions"].extend(predict_rows(model_rows,
                                                             artifact, predicted_at=current.isoformat()))
-            except (ValueError, FileNotFoundError) as exc:
+            except (ValueError, FileNotFoundError, RuntimeError) as exc:
                 prediction_error = f"{type(exc).__name__}: {exc}"
         else:
             prediction_error = f"active artifact missing: {artifact_path}"

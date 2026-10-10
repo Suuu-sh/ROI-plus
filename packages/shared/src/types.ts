@@ -62,9 +62,55 @@ export interface Breakdown {
   oddsDrift: { bets: number; avgOddsAtBet: number | null; avgFinalOdds: number | null; evLostCount: number };
 }
 
+export interface BaselineMetricSet {
+  nRaces: number; logLoss: number; brier: number; ece: number;
+}
+export interface InitialBaselineModelSnapshot {
+  id: string; version: string; status: ModelStatus; metricsSha256: string;
+  artifactCompatibility: 'compatible' | 'incompatible' | 'unknown';
+}
+export interface InitialBaselineValidation {
+  policyVersion: string; fingerprint: string; candidateModelId: string; sport: Sport; betType: BetType;
+  dataOrigin: DataOrigin; validatedAt: string; status: string; initialBaselineEligible?: boolean;
+  initialBaselineReason?: string | null; modelEvidenceEligible?: boolean;
+  limitations?: string[]; workflowRunId?: string | null;
+  artifact: { version: string; jsonSha256: string; pickleSha256: string; featureColumns: string[] };
+  cohort: { raceCount: number; dayCount: number; from: string; to: string; raceSetSha256: string };
+  temporal: {
+    trainFrom: string; trainTo: string; validFrom: string; validTo: string; testFrom: string; testTo: string;
+    trainRaceCount: number; validRaceCount: number; testRaceCount: number;
+    disjointRaceIds: boolean; fitAndValidationPrecedeHoldout: boolean; splitMatchesArtifactMetadata: boolean;
+  };
+  checks: {
+    safeFeatureSchema: boolean; realOnly: boolean; completeFullRaceCohorts: boolean;
+    probabilitiesFiniteNormalized: boolean; storedMetricsReproduced: boolean; temporalSplitMatchesArtifact: boolean;
+    disjointRaceIds: boolean; fitAndValidationPrecedeHoldout: boolean;
+    minHeldoutRaceCount: boolean; minHeldoutDateCount: boolean;
+    pairedLogLossImprovement: boolean; pairedBrierImprovement: boolean;
+    pairedLogLossDateClusterImprovement: boolean; pairedBrierDateClusterImprovement: boolean;
+    eceWithinThreshold: boolean; noGrossDateSliceReversal: boolean;
+    authenticatedRegistrySnapshot: boolean; candidateRegisteredAsCandidate: boolean; noCompatibleActiveModels: boolean;
+  };
+  candidateRegistryIdentity: { id: string; version: string; status: ModelStatus } | null;
+  candidateMetrics: BaselineMetricSet; laneBaselineMetrics: BaselineMetricSet;
+  pairedComparison: {
+    method: string; raceCount: number; logLossDelta: number | null; logLossCI95: [number, number] | null;
+    brierDelta: number | null; brierCI95: [number, number] | null;
+    dateClusterLogLossCI95?: [number, number] | null; dateClusterBrierCI95?: [number, number] | null;
+  };
+  dateSlices: { period: string; raceCount: number; logLoss: number; brier: number; ece: number; deltaLogLossVsLane: number; deltaBrierVsLane: number }[];
+  profitability: { status: 'counterfactual_replay_unproven' | 'counterfactual_replay_positive_evidence_not_profitability_proof'; [key: string]: unknown };
+  activeModelSnapshot: {
+    source: 'authenticated_registry' | 'unavailable'; models: InitialBaselineModelSnapshot[]; snapshotSha256: string;
+  };
+  sourceAvailability: string; historyFeatures: string;
+}
 export interface ModelMetrics {
   logLoss?: number; brier?: number; ece?: number; roi?: number; expectedRoi?: number; maxDrawdown?: number;
   nRaces?: number; baselineLogLoss?: number; promotionEligible?: boolean; promotionReason?: string;
+  boatFeatureSchemaVersion?: string; boatArtifactSha256?: string;
+  initialBaselineEligible?: boolean; initialBaselineReason?: string;
+  initialBaselineValidation?: InitialBaselineValidation;
 }
 export interface ModelInfo {
   id: string; sport: Sport; betType: BetType; version: string; algorithm: string; status: ModelStatus;
