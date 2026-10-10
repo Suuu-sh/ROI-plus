@@ -25,3 +25,12 @@
 - network-free `feedback` は遠隔レジストリのstatusを確認しないため、採点レポートはモデルが現在 active かどうかを主張しない。`learn` の比較では認証済みregistry snapshotのactive状態とローカルartifact両方を必要とする。
 
 このサイクルは測定、レポート、候補作成までを自動化するもので、報告された誤差から自動で「自己修正」したり、本番モデルを自動昇格したりはしない。
+
+## 初回ベースラインの検証・復元
+
+- `validate-initial-baseline` workflow は既存 candidate の JSON/pickle と、その作成時点のデータ cache を読み、再学習・データ収集なしで評価する。cache key は必ず完全一致で指定し、cache がなければ最新 cache へフォールバックせず失敗する。標準対象は `boat-win-lgbm-20261010-ee79bc87` と `daily-Linux-2026-10-10-38042505956`。
+- 評価閾値は `initial-baseline-v1` に固定し、holdout 実レース400件以上・7日以上、分離された時間順 train/validation/holdout、safe feature schema、正常な確率、候補の保存済みproper score再現、ECE 0.05以下、Log Loss/Brier双方のlane基準比race-bootstrapとdate-cluster bootstrap 95%上限が0未満、週単位の大幅な逆転なしを要求する。閾値は結果を見て緩めない。lane基準率はtrain期間のみで推定する。
+- これは保存済み予測のOOSスコアではなく、固定済みartifactを過去holdoutに再適用する「retrospective temporal replay」。過去時点のsource到着時刻も記録されていないため、Bファイルの時刻は `assumed_from_B_prerace_content_not_recorded` として扱う。適格でも初期の仮想ベースライン候補を判断する材料であり、完全なpoint-in-time証明や実運用性能の保証ではない。履歴特徴は未使用。既知の漏洩経路を持つ旧v1との比較は適格性評価に使わない。
+- Profitability欄は実際に記録された全艇分の締切前オッズと実勝者の払戻がそろう場合だけcounterfactual replayとして算出する。予測確率とオッズから利益を推定せず、実購入ROIや現行自動購入ルールの再現と呼ばない。証拠不足は明示的に `counterfactual_replay_unproven` とする。
+- オプション `sync_validation` は認証済みモデルレジストリを読み、検証済みcandidateのmetricsだけを更新する。JSON/pickle artifact本体は変更しない。`promotionEligible=false` はそのまま維持し、通常昇格とは別の `initialBaselineEligible` evidenceを記録するだけで、昇格は明示的な人手承認が必要。
+- workflow は検証レポートと同一のJSON/pickle candidate artifact bundleを90日間保存する。承認後にActions cacheが失効している場合は、Daily workflowを手動実行し `validated_model_run_id` に検証workflowのrun IDを指定して正確なartifact pairを復元する。日次推論はregistryに登録されたsafe schema markerとpickle SHAが一致しない限りfail closedし、候補や旧artifactへ自動フォールバックしない。artifact retention/cacheともに失効した場合は再検証可能な正確なartifact pairを再取得するまで推論を再開しない。

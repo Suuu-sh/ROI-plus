@@ -8,8 +8,14 @@ on:
     - cron: '0 4 * * *'  # 13:00 JST
     - cron: '30 14 * * *' # 23:30 JST
   workflow_dispatch:
+    inputs:
+      validated_model_run_id:
+        description: 'Run ID of the validated model artifact bundle (after explicit approval only)'
+        required: false
+        type: string
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: boat-learning-state
   cancel-in-progress: false
@@ -43,6 +49,14 @@ jobs:
           key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
           restore-keys: |
             daily-${{ runner.os }}-
+      - name: Restore explicitly approved validated model artifact
+        if: github.event_name == 'workflow_dispatch' && inputs.validated_model_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-model-artifact-boat-win-lgbm-20261010-ee79bc87
+          run-id: ${{ inputs.validated_model_run_id }}
+          github-token: ${{ github.token }}
+          path: ml/artifacts
       - name: Clear stale report
         run: rm -f ml/data/learning/report.json
       - name: Initialize backfill state

@@ -46,6 +46,10 @@ export const api = {
   breakdown: (origin: OriginFilter) => req<Breakdown>(`/performance/breakdown${qs({ origin })}`),
   models: () => req<ModelInfo[]>('/models'),
   promote: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/promote`, { method: 'POST' }),
+  promoteInitialBaseline: (id: string, validationFingerprint: string) =>
+    req<ModelInfo>(`/models/${encodeURIComponent(id)}/promote`, {
+      method: 'POST', body: JSON.stringify({ mode: 'initial_baseline', validationFingerprint, confirmed: true }),
+    }),
   rollback: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/rollback`, { method: 'POST' }),
   collection: () => req<CollectionStatus>('/collection/status'),
 }

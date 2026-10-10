@@ -1,0 +1,1 @@
+`initial_baseline_validation.synthetic.json` is generated only from deterministic synthetic test rows and a fake estimator. Its `dataOrigin: real`, passing checks, and metrics are contract-shaped test inputs, not evidence about any real model or race data. Never upload, sync, or use it for model approval.
