@@ -122,3 +122,53 @@ def test_registered_candidate_id_is_never_retrained_over(tmp_path, monkeypatch):
     result = guarded_candidate({}, rows, model_id="registered", authoritative_model_ids={"registered"},
                               min_new_races=0)
     assert result["status"] == "existing_registered_id"
+
+
+def test_candidate_registry_versions_are_unique_and_match_both_training_paths(tmp_path, monkeypatch):
+    import pickle
+    import edgelab.cli as cli
+    import edgelab.learning as learning
+    from edgelab.models.train import candidate_version, train_model
+
+    ids = ["boat-win-lgbm-20261010-0123abcd", "boat-win-lgbm-20261011-9876fedc"]
+    versions = [candidate_version(model_id) for model_id in ids]
+    assert versions == ["candidate-20261010-0123abcd", "candidate-20261011-9876fedc"]
+    assert len(set(versions)) == len(ids)
+    assert all(version != "v1" for version in versions)
+
+    # Even an insufficient-data artifact keeps its JSON and pickle metadata aligned.
+    metadata = train_model([], model_id=ids[0], version=versions[0], artifact_dir=tmp_path)
+    assert metadata["version"] == versions[0]
+    assert json.loads((tmp_path / f"{ids[0]}.json").read_text())["version"] == versions[0]
+    with (tmp_path / f"{ids[0]}.pkl").open("rb") as stream:
+        assert pickle.load(stream)["metadata"]["version"] == versions[0]
+
+    rows = [{"race_id": f"r{i}", "race_date": f"2026-09-{i + 1:02d}",
+             "winner": bool(i % 2), "lane": 1} for i in range(20)]
+    monkeypatch.setattr(learning, "LEARNING_STATE", tmp_path / "learning-state.json")
+    monkeypatch.setattr(learning, "MIN_COMPLETE_RACES", 1)
+    guarded_call = {}
+
+    def guarded_train(_rows, **kwargs):
+        guarded_call.update(kwargs)
+        return {"id": kwargs["model_id"], "version": kwargs["version"], "status": "untrained"}
+
+    monkeypatch.setattr(learning, "train_model", guarded_train)
+    guarded_candidate({}, rows, model_id=ids[1], min_new_races=0)
+    assert guarded_call["version"] == candidate_version(ids[1])
+
+    import edgelab.models.train as train_module
+    plain_call, synced = {}, {}
+
+    def plain_train(_rows, **kwargs):
+        plain_call.update(kwargs)
+        return {"id": kwargs["model_id"], "version": kwargs["version"], "status": "untrained"}
+
+    monkeypatch.setattr(train_module, "train_model", plain_train)
+    monkeypatch.setattr(cli, "load_rows", lambda: {})
+    monkeypatch.setattr(cli, "_make_training_rows", lambda _store, _sport: rows)
+    monkeypatch.setattr(cli, "merge_rows", lambda _store, payload: synced.update(payload))
+    monkeypatch.setattr(cli, "save_rows", lambda _store: None)
+    assert cli.main(["train", "--sport", "boat"]) == 0
+    assert plain_call["version"] == candidate_version(plain_call["model_id"])
+    assert synced["models"][0]["version"] == plain_call["version"]

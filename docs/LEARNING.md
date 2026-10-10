@@ -18,6 +18,7 @@
 
 - 学習行はボートの `real` データに限定。全出走艇の実結果と勝者1艇、利用可能時刻、完了レース状態を要求する。
 - ボートは B ファイルの事前特徴量だけを新規モデルに使う。Kファイルの展示・ST・天候項目は締切前に使える根拠が不足するためマスクする。既存 v1 artifact はこれらの項目が混入した可能性があり、比較基準として信頼しない。新しい候補は日付と実レース集合の fingerprint を含む別ID/artifactに保存する。
+- D1のモデル自然キーはIDだけでなく `(sport, bet_type, version)` にも一意制約がある。候補versionにも日付とfingerprintを含め、artifactと同期行で同じ値を使う。全候補を `v1` のまま送らない。
 - 候補の fit/temperature validation は holdout より時間的に前でなければならない。候補と比較可能なローカル incumbent artifact が同一holdout以前の fit/validation で、かつ安全な特徴列だけを使う場合に限り、同一holdout上の比較を出す。比較不能なら理由を記録する。holdout は週次候補間で再利用されるため、これは運用上の候補比較であり、独立した最終的な性能証明ではない。
 - `daily` / `learn` は認証付き読み取り専用モデルレジストリで active ID を確認する。`learn` の比較対象はレジストリで active と確認でき、適合するローカルartifactがあるモデルだけ。レジストリまたは推論用active artifactを確認できないときdaily予測はfail closedだが、結果の収集・同期・feedbackは継続する。候補作成・比較・Actionsのいずれも昇格しない。昇格・rollback は既存の人手操作を使う。
 - 比較できる incumbent がない／Log Loss と Brier がともに改善しない／ECEが悪化する場合でも学習artifactと評価レポートは残すが、D1に候補として同期する場合は `metrics_json.promotionEligible=false` と理由を付け、昇格API/UIで不許可とする。

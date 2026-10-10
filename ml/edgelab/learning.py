@@ -263,6 +263,7 @@ def guarded_candidate(store: dict[str, Any], training_rows: Sequence[Mapping[str
     temperature calibration, and this function never promotes a model.
     """
     from edgelab.models.compare import compare_models, temporal_split
+    from edgelab.models.train import candidate_version
     if not training_rows:
         return {"status": "skipped", "reason": "no complete real outcome cohorts"}
     _, _, holdout = temporal_split(training_rows)
@@ -283,7 +284,8 @@ def guarded_candidate(store: dict[str, Any], training_rows: Sequence[Mapping[str
                 "evaluatedRaceIds": complete_ids,
                 "reason": "refusing to overwrite artifact for a model already present in registry"}
     holdout_start = min(str(r.get("race_date") or r.get("date")) for r in holdout)
-    result = train_model(training_rows, sport="boat", model_id=model_id)
+    result = train_model(training_rows, sport="boat", model_id=model_id,
+                         version=candidate_version(model_id))
     output: dict[str, Any] = {"status": result.get("status"), "modelId": model_id,
                               "newRaces": len(new_ids), "holdoutStart": holdout_start,
                               "holdoutEnd": max(str(r.get("race_date") or r.get("date")) for r in holdout),

@@ -24,6 +24,10 @@ def _store():
 
 def test_daily_sync_is_limited_to_today_and_previous_day_and_backfill_error_is_soft(monkeypatch):
     store = _store()
+    # Midday/night K data may already have today's results and payout available.
+    store["results"].append({"race_id": "today", "number": 1, "finish_order": 1, "data_origin": "real"})
+    store["payouts"].append({"race_id": "today", "bet_type": "win", "selection": "1",
+                             "payout": 150, "data_origin": "real"})
     synced = {}
     monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(store))
     monkeypatch.setattr(cli, "save_rows", lambda value: None)
@@ -38,8 +42,8 @@ def test_daily_sync_is_limited_to_today_and_previous_day_and_backfill_error_is_s
 
     assert {row["id"] for row in synced["races"]} == {"prev", "today"}
     assert {row["race_id"] for row in synced["entries"]} == {"today"}
-    assert {row["race_id"] for row in synced["results"]} == {"prev"}
-    assert {row["race_id"] for row in synced["payouts"]} == {"prev"}
+    assert {row["race_id"] for row in synced["results"]} == {"prev", "today"}
+    assert {row["race_id"] for row in synced["payouts"]} == {"prev", "today"}
     assert synced["predictions"] == [{"race_id": "today"}]
     assert result["backfill"]["skipped"] is True
     assert "wrangler unavailable" in result["backfill"]["reason"]
