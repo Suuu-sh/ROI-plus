@@ -70,6 +70,17 @@ describe('Boatrace win odds collection', () => {
     expect(sqlite.prepare('SELECT source,status,records,error FROM collection_runs').get()).toMatchObject({ source: 'boatrace-odds-worker', status: 'success', records: 12, error: null });
   });
 
+  it('runs only once when the cron fires twice within five minutes', async () => {
+    race('dup-race', now.getTime() + 5 * 60_000);
+    const html = readFileSync(resolve(root, 'data/fixtures/boatrace/oddstf_24_12_20261009.html'), 'utf8');
+    const fetch = vi.fn(async () => ({ ok: true, status: 200, text: async () => html }));
+    const sleep = vi.fn(async () => {});
+    await collectOdds(DB, now, { fetch, sleep });
+    const second = await collectOdds(DB, new Date(now.getTime() + 4000), { fetch, sleep });
+    expect(second.status).toBe('skipped');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('does nothing when the Worker flag is disabled', async () => {
     race('flag-race', now.getTime() + 5 * 60_000);
     const fetch = vi.fn();

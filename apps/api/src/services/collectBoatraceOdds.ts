@@ -23,6 +23,11 @@ export async function selectOddsTargets(db: Db, now: Date, maxRequests = 30): Pr
 
 export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = {}) {
   const maxRequests = Math.min(30, Math.max(0, Math.floor(opts.maxRequests ?? 30)));
+  // Cron がまれに二重起動するため、settings の行を使った原子的なロックで5分に1回だけ実行する
+  const nowIso = jstIso(now.getTime()), staleIso = jstIso(now.getTime() - 5 * 60_000);
+  await db.prepare(`INSERT INTO settings(key,value) VALUES('odds_lock','') ON CONFLICT(key) DO NOTHING`).run();
+  const lock = await db.prepare(`UPDATE settings SET value=? WHERE key='odds_lock' AND value<?`).bind(nowIso, staleIso).run();
+  if (!lock.meta?.changes) return { status: 'skipped' as const, records: 0, targets: 0 };
   const targets = await selectOddsTargets(db, now, maxRequests);
   if (!targets.length) return { status: 'skipped' as const, records: 0, targets: 0 };
   const fetcher = opts.fetch ?? ((url, init) => fetch(url, init));
