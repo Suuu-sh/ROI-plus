@@ -34,3 +34,4 @@
 - Profitability欄は実際に記録された全艇分の締切前オッズと実勝者の払戻がそろう場合だけcounterfactual replayとして算出する。予測確率とオッズから利益を推定せず、実購入ROIや現行自動購入ルールの再現と呼ばない。証拠不足は明示的に `counterfactual_replay_unproven` とする。
 - オプション `sync_validation` は認証済みモデルレジストリを読み、検証済みcandidateのmetricsだけを更新する。JSON/pickle artifact本体は変更しない。`promotionEligible=false` はそのまま維持し、通常昇格とは別の `initialBaselineEligible` evidenceを記録するだけで、昇格は明示的な人手承認が必要。
 - workflow は検証レポートと同一のJSON/pickle candidate artifact bundleを90日間保存する。承認後にActions cacheが失効している場合は、Daily workflowを手動実行し `validated_model_run_id` に検証workflowのrun IDを指定して正確なartifact pairを復元する。日次推論はregistryに登録されたsafe schema markerとpickle SHAが一致しない限りfail closedし、候補や旧artifactへ自動フォールバックしない。artifact retention/cacheともに失効した場合は再検証可能な正確なartifact pairを再取得するまで推論を再開しない。
+- Daily は当日と前日のKファイルを毎回強制再取得する。Kは開催中に更新され得るため、通常のB・過去日のキャッシュ方針は変えず、更新されたKが有効なLZHかつ同日レース結果としてparseできた場合だけatomic replaceする。404、取得/parse失敗、要求budget不足は古いraw cacheと正規化済み行を保持し、collection runを `partial` / `failed` として記録する。強制再取得もネットワーク要求budgetに計上する。

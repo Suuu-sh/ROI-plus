@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import date
 from pathlib import Path
+from typing import Callable, Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -54,12 +55,15 @@ def boatrace_url(kind: str, target_date: str | date) -> str:
 def fetch_boatrace_file(kind: str, target_date: str | date,
                         cache_dir: str | os.PathLike[str] | None = None,
                         retries: int = DEFAULT_RETRIES,
-                        timeout: float = 30.0) -> Path | None:
+                        timeout: float = 30.0, *, refresh: bool = False,
+                        validator: Callable[[str], Any] | None = None) -> Path | None:
     """Fetch and cache one official B/K LZH archive.
 
     ``retries=3`` means up to three retries after the initial attempt. Network
     failures and retryable HTTP statuses use exponential backoff (1, 2, 4s by
-    default); 404 is returned immediately as ``None`` and is not cached.
+    default); 404 is returned immediately as ``None``. ``refresh=True`` bypasses
+    an existing cache and atomically replaces it only after a nonempty response;
+    a 404 or failed refresh leaves any prior cache bytes untouched.
     """
     day = _date(target_date)
     prefix = kind.lower()
@@ -67,7 +71,7 @@ def fetch_boatrace_file(kind: str, target_date: str | date,
     if cache_dir is None:
         cache_dir = Path(__file__).resolve().parents[3] / "data" / "raw" / "boatrace"
     target = Path(cache_dir) / f"{prefix}{day:%y%m%d}.lzh"
-    if target.is_file() and target.stat().st_size > 0:
+    if not refresh and target.is_file() and target.stat().st_size > 0:
         return target
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +90,14 @@ def fetch_boatrace_file(kind: str, target_date: str | date,
                     temp_file.write(payload)
                     temp_file.flush()
                     os.fsync(temp_file.fileno())
+                # A successful HTTP response can still be a truncated/corrupt
+                # archive. Validate before replacement so the last good cache
+                # remains available if the refresh payload is unusable.
+                decoded = read_lzh(temp_name)
+                if not decoded.strip():
+                    raise OSError(f"empty archive contents from {url}")
+                if validator is not None:
+                    validator(decoded)
                 os.replace(temp_name, target)
             finally:
                 if os.path.exists(temp_name):

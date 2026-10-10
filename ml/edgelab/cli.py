@@ -131,7 +131,9 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     """Collect and synchronize only the two-day daily delta, then best-effort backfill."""
     target = date.fromisoformat(day)
     previous = (target - timedelta(days=1)).isoformat()
-    collect_boat(previous, day)
+    # K files can be published or amended while a meeting is in progress. Force
+    # a fresh K fetch for today and the prior day; B files keep their stable cache.
+    collect_boat(previous, day, refresh_k_dates={previous, day})
     rows = load_rows()
     from edgelab.sync import fetch_model_registry
     registry = fetch_model_registry()
@@ -257,7 +259,8 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str) -> l
     return result
 
 
-def collect_boat(start: str, end: str, *, max_requests: int | None = None) -> int:
+def collect_boat(start: str, end: str, *, max_requests: int | None = None,
+                 refresh_k_dates: set[str] | None = None) -> int:
     from edgelab.collectors.boatrace import fetch_boatrace_file, read_lzh
     from edgelab.parsers.boatrace_b import parse_b
     from edgelab.parsers.boatrace_k import parse_k
@@ -269,14 +272,36 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None) -> in
         for kind, parser in (("B", parse_b), ("K", parse_k)):
             try:
                 cache = Path("data/raw/boatrace") / f"{kind.lower()}{day:%y%m%d}.lzh"
-                if not cache.is_file() and max_requests is not None and requests >= max_requests:
-                    continue
-                if not cache.is_file():
-                    requests += 1
-                path = fetch_boatrace_file(kind, day)
-                if path is None:
-                    existing = True
-                    continue
+                refresh_k = kind == "K" and day.isoformat() in (refresh_k_dates or set())
+                cache_exists = cache.is_file()
+                if (not cache_exists or refresh_k) and max_requests is not None and requests >= max_requests:
+                    if refresh_k:
+                        errors.append("K refresh skipped: max_requests budget exhausted")
+                        path = cache if cache_exists else None
+                        if path is None:
+                            continue
+                    else:
+                        continue
+                else:
+                    if not cache_exists or refresh_k:
+                        requests += 1
+                    validator = None
+                    if refresh_k:
+                        def validator(content: str, *, expected_date=day.isoformat(), parse=parser):
+                            parsed = parse(content, race_date=expected_date)
+                            race_ids = {str(r.get("id")) for r in parsed.get("races", []) if r.get("id")}
+                            if (not race_ids or not any(str(r.get("race_id")) in race_ids
+                                                        for r in parsed.get("results", []))
+                                    or any(r.get("race_date") != expected_date for r in parsed.get("races", []))):
+                                raise ValueError("refreshed K file has no valid same-day race results")
+                    path = fetch_boatrace_file(kind, day, refresh=refresh_k, validator=validator)
+                    if path is None:
+                        existing = True
+                        if refresh_k:
+                            errors.append("K refresh unavailable: source file is not present")
+                            path = cache if cache_exists else None
+                        if path is None:
+                            continue
                 content = read_lzh(path)
                 parsed = parser(content, race_date=day.isoformat())
                 for table, values in parsed.items():
