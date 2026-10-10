@@ -17,6 +17,7 @@ let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
 beforeEach(() => {
   sqlite = new Sqlite(':memory:'); DB = new D1SqliteAdapter(sqlite);
   for (const f of readdirSync(resolve(root, 'db/migrations')).filter(f => f.endsWith('.sql')).sort()) sqlite.exec(readFileSync(resolve(root, 'db/migrations', f), 'utf8'));
+  sqlite.prepare("INSERT INTO settings(key,value) VALUES('roi_d1_write_budget_utc',?)").run(JSON.stringify({ date: new Date().toISOString().slice(0, 10), reserved: 0, oddsReserved: 0 }));
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('24','boat','Fixture')").run();
 });
 afterEach(() => sqlite.close());
