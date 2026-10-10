@@ -26,6 +26,17 @@ function race(id: string, post = now.getTime() + 5 * 60_000, date = today) {
   sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at)
     VALUES(?,'boat','24',?,?,?,'scheduled','real',?)`).run(id, date, nextRaceNo++, stamp(post), stamp(now.getTime()));
 }
+function finishedOpenBet(id: string) {
+  const raceId = `${id}-race`;
+  sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,status,data_origin,updated_at)
+    VALUES(?,'boat','24',?,90,'finished','real',?)`).run(raceId, today, stamp(now.getTime()));
+  sqlite.prepare(`INSERT INTO entries(id,race_id,number,name,available_at,data_origin) VALUES(?, ?,1,'Lane 1',?,'real')`).run(`${id}-entry`, raceId, stamp(now.getTime()));
+  sqlite.prepare(`INSERT INTO results(race_id,finish_order,number,data_origin) VALUES(?,1,1,'real')`).run(raceId);
+  sqlite.prepare(`INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin) VALUES(?,'win','1',200,'real')`).run(raceId);
+  sqlite.prepare(`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,placed_at,status,data_origin)
+    VALUES(?,?,'boat','win','1',100,'manual',0.5,2,0,'NEUTRAL',?,'open','real')`).run(`${id}-bet`, raceId, stamp(now.getTime()));
+  return `${id}-bet`;
+}
 
 describe('minute odds collection controls', () => {
   it('does not write settings or collection logs when no current-day targets exist', async () => {
@@ -113,14 +124,24 @@ describe('minute odds collection controls', () => {
     expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='odds_lock'").get()).toMatchObject({ n: 0 });
   });
 
-  it('keeps the every-minute event isolated from settlement and auto-bet work', async () => {
-    const betRace = 'minute-does-not-settle';
-    sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,status,data_origin,updated_at)
-      VALUES(?,'boat','24',?,2,'finished','real',?)`).run(betRace, today, stamp(now.getTime()));
-    sqlite.prepare(`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,placed_at,status,data_origin)
-      VALUES('minute-open-bet',?,'boat','win','1',100,'manual',0.5,2,0,'NEUTRAL',?,'open','real')`).run(betRace, stamp(now.getTime()));
-    await worker.scheduled({ cron: '* * * * *' } as ScheduledController, { DB, ENABLE_BOATRACE_ODDS_SCRAPE: 'false', ENABLE_AUTO_BET: 'false' } as never);
-    expect(sqlite.prepare("SELECT status FROM bets WHERE id='minute-open-bet'").get()).toMatchObject({ status: 'open' });
+  it('does not settle bets on an off-boundary minute event', async () => {
+    const betId = finishedOpenBet('off-boundary');
+    let minute = Math.floor(Date.now() / 60_000) + 1;
+    while (minute % 10 === 0) minute++;
+    await worker.scheduled({ cron: '* * * * *', scheduledTime: minute * 60_000 } as ScheduledController, { DB, ENABLE_BOATRACE_ODDS_SCRAPE: 'false', ENABLE_AUTO_BET: 'false' } as never);
+    expect(sqlite.prepare('SELECT status FROM bets WHERE id=?').get(betId)).toMatchObject({ status: 'open' });
     expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({ n: 0 });
+  });
+
+  it('runs ten-minute maintenance after a fail-closed odds reservation error', async () => {
+    const betId = finishedOpenBet('boundary');
+    const actualNow = new Date();
+    race('collector-target', actualNow.getTime() + 5 * 60_000, jstDate(actualNow));
+    sqlite.exec(`CREATE TRIGGER fail_odds_budget BEFORE INSERT ON settings WHEN NEW.key='odds_daily_write_budget'
+      BEGIN SELECT RAISE(ABORT, 'simulated D1 write quota'); END`);
+    const tenMinuteBoundary = Math.floor(Date.now() / 600_000) * 10;
+    await worker.scheduled({ cron: '* * * * *', scheduledTime: tenMinuteBoundary * 60_000 } as ScheduledController, { DB, ENABLE_BOATRACE_ODDS_SCRAPE: 'true', ENABLE_AUTO_BET: 'false' } as never);
+    expect(sqlite.prepare('SELECT status,payout FROM bets WHERE id=?').get(betId)).toMatchObject({ status: 'won', payout: 200 });
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='odds_lock'").get()).toMatchObject({ n: 0 });
   });
 });
