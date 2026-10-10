@@ -4,13 +4,20 @@ import { dateTime, odds, pct, signedPct, signedYen, tone, yen } from '../lib/for
 import { EdgeBadge, Empty, OriginBadge, SportDot } from './ui'
 
 const statusStyle = { open: 'text-muted', won: 'text-pos', lost: 'text-faint', void: 'text-warn' } as const
+const resultWaitLabel: Record<NonNullable<Bet['resultWaitReason']>, string> = {
+  notstarted: '発走前', officialresultmissing: '公式結果未取得', payoutmissing: '公式払戻未取得',
+  settlementpending: '精算待ち', collectionfailed: '結果収集に失敗/一部失敗の記録あり',
+  unknown: '状況不明', cancelled: 'レース中止', disqualified: '失格記録あり',
+  withdrawn: '欠場記録あり', sampledata: 'サンプル（公式結果ではありません）',
+}
+const collectionStatusLabel = { success: '成功', partial: '一部成功', failed: '失敗', skipped: 'スキップ' } as const
 
 export function BetsTable({ bets, limit }: { bets: Bet[]; limit?: number }) {
   const rows = limit ? bets.slice(0, limit) : bets
   if (!rows.length) return <Empty>仮想購入はまだありません。レース画面から購入できます。</Empty>
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[720px] text-sm">
+      <table className="w-full min-w-[840px] text-sm">
         <thead>
           <tr className="text-left text-[11px] uppercase tracking-wider text-muted">
             <th className="px-4 py-2 font-medium">購入</th>
@@ -20,6 +27,7 @@ export function BetsTable({ bets, limit }: { bets: Bet[]; limit?: number }) {
             <th className="px-2 py-2 text-right font-medium">購入時/最終</th>
             <th className="px-2 py-2 text-right font-medium">期待収益率</th>
             <th className="px-2 py-2 font-medium">判定</th>
+            <th className="px-2 py-2 font-medium">結果状況</th>
             <th className="px-2 py-2 text-right font-medium">金額</th>
             <th className="px-4 py-2 text-right font-medium">損益</th>
           </tr>
@@ -48,6 +56,14 @@ export function BetsTable({ bets, limit }: { bets: Bet[]; limit?: number }) {
                 </td>
                 <td className={`num px-2 py-2.5 text-right ${tone(b.expectedRoi)}`}>{signedPct(b.expectedRoi)}</td>
                 <td className="px-2 py-2.5"><div className="flex gap-1"><EdgeBadge edge={b.edgeLabel} compact />{b.dataOrigin === 'sample' && <OriginBadge origin="sample" />}</div></td>
+                <td className="px-2 py-2.5 text-xs">
+                  {b.status === 'open' && b.dataOrigin === 'sample' ? <span className="rounded bg-raised px-1.5 py-0.5 text-muted">{resultWaitLabel.sampledata}</span> : null}
+                  {b.status === 'open' && b.dataOrigin === 'real' ? <>
+                    <span className="rounded bg-raised px-1.5 py-0.5 text-muted">{resultWaitLabel[b.resultWaitReason ?? 'unknown']}</span>
+                    {b.resultCollectionSource && <div className="mt-1 text-[10px] text-faint">最新結果収集記録 {b.resultCollectionSource} · {b.resultCollectionStatus ? collectionStatusLabel[b.resultCollectionStatus] : '状態不明'} · 試行 {dateTime(b.resultCollectionLastAttemptAt)}</div>}
+                    {b.resultCollectionLastSuccessAt && <div className="text-[10px] text-faint">最終成功 {dateTime(b.resultCollectionLastSuccessAt)}</div>}
+                  </> : null}
+                </td>
                 <td className="num px-2 py-2.5 text-right">{yen(b.stake)}</td>
                 <td className="num whitespace-nowrap px-4 py-2.5 text-right">
                   <span className={`mr-2 text-xs ${statusStyle[b.status]}`}>{t().betStatus[b.status]}</span>

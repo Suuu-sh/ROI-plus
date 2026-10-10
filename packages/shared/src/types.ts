@@ -5,6 +5,7 @@ export type EdgeLabel = 'HIGH_EDGE' | 'POSITIVE_EDGE' | 'NEUTRAL' | 'NEGATIVE_ED
 export type RaceStatus = 'scheduled' | 'closed' | 'finished' | 'cancelled';
 export type ModelStatus = 'untrained' | 'candidate' | 'active' | 'retired';
 export type BetStatus = 'open' | 'won' | 'lost' | 'void';
+export type ResultWaitReason = 'notstarted' | 'officialresultmissing' | 'payoutmissing' | 'settlementpending' | 'collectionfailed' | 'unknown' | 'cancelled' | 'disqualified' | 'withdrawn' | 'sampledata';
 
 export interface RaceSummary {
   id: string; sport: Sport; venueId: string; venueName: string; raceDate: string; raceNo: number;
@@ -45,7 +46,13 @@ export interface Bet {
   edgeLabel: EdgeLabel; modelId: string | null; placedAt: string; status: BetStatus;
   payout: number | null; profit: number | null; finalOdds: number | null; settledAt: string | null;
   dataOrigin: DataOrigin; groupId: string | null; candidateRank: number | null; candidateCount: number | null;
-  oddsCapturedAt: string | null; predictedAtAtBet: string | null; venueName?: string; raceNo?: number;
+  oddsCapturedAt: string | null; predictedAtAtBet: string | null;
+  resultWaitReason?: ResultWaitReason | null;
+  resultCollectionSource?: string | null;
+  resultCollectionStatus?: 'success' | 'partial' | 'failed' | 'skipped' | null;
+  resultCollectionLastAttemptAt?: string | null;
+  resultCollectionLastSuccessAt?: string | null;
+  venueName?: string; raceNo?: number;
 }
 
 export interface RankComparisonMeasure { stake: number; payout: number; profit: number; roi: number | null }

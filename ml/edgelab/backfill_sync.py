@@ -1,40 +1,26 @@
-"""Throttled backfill of historical rows into production D1.
+"""Throttled backfill of historical rows into D1 using the API budget contract.
 
-D1's free plan allows 100k rows written per day, and each upsert writes more
-than one row because of indexes. This module sends whole race days, oldest
-first, while the measured ``rows_written_24h`` plus an estimate stays under a
-budget. Progress is stored locally so it can be resumed by a daily job.
+Historical days are sent oldest-first only after current/previous-day sync has
+completed. Progress is stored locally so it can be resumed by a later run.
 """
 from __future__ import annotations
 
 import json
-import re
-import subprocess
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from edgelab.storage import load_rows
-from edgelab.sync import sync_rows
+from edgelab.sync import fetch_write_budget, sync_rows
 from edgelab.venues import venue_rows
 
 STATE_PATH = Path("ml/data/backfill_state.json")
-# Measured on roi-plus: 53,302 write statements produced 130,506 rows written.
+# Conservative estimate for indexes and trigger/update amplification.
 WRITE_AMPLIFICATION = 2.6
-# D1 の書き込み上限（10万行/日）はアカウント内の全 DB 合計。ROI+ は最大約3.5万行/日に抑え、
-# 他の DB（reysonai など）に余裕を残す。指標が読めないときは使用済みをこの値と仮定する。
-ASSUMED_USAGE_WITHOUT_METRICS = 20_000
+# Historical backfill must leave room for other applications on the account.
+MAX_BACKFILL_BUDGET = 20_000
 RACE_TABLES = ("entries", "results", "payouts", "predictions")
-
-
-def rows_written_24h(database: str, cwd: str = "apps/api") -> int:
-    """Return D1's rolling 24h rows-written counter via wrangler."""
-    out = subprocess.run(["npx", "wrangler", "d1", "info", database], cwd=cwd,
-                         capture_output=True, text=True, check=True).stdout
-    match = re.search(r"rows_written_24h\s*│\s*([\d,]+)", out)
-    if not match:
-        raise RuntimeError("rows_written_24h not found in wrangler output")
-    return int(match.group(1).replace(",", ""))
 
 
 def group_by_date(store: dict[str, list[dict[str, Any]]], since: str, until: str | None):
@@ -64,19 +50,31 @@ def run(*, since: str, until: str | None, budget: int, database: str,
     state = json.loads(state_path.read_text()) if state_path.exists() else {"done": []}
     done = set(state["done"])
     days = {d: rows for d, rows in group_by_date(load_rows(), since, until).items() if d not in done}
+    status = None
     if dry_run:
-        used = 0
+        available = min(max(0, budget), MAX_BACKFILL_BUDGET)
     else:
         try:
-            used = rows_written_24h(database)
-        except Exception:  # wrangler/API token unavailable (e.g. CI without CLOUDFLARE_API_TOKEN)
-            # Conservative assumption: daily delta + odds + another run today already used this much.
-            used = ASSUMED_USAGE_WITHOUT_METRICS
+            status = fetch_write_budget()
+        except Exception as exc:
+            return {"skipped": True, "reason": f"write budget unavailable ({type(exc).__name__})",
+                    "sent_days": [], "remaining_days": len(days), "next_day": next(iter(days), None)}
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        if status.get("date") != today_utc or status.get("state") != "known":
+            return {"skipped": True, "reason": "write budget is not known for the current UTC day",
+                    "budget_status": status.get("state"), "sent_days": [],
+                    "remaining_days": len(days), "next_day": next(iter(days), None)}
+        # Do not infer shared usage. The API's `remaining` is authoritative;
+        # this client further limits its historical work to 20k rows/day.
+        available = min(max(0, budget), MAX_BACKFILL_BUDGET, status["limit"], status["remaining"])
+        if status.get("reserved") is not None:
+            available = min(available, max(0, status["limit"] - status["reserved"]))
+    used = 0
     sent: list[str] = []
     first = True
     for day, rows in days.items():
         cost = estimate_writes(rows)
-        if used + cost > budget:
+        if used + cost > available:
             break
         payload: dict[str, list] = dict(rows)
         if first:  # master rows once per run (idempotent upserts)
@@ -92,5 +90,8 @@ def run(*, since: str, until: str | None, budget: int, database: str,
         used += cost
         sent.append(day)
     remaining = [d for d in days if d not in sent]
-    return {"sent_days": sent, "estimated_rows_written_24h": used, "remaining_days": len(remaining),
-            "next_day": remaining[0] if remaining else None}
+    result = {"sent_days": sent, "estimated_rows_written": used, "backfill_budget": available,
+              "remaining_days": len(remaining), "next_day": remaining[0] if remaining else None}
+    if status is not None:
+        result["budget_status"] = status.get("state")
+    return result
