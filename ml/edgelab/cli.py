@@ -196,7 +196,11 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None) -> in
                         pre_race_at = None
                 # Keep the row-level available_at from the B program; record the
                 # later availability of exhibition data separately.
-                entry.pop("available_at", None)
+                # 番組情報（選手・モーター等）は B と同じく開催日 0:00 時点で利用可能。
+                # B が欠けた日でも ingest 必須項目が埋まるよう、pop せず同じ値を入れる。
+                race_date = str(entry.get("race_id", ""))[5:13]
+                entry["available_at"] = (f"{race_date[:4]}-{race_date[4:6]}-{race_date[6:]}T00:00:00+09:00"
+                                         if len(race_date) == 8 and race_date.isdigit() else None)
                 try:
                     extra = json.loads(entry.get("features_json") or "{}")
                 except (TypeError, ValueError):

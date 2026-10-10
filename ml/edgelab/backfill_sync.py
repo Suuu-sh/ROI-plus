@@ -47,6 +47,9 @@ def group_by_date(store: dict[str, list[dict[str, Any]]], since: str, until: str
         for row in store.get(table, []):
             day = date_of.get(row["race_id"])
             if day:
+                if table == "entries" and not row.get("available_at"):
+                    # 既存キャッシュの補修: 番組情報は開催日 0:00 時点で利用可能
+                    row = {**row, "available_at": f"{day}T00:00:00+09:00"}
                 days[day][table].append(row)
     return dict(sorted(days.items()))
 
