@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .models.train import _features, _race_softmax, _score
+from .features.boat import BASE_FEATURE_COLUMNS
 from .normalization.availability import available_by
 
 
@@ -33,6 +34,9 @@ def predict_rows(rows: Sequence[Mapping[str, Any]], artifact: Mapping[str, Any] 
     timestamp = predicted_at or datetime.now(timezone.utc).isoformat()
     meta = loaded.get("metadata") or {}
     model_id = meta.get("id")
+    feature_columns = list(loaded.get("feature_columns") or meta.get("featureColumns") or [])
+    if meta.get("sport") == "boat" and any(c not in BASE_FEATURE_COLUMNS for c in feature_columns):
+        raise ValueError("active boat artifact has an unsafe/legacy feature schema; train a clean candidate before prediction")
     usable = []
     for row in rows:
         if not available_by(row, timestamp):
@@ -45,7 +49,7 @@ def predict_rows(rows: Sequence[Mapping[str, Any]], artifact: Mapping[str, Any] 
         return [{"id": f"{r['race_id']}:{model_id}:{int(r['number'])}:{timestamp}", "race_id": str(r["race_id"]), "number": int(r["number"]), "model_id": model_id,
                  "probability": None, "prob_std": None, "predicted_at": timestamp,
                  "data_origin": data_origin} for r in usable]
-    columns = list(loaded.get("feature_columns") or meta.get("featureColumns") or [])
+    columns = feature_columns
     if not columns:
         raise ValueError("Model artifact is missing feature_columns")
     models = [loaded["model"], *list(loaded.get("bootstrap_models") or [])]

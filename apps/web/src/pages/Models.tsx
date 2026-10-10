@@ -5,7 +5,7 @@ import { useAsync } from '../lib/useAsync'
 import { dateTime, num, pct, signedPct } from '../lib/format'
 import { t } from '../i18n'
 import { Empty, ErrorState, Loading, OriginBadge, Section, SportIcon } from '../components/ui'
-import { isSampleModel } from '../lib/models'
+import { isSampleModel, promotionAvailability } from '../lib/models'
 
 const statusStyle = {
   active: 'bg-pos/10 text-pos border-pos/40', candidate: 'bg-accent/10 text-accent border-accent/40',
@@ -59,6 +59,7 @@ export function ModelsPage() {
                     {ms.map((m) => {
                       // 同じデータ（サンプル同士・実データ同士）のモデルだけを比較する
                       const sameOrigin = active != null && isSampleModel(active) === isSampleModel(m)
+                      const promotion = promotionAvailability(m.metrics)
                       const better = (k: 'logLoss' | 'brier' | 'ece') => active && sameOrigin && m.id !== active.id && m.metrics[k] != null && active.metrics[k] != null
                         ? (m.metrics[k]! < active.metrics[k]! ? 'text-pos' : 'text-neg') : ''
                       return (
@@ -81,7 +82,13 @@ export function ModelsPage() {
                           <td className="num px-2 py-2.5 text-right">{pct(m.metrics.maxDrawdown)}</td>
                           <td className="num px-2 py-2.5 text-xs text-muted">{dateTime(m.trainedAt)}</td>
                           <td className="px-4 py-2.5 text-right">
-                            {m.status === 'candidate' && <button className="btn-primary h-7 px-2.5 text-xs" disabled={busy != null} onClick={() => act('promote', m)}>昇格</button>}
+                            {m.status === 'candidate' && (
+                              <div className="flex flex-col items-end gap-1">
+                                <button className="btn-primary h-7 px-2.5 text-xs" disabled={busy != null || !promotion.enabled}
+                                  title={promotion.reason ?? undefined} onClick={() => act('promote', m)}>昇格</button>
+                                {!promotion.enabled && <span className="max-w-[220px] text-right text-[10px] text-muted">{promotion.reason}</span>}
+                              </div>
+                            )}
                           </td>
                         </tr>
                       )

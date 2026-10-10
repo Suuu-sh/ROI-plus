@@ -45,8 +45,8 @@ def select_odds_targets(races, snapshots, now: datetime, window_min: int = 25):
 
 
 def _models_for_live(rows):
-    models = [m for m in rows.get("models", []) if m.get("sport") == "boat" and m.get("status") in {"active", "candidate"}]
-    return sorted(models, key=lambda m: (m.get("status") == "active", m.get("trained_at") or ""), reverse=True)
+    return [m for m in rows.get("models", [])
+            if m.get("sport") == "boat" and m.get("status") == "active"]
 
 
 def run_live(target_date: str, *, window_min: int = 25, now: str | None = None,
@@ -97,34 +97,54 @@ def run_live(target_date: str, *, window_min: int = 25, now: str | None = None,
         captured = datetime.now(JST).isoformat(timespec="seconds")
         delta["odds_snapshots"].extend(make_snapshot_rows(str(race["id"]), parsed, captured))
 
-    # Select the latest active/candidate artifact and predict only races not
-    # already represented by that model; predict_rows retains point-in-time guards.
+    # Do not trust cached active status for this live entrypoint. If the
+    # authenticated registry is unavailable, skip prediction rather than use a
+    # stale or candidate artifact.
+    if os.environ.get("EDGELAB_API_URL") and os.environ.get("INGEST_TOKEN"):
+        from edgelab.sync import fetch_model_registry
+        from edgelab.cli import _apply_model_registry
+        _apply_model_registry(store, fetch_model_registry())
+    else:
+        store["models"] = []
+
+    # Only the active model can drive live predictions; candidates are evaluation-only.
     models = _models_for_live(store)
+    prediction_error = None
+    if not models:
+        prediction_error = "no authoritative active model; candidate models are evaluation-only"
     if models:
         from edgelab.predict import load_artifact, predict_rows
         from edgelab.features.boat import build_boat_features
         model = models[0]
         artifact_path = __import__("pathlib").Path("ml/artifacts") / f"{model['id']}.pkl"
         if artifact_path.is_file():
-            artifact = load_artifact(artifact_path)
-            existing = {(p.get("race_id"), p.get("model_id")) for p in store.get("predictions", [])}
-            target_ids = {r.get("id") for r in targets[:remaining]}
-            for race in races:
-                if race.get("id") not in target_ids:
-                    continue
-                if (race.get("id"), model["id"]) in existing:
-                    continue
-                entries = [e for e in store.get("entries", []) if e.get("race_id") == race.get("id")]
-                enriched = [{**e, "wind_speed": race.get("wind_speed"), "wave_height": race.get("wave_height")}
-                            for e in entries]
-                features = build_boat_features(enriched, race_date=day.isoformat(), predicted_at=current.isoformat())
-                delta["predictions"].extend(predict_rows([{**e, **f} for e, f in zip(enriched, features)],
-                                                        artifact, predicted_at=current.isoformat()))
+            try:
+                artifact = load_artifact(artifact_path)
+                existing = {(p.get("race_id"), p.get("model_id")) for p in store.get("predictions", [])}
+                target_ids = {r.get("id") for r in targets[:remaining]}
+                for race in races:
+                    if race.get("id") not in target_ids:
+                        continue
+                    if (race.get("id"), model["id"]) in existing:
+                        continue
+                    entries = [e for e in store.get("entries", []) if e.get("race_id") == race.get("id")
+                               and e.get("data_origin") == "real"]
+                    enriched = [dict(e) for e in entries]
+                    features = build_boat_features(enriched, race_date=day.isoformat(), predicted_at=current.isoformat())
+                    from edgelab.features.boat import FEATURE_COLUMNS
+                    model_rows = [{**{k: v for k, v in e.items() if k not in FEATURE_COLUMNS}, **f}
+                                  for e, f in zip(enriched, features)]
+                    delta["predictions"].extend(predict_rows(model_rows,
+                                                            artifact, predicted_at=current.isoformat()))
+            except (ValueError, FileNotFoundError) as exc:
+                prediction_error = f"{type(exc).__name__}: {exc}"
+        else:
+            prediction_error = f"active artifact missing: {artifact_path}"
     # Preserve just this date's B/K rows in the outbound delta.
     delta["collection_runs"].append({"id": str(uuid.uuid4()), "source": "boatrace-odds", "sport": "boat",
         "target_date": day.isoformat(), "started_at": current.isoformat(timespec="seconds"),
-        "finished_at": datetime.now(JST).isoformat(timespec="seconds"), "status": "success", "records":
-        len(delta["odds_snapshots"]) + len(delta["predictions"]), "error": None, "reason": None})
+        "finished_at": datetime.now(JST).isoformat(timespec="seconds"), "status": "partial" if prediction_error else "success", "records":
+        len(delta["odds_snapshots"]) + len(delta["predictions"]), "error": prediction_error, "reason": prediction_error})
     merge_rows(store, delta)
     save_rows(store)
     if os.environ.get("EDGELAB_API_URL"):
@@ -132,4 +152,4 @@ def run_live(target_date: str, *, window_min: int = 25, now: str | None = None,
         sync_rows(delta)
     return {"status": "success", "requests": min(max_requests, raw_requests + min(len(targets), remaining)),
             "races": len(races), "odds_snapshots": len(delta["odds_snapshots"]),
-            "predictions": len(delta["predictions"])}
+            "predictions": len(delta["predictions"]), "prediction_error": prediction_error}

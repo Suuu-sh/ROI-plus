@@ -64,7 +64,7 @@ export interface Breakdown {
 
 export interface ModelMetrics {
   logLoss?: number; brier?: number; ece?: number; roi?: number; expectedRoi?: number; maxDrawdown?: number;
-  nRaces?: number; baselineLogLoss?: number;
+  nRaces?: number; baselineLogLoss?: number; promotionEligible?: boolean; promotionReason?: string;
 }
 export interface ModelInfo {
   id: string; sport: Sport; betType: BetType; version: string; algorithm: string; status: ModelStatus;
