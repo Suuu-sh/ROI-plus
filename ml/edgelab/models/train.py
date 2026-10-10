@@ -153,6 +153,8 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
                 feature_columns: Sequence[str] | None = None,
                 artifact_dir: str | Path = "ml/artifacts", min_train_races: int = 300,
                 valid_fraction: float = .15, test_fraction: float = .15,
+                boat_venue_schema_version: str | None = None,
+                corrected_training_data_sha256: str | None = None,
                 n_bootstrap: int = 4, seed: int = 17) -> dict[str, Any]:
     """Train chronological LightGBM classifier and write model.pkl + metadata.json.
 
@@ -265,6 +267,12 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
         "calibration": "validation race-wise temperature scaling", "metrics": metrics,
         "trainedAt": datetime.now(timezone.utc).isoformat(), "featureColumns": columns,
         "nBootstrapModels": len(bootstrap_models), "notes": "prob_std is standard deviation across race-bootstrap models"}
+    if sport == "boat" and boat_venue_schema_version:
+        if (not corrected_training_data_sha256 or len(corrected_training_data_sha256) != 64
+                or any(char not in "0123456789abcdef" for char in corrected_training_data_sha256)):
+            raise ValueError("boat venue schema marker requires a lowercase SHA256 of the corrected source snapshot")
+        meta["boatVenueSchemaVersion"] = boat_venue_schema_version
+        meta["correctedTrainingDataSha256"] = corrected_training_data_sha256
     artifact = {"metadata": meta, "model": classifier, "bootstrap_models": bootstrap_models,
                 "feature_columns": columns, "temperature": temperature}
     dest.mkdir(parents=True, exist_ok=True)

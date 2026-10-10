@@ -125,3 +125,7 @@ npm -w apps/web run deploy
 | `data/fixtures/` | 合成テスト fixture。公式実データを追加しない |
 | `.github/workflows/` | 日次 pipeline と週次 retrain |
 | `scripts/` | 手動運用用ラッパー。内容確認と本番影響確認なしに実行しない |
+
+## 会場混同の復旧ガード
+
+共通B/Kパーサーは唐津/津の重複を避けるため長い場名を優先する。旧モデルは復旧済みの出所markerがないため稼働・昇格・rollbackから除外し、正確なartifact/クリーンな入力に基づく候補を別IDで人手検証する。`auto_bet_paused` はWorker有効フラグより優先する停止条件。migration 0006の永続隔離は表示・精算・校正・資金計算・再ingestに適用する。原本からの修復と、固定評価期間の候補検証・Actions artifact復旧の流れは [RECOVERY](RECOVERY.md) を参照。これはSPECに記載のない追加ガードであり、SPECは変更していない。

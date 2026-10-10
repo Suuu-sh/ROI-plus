@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
@@ -57,3 +58,41 @@ def test_predict_requires_artifact_even_if_model_exists(tmp_path):
             "races": [], "entries": []}
     with pytest.raises(RuntimeError, match="no active model"):
         cli._predict_boat_date(rows, "2026-10-09", "2026-10-09T07:30:00+09:00", tmp_path)
+
+
+def test_venue_cache_migration_rebuilds_rows_once_and_preserves_only_history(monkeypatch, tmp_path):
+    from edgelab.parsers import boatrace_b, boatrace_k
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "b260101.lzh").write_bytes(b"B")
+    (raw / "k260101.lzh").write_bytes(b"K")
+    old = {"races": [{"id": "stale-merged"}], "entries": [{"race_id": "stale-merged"}],
+           "results": [{"race_id": "stale-merged"}], "payouts": [{"race_id": "stale-merged"}],
+           "predictions": [{"id": "historical-prediction", "model_id": "retired-old"}],
+           "odds_snapshots": [{"id": "historical-odds"}], "models": [{"id": "stale-active", "status": "active"}]}
+    parsed = {
+        "races": [{"id": "boat-20260101-23-01", "sport": "boat", "venue_id": "23", "data_origin": "real"}],
+        "entries": [{"race_id": "boat-20260101-23-01", "number": 1, "data_origin": "real"}],
+        "results": [], "payouts": [],
+    }
+    saved = []
+    monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(old))
+    monkeypatch.setattr(cli, "save_rows", lambda rows: saved.append(copy.deepcopy(rows)))
+    monkeypatch.setattr("edgelab.collectors.boatrace.read_lzh", lambda path: path.read_bytes())
+    monkeypatch.setattr(boatrace_b, "parse_b", lambda content, race_date: copy.deepcopy(parsed))
+    monkeypatch.setattr(boatrace_k, "parse_k", lambda content, race_date: {"races": [], "entries": [],
+        "results": [], "payouts": []})
+
+    marker = tmp_path / "ml-data" / "boat-venue-v2.json"
+    first = cli.migrate_boat_venue_cache(raw, marker)
+    assert first["status"] == "migrated"
+    assert len(saved) == 1
+    assert [row["id"] for row in saved[0]["races"]] == ["boat-20260101-23-01"]
+    assert saved[0]["models"] == []
+    assert saved[0]["predictions"] == old["predictions"]
+    assert saved[0]["odds_snapshots"] == old["odds_snapshots"]
+    assert json.loads(marker.read_text())["schemaVersion"] == "boat-venue-v2"
+
+    second = cli.migrate_boat_venue_cache(raw, marker)
+    assert second["status"] == "already_migrated"
+    assert len(saved) == 1

@@ -105,14 +105,23 @@ def test_initial_baseline_fails_closed_without_candidate_artifact_pair(tmp_path)
 def test_runtime_artifact_hash_mismatch_fails_closed(tmp_path):
     import hashlib
     import pytest
+    import pickle
     from edgelab.cli import _verify_runtime_artifact
 
     artifact = tmp_path / "candidate.pkl"
     artifact.write_bytes(b"test-artifact-bytes")
     model = {"metrics_json": json.dumps({"boatFeatureSchemaVersion": "boat-base-v1",
-        "boatArtifactSha256": "0" * 64})}
+        "boatArtifactSha256": "0" * 64, "boatVenueSchemaVersion": "boat-venue-v2",
+        "correctedTrainingDataSha256": "a" * 64})}
     with pytest.raises(RuntimeError, match="SHA256"):
         _verify_runtime_artifact(model, artifact)
-    model["metrics_json"] = json.dumps({"boatFeatureSchemaVersion": "boat-base-v1",
-        "boatArtifactSha256": hashlib.sha256(artifact.read_bytes()).hexdigest()})
+    model_id = "boat-win-lgbm-20261010-candidate"
+    source_sha = "a" * 64
+    artifact.write_bytes(pickle.dumps({"metadata": {"id": model_id,
+        "boatVenueSchemaVersion": "boat-venue-v2", "correctedTrainingDataSha256": source_sha}}))
+    (tmp_path / "candidate.json").write_text(json.dumps({"id": model_id,
+        "boatVenueSchemaVersion": "boat-venue-v2", "correctedTrainingDataSha256": source_sha}))
+    model = {"id": model_id, "metrics_json": json.dumps({"boatFeatureSchemaVersion": "boat-base-v1",
+        "boatArtifactSha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "boatVenueSchemaVersion": "boat-venue-v2", "correctedTrainingDataSha256": source_sha})}
     _verify_runtime_artifact(model, artifact)
