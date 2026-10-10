@@ -29,9 +29,10 @@ def test_daily_sync_is_limited_to_today_and_previous_day_and_backfill_error_is_s
     store["payouts"].append({"race_id": "today", "bet_type": "win", "selection": "1",
                              "payout": 150, "data_origin": "real"})
     synced = {}
+    collection_calls = []
     monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(store))
     monkeypatch.setattr(cli, "save_rows", lambda value: None)
-    monkeypatch.setattr(cli, "collect_boat", lambda start, end: 0)
+    monkeypatch.setattr(cli, "collect_boat", lambda start, end, **kwargs: collection_calls.append((start, end, kwargs)) or 0)
     monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: [])
     monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
     monkeypatch.setattr(cli, "_predict_boat_date", lambda rows, day, cutoff: [{"race_id": "today"}])
@@ -40,6 +41,8 @@ def test_daily_sync_is_limited_to_today_and_previous_day_and_backfill_error_is_s
 
     result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
 
+    assert collection_calls == [("2026-10-08", "2026-10-09",
+                                 {"refresh_k_dates": {"2026-10-08", "2026-10-09"}})]
     assert {row["id"] for row in synced["races"]} == {"prev", "today"}
     assert {row["race_id"] for row in synced["entries"]} == {"today"}
     assert {row["race_id"] for row in synced["results"]} == {"prev", "today"}
