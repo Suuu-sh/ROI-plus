@@ -353,10 +353,12 @@ app.get('/ingest/models',async c=>{
 });
 app.post('/admin/settle',async c=>{if(!auth(c))return jsonError(c,'unauthorized',401);return c.json({settled:await settleOpen(c.env.DB)});});
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env) => {
-  if (event.cron === '* * * * *') {
-    if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true') await collectOdds(env.DB, new Date());
-    return;
+  if (event.cron !== '* * * * *') return;
+  if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true') {
+    // A collection quota/write failure must not block ten-minute settlement.
+    await collectOdds(env.DB, new Date()).catch(() => undefined);
   }
+  if (Math.floor(event.scheduledTime / 60_000) % 10 !== 0) return;
   await cron(env.DB, env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true');
 } };
 export { app, cron, settleOpen, autoBet };
