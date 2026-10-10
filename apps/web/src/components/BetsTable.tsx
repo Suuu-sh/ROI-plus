@@ -26,6 +26,7 @@ export function BetsTable({ bets, limit }: { bets: Bet[]; limit?: number }) {
         </thead>
         <tbody className="divide-y divide-line">
           {rows.map((b) => {
+            const ranked = b as Bet & { candidateRank?: number | null; candidateCount?: number | null }
             const drift = b.oddsAtBet != null && b.finalOdds != null ? b.finalOdds - b.oddsAtBet : null
             return (
               <tr key={b.id} className="hover:bg-raised/50">
@@ -36,7 +37,10 @@ export function BetsTable({ bets, limit }: { bets: Bet[]; limit?: number }) {
                 <td className="whitespace-nowrap px-2 py-2.5">
                   <div className="flex items-center gap-1.5"><SportDot sport={b.sport} />{b.venueName ?? b.raceId}{b.raceNo != null && <span className="text-muted">{b.raceNo}R</span>}</div>
                 </td>
-                <td className="px-2 py-2.5"><span className="whitespace-nowrap font-mono text-xs">単勝 {b.selection}</span></td>
+                <td className="px-2 py-2.5">
+                  <span className="whitespace-nowrap font-mono text-xs">単勝 {b.selection}</span>
+                  {ranked.candidateRank != null && <div className="mt-0.5 text-[10px] text-muted">購入時候補 {ranked.candidateRank}位 / {ranked.candidateCount ?? '—'}件</div>}
+                </td>
                 <td className="num px-2 py-2.5 text-right">{pct(b.predictedProb)}</td>
                 <td className="num whitespace-nowrap px-2 py-2.5 text-right">
                   {odds(b.oddsAtBet)}<span className="text-faint"> / </span>

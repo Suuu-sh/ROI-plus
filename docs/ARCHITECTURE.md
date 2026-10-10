@@ -34,7 +34,7 @@ GitHub Actions / ローカル Python (ml/)
 
 ### API の主な面
 
-`GET /api/races`, `/api/races/:id`, `/api/rankings`, `/api/bets`, `/api/performance/*`, `/api/models`, `/api/collection/status` が読み取り面。`GET /api/ingest/models` は `INGEST_TOKEN` 認証付きのモデルレジストリ読み取りで、Pythonが人手昇格後の状態を確認する。`POST /api/bets` は仮想単勝、`POST /api/models/:id/promote|rollback` はモデル管理、`POST /api/ingest/{venues,races,entries,results,payouts,odds,predictions,models,collection-runs}` は Python 等からの冪等同期。`POST /api/admin/settle` は認証付き精算操作。多くの読み取り API は `origin=sample|real|all` で出所を絞れる。実際の入出力契約は `apps/api/src/index.ts` と `packages/shared/src/types.ts` が根拠。
+`GET /api/races`, `/api/races/:id`, `/api/rankings`, `/api/bets`, `/api/performance/*`, `/api/models`, `/api/collection/status` が読み取り面。`GET /api/ingest/models` は `INGEST_TOKEN` 認証付きのモデルレジストリ読み取りで、Pythonが人手昇格後の状態を確認する。`POST /api/bets` は仮想単勝で、複数選択は `{raceId, betType:'win', requestId?, selections:[{selection, stake}, ...]}`（1回1〜6件）を受け付け、ticket group 全体を1ステートメントで残高ガード付き記録する。`requestId` を指定すると同じ payload の再送は冪等、同じ ID の別 payload は409。旧 `{selection, stake}` 形式も互換用に受け付ける。`GET /api/performance/rank-comparison` は購入時に保存した rank 1 を使い、全券確定・rank 1 を含む複数選択 group を同じレース集合・同じ総賭け金で比較する。順位の根拠は `candidate_rank/count`, `predicted_at_at_bet`, `odds_captured_at`, `bet_group_id` に保存し、後から再推定しない。旧 bet は順位不明として同比較から除外する。`POST /api/models/:id/promote|rollback` はモデル管理、`POST /api/ingest/{venues,races,entries,results,payouts,odds,predictions,models,collection-runs}` は Python 等からの冪等同期。`POST /api/admin/settle` は認証付き精算操作。多くの読み取り API は `origin=sample|real|all` で出所を絞れる。実際の入出力契約は `apps/api/src/index.ts` と `packages/shared/src/types.ts` が根拠。
 
 ## AI・データフロー
 
@@ -54,7 +54,9 @@ Worker の単一 `* * * * *` Cron は、オッズ収集フラグが有効なら�
 ### 仮想バンクロールと bet の制御
 
 - 初期値は `initial_bankroll=100000` 円、`unit_stake=100` 円。どちらも D1 の `settings` で管理される。
-- 手動・自動とも単勝の仮想 bet のみ。手動 bet は正の `unit_stake` 倍数、自動 bet は1単位を stake にする。投票サイトや決済には接続しない。
+- 手動・自動とも単勝の仮想 bet のみ。手動はレースごとに最大6選択を1つの原子的な ticket group として記録し、stake は正の整数円（`unit_stake` の倍数制約なし）。自動は既定1候補、最大6候補まで設定でき、`auto_bet_race_budget`（初期値100円）を候補へ均等に整数円配分する。投票サイトや決済には接続しない。
+- 新規 bet は購入時点のオッズ取得時刻・予測時刻と、当時の候補順位（有効な予測と鮮度内オッズがある候補を期待ROI降順、艇/馬番昇順で同率順序）を保存する。旧 bet は順位・グループ不明として比較対象から除く。`/performance/rank-comparison` は rank 1 を含む複数選択 group の全件確定レースだけを対象に、実際の複数 bet と rank 1 のみへ同額を配分した反実仮想を比較する。利益の証明ではない。
+- 整数円 stake の仮想払戻は、`stake / 100 * 公式払戻` の1円未満を bet ごとに切り捨て、整数円で保存する。SPEC の `payout INT` は従来どおりだが、従来実装の stake 制約（`unit_stake` 倍数）は新しい手動 bet では適用しない。
 - 自動購入は Worker の `ENABLE_AUTO_BET=true` または D1 `auto_bet_enabled=true` のどちらかで有効になる。最新予測のモデルが `active` で、オッズがあり、`min_expected_roi`（初期値 0.05）以上かつ `HIGH_EDGE` / `POSITIVE_EDGE` 判定の候補だけを対象とする。`max_prob_std`（初期値 0.05）を超える予測は edge 判定で除外される。週次学習で作られた `candidate` モデルは自動購入に使われない。
 - 手動・自動の購入は、利用可能なactive予測と10分以内のオッズ、解析可能な未来の締切時刻を要求する。boatはさらに安全な特徴量markerと64桁artifact SHA256を持つactiveモデルに限定し、旧v1の既存予測を使わない。締切後・未来の予測やオッズを候補に使わず、異なるUTCオフセットはSQLiteの時刻変換で比較する。出走・予測・オッズ・結果の出所はレースと一致させる。これは収益保証ではなく、誤った時点の判断を防ぐ追加ガード。
 - モデルingestはactive/retired行の状態・評価を上書きしない。古い番組表を再同期してもfinished/cancelledレースをscheduledに戻さない。
@@ -128,4 +130,4 @@ npm -w apps/web run deploy
 
 ## 会場混同の復旧ガード
 
-共通B/Kパーサーは唐津/津の重複を避けるため長い場名を優先する。旧モデルは復旧済みの出所markerがないため稼働・昇格・rollbackから除外し、正確なartifact/クリーンな入力に基づく候補を別IDで人手検証する。`auto_bet_paused` はWorker有効フラグより優先する停止条件。migration 0006の永続隔離は表示・精算・校正・資金計算・再ingestに適用する。原本からの修復と、固定評価期間の候補検証・Actions artifact復旧の流れは [RECOVERY](RECOVERY.md) を参照。これはSPECに記載のない追加ガードであり、SPECは変更していない。
+共通B/Kパーサーは唐津/津の重複を避けるため長い場名を優先する。旧モデルは復旧済みの出所markerがないため稼働・昇格・rollbackから除外し、正確なartifact/クリーンな入力に基づく候補を別IDで人手検証する。`auto_bet_paused` はWorker有効フラグより優先する停止条件。migration 0006の永続隔離は表示・精算・校正・資金計算・再ingestに適用する。migration 0007 は bet に購入時点のグループ・順位・候補母数・予測/オッズ時刻を追加する。なお SPEC §3/§5 は単一 bet と `unit_stake` 倍数を記述しており、現実装の複数選択・正の整数円 stake と差分がある。払戻列は整数円 `INT` のまま、切り捨て規則を導入した。SPEC は変更していない。原本からの修復と、固定評価期間の候補検証・Actions artifact復旧の流れは [RECOVERY](RECOVERY.md) を参照。

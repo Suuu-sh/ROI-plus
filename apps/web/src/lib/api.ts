@@ -41,9 +41,12 @@ export const api = {
     req<EdgeCandidate[]>(`/rankings${qs({ sport, date, origin })}`),
   placeBet: (b: { raceId: string; betType: 'win'; selection: string; stake: number }) =>
     req<Bet>('/bets', { method: 'POST', body: JSON.stringify(b) }),
+  placeBetBatch: (b: { raceId: string; betType: 'win'; requestId: string; selections: { selection: string; stake: number }[] }) =>
+    req<{ groupId: string; bets: Bet[] }>('/bets', { method: 'POST', body: JSON.stringify(b) }),
   bets: (origin: OriginFilter, sport?: Sport) => req<Bet[]>(`/bets${qs({ sport, origin })}`),
   overview: (origin: OriginFilter, sport?: Sport) => req<Overview>(`/performance/overview${qs({ sport, origin })}`),
   breakdown: (origin: OriginFilter) => req<Breakdown>(`/performance/breakdown${qs({ origin })}`),
+  rankComparison: (origin: OriginFilter) => req<RankComparison>(`/performance/rank-comparison${qs({ origin })}`),
   models: () => req<ModelInfo[]>('/models'),
   promote: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/promote`, { method: 'POST' }),
   promoteInitialBaseline: (id: string, validationFingerprint: string) =>
@@ -52,4 +55,16 @@ export const api = {
     }),
   rollback: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/rollback`, { method: 'POST' }),
   collection: () => req<CollectionStatus>('/collection/status'),
+}
+
+export interface RankComparison {
+  comparedGroupCount: number
+  comparedRaceCount: number
+  excludedPendingGroupCount: number
+  excludedMissingRankOneGroupCount: number
+  excludedUnknownRankBetCount: number
+  totalStake: number
+  multiple: { stake: number; payout: number; profit: number; roi: number | null }
+  firstOnly: { stake: number; payout: number; profit: number; roi: number | null }
+  note: string
 }
