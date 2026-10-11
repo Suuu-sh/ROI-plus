@@ -154,7 +154,7 @@ export function parseOfficialTrifectaResult(html: string, expected: TrifectaOdds
   return { selection, payoutPer100, finishOrder };
 }
 
-function readPageIdentity(html: string): { raceDate: string; venueCode: string; raceNo: number } {
+export function readPageIdentity(html: string): { raceDate: string; venueCode: string; raceNo: number } {
   // The selected-race tab links are the page's own identity evidence. Requiring
   // every relevant tab link to agree prevents a generic/error page or a page
   // for another race from being accepted based on the caller's requested URL.

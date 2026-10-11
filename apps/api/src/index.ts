@@ -1,3 +1,4 @@
+import { collectionIssues } from './services/collectionIssues.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { all, first, run, type Db, type Statement } from './repo/db.js';
@@ -684,8 +685,20 @@ app.post('/models/:id/promote',async c=>{
 });
 app.post('/models/:id/rollback',async c=>{const db=c.env.DB,id=c.req.param('id'),m=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!m)return jsonError(c,'model not found',404);if(m.status!=='active')return jsonError(c,'model is not active');const old=await first<any>(db,"SELECT * FROM models WHERE sport=? AND bet_type=? AND status='retired' ORDER BY rowid DESC LIMIT 1",m.sport,m.bet_type);if(!old)return jsonError(c,'no retired model to rollback');if(m.bet_type!=='win'){let metrics:any;try{metrics=JSON.parse(old.metrics_json||'{}')}catch{return jsonError(c,'rollback ticket model metadata is invalid')}if(!ticketValidationEvidence(metrics,m.bet_type))return jsonError(c,'rollback target lacks current validated ticket quality evidence')}if(m.bet_type==='win'&&!hasSafeBoatRuntime(old))return jsonError(c,'rollback target lacks validated safe boat runtime schema');if(!await reserveWorkerWrites(db,2)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}if(db.batch){await db.batch([db.prepare("UPDATE models SET status='retired' WHERE id=? AND status='active'").bind(id),db.prepare("UPDATE models SET status='active' WHERE id=? AND status='retired'").bind(old.id)]);}else{await run(db,"UPDATE models SET status='retired' WHERE id=? AND status='active'",id);await run(db,"UPDATE models SET status='active' WHERE id=? AND status='retired'",old.id);}const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',old.id);if(!updated||updated.status!=='active')return jsonError(c,'rollback state changed; retry after review',409);return c.json(mapModel(updated));});
 app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,'SELECT * FROM collection_runs ORDER BY started_at DESC'), tables=['venues','races','entries','odds_snapshots','results','payouts','models','predictions','ticket_predictions','bets','collection_runs','daily_summaries','settings'], tableCounts:Record<string,number>={};for(const t of tables)tableCounts[t]=(await first<any>(db,`SELECT COUNT(*) n FROM ${t}`))?.n??0;
- const sources=await all<any>(db,`SELECT source,sport,COUNT(*) runs,SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) successes,SUM(COALESCE(records,0)) records,MAX(started_at) lastRunAt,MAX(CASE WHEN status='success' THEN started_at END) lastSuccessAt,(SELECT cr.status FROM collection_runs cr WHERE cr.source=collection_runs.source AND cr.sport=collection_runs.sport ORDER BY cr.started_at DESC LIMIT 1) latestStatus FROM collection_runs GROUP BY source,sport`);
- return c.json({sources:sources.map(s=>({source:s.source,sport:s.sport,enabled:s.latestStatus==='skipped'||s.source==='jra' ? false : true,lastRunAt:s.lastRunAt,lastSuccessAt:s.lastSuccessAt,successRate:s.runs?s.successes/s.runs:null,runs:s.runs,records:s.records,freshnessMinutes:s.lastRunAt?Math.max(0,(Date.now()-Date.parse(s.lastRunAt))/60000):null,note:s.source==='jra'?'規約上自動取得不可':null})),errors:runs.filter(r=>r.status==='failed'||r.status==='partial').slice(0,50).map(r=>({at:r.started_at,source:r.source,error:r.error??r.reason??r.status})),tableCounts,freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowLimitNote:'D1 無料枠: 保存容量 5GB、日次読取 500万行、日次書込 10万行。件数はテーブル行数の合計で概算。'}});
+ const classified=runs.map(r=>({...r,...collectionIssues(r)}));
+ const keys=[...new Set(runs.map(r=>`${r.source}\n${r.sport}`))];
+ const sources=keys.map(key=>{
+  const group=classified.filter(r=>`${r.source}\n${r.sport}`===key),latest=group[0];
+  const attempts=group.filter(r=>r.status!=='skipped' && !(r.quality.length && !r.error && !r.records));
+  const successes=attempts.filter(r=>r.status==='success' || (r.quality.length && !r.error && r.records>0));
+  const lastSuccessAt=successes[0]?.started_at??null;
+  // A quality skip is still an enabled collector, not a feature-flag shutdown.
+  const enabled=latest.source!=='jra' && (latest.status!=='skipped'||latest.quality.length>0);
+  return {source:latest.source,sport:latest.sport,enabled,lastRunAt:latest.started_at,lastSuccessAt,successRate:attempts.length?successes.length/attempts.length:null,runs:group.length,records:group.reduce((n,r)=>n+(r.records??0),0),qualityExclusions:group.reduce((n,r)=>n+r.quality.length,0),freshnessMinutes:latest.started_at?Math.max(0,(Date.now()-Date.parse(latest.started_at))/60000):null,note:latest.source==='jra'?'規約上自動取得不可':null};
+ });
+ const errors=classified.filter(r=>(r.status==='failed'||r.status==='partial') && (r.error||!r.quality.length)).slice(0,50).map(r=>({at:r.started_at,source:r.source,error:r.error??r.reason??r.status}));
+ const qualityExclusions=classified.filter(r=>r.quality.length).slice(0,50).map(r=>({at:r.started_at,source:r.source,count:r.quality.length,reason:r.quality.join(' | ')}));
+ return c.json({sources,errors,qualityExclusions,tableCounts,freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowLimitNote:'D1 無料枠: 保存容量 5GB、日次読取 500万行、日次書込 10万行。件数はテーブル行数の合計で概算。'}});
 });
 for(const route of Object.keys(ingestTables)) app.post(`/ingest/${route}` as any,c=>ingest(c,route));
 app.get('/ingest/models',async c=>{

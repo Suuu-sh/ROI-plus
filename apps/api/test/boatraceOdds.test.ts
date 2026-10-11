@@ -15,15 +15,21 @@ const now = new Date(`${today}T03:00:00.000Z`);
 const stamp = (ms: number) => new Date(ms + 9 * 60 * 60_000).toISOString().replace('Z', '+09:00');
 let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
 beforeEach(() => {
+  vi.useFakeTimers({toFake:['Date']}); vi.setSystemTime(now);
   sqlite = new Sqlite(':memory:'); DB = new D1SqliteAdapter(sqlite);
   for (const f of readdirSync(resolve(root, 'db/migrations')).filter(f => f.endsWith('.sql')).sort()) sqlite.exec(readFileSync(resolve(root, 'db/migrations', f), 'utf8'));
   sqlite.prepare("INSERT INTO settings(key,value) VALUES('roi_d1_write_budget_utc',?)").run(JSON.stringify({ date: new Date().toISOString().slice(0, 10), reserved: 0, oddsReserved: 0 }));
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('24','boat','Fixture')").run();
 });
-afterEach(() => { vi.unstubAllGlobals(); sqlite.close(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); sqlite.close(); });
 function race(id: string, post: number, origin = 'real', status = 'scheduled', no = 1) {
   sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at)
     VALUES(?,'boat','24',?,?,?, ?,?,?)`).run(id, today, no, stamp(post), status, origin, stamp(now.getTime()));
+}
+
+function collectionPage(html: string, url: string) {
+  const u=new URL(url);
+  return html.replaceAll('rno=12',`rno=${u.searchParams.get('rno')}`).replaceAll('hd=20261009',`hd=${u.searchParams.get('hd')}`);
 }
 
 describe('Boatrace win odds collection', () => {
@@ -60,7 +66,7 @@ describe('Boatrace win odds collection', () => {
     const html = readFileSync(resolve(root, 'data/fixtures/boatrace/oddstf_24_12_20261009.html'), 'utf8');
     const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
       expect((init?.headers as Record<string, string>)['User-Agent']).toBeTruthy();
-      return { ok: true, status: 200, text: async () => html };
+      return { ok: true, status: 200, text: async () => collectionPage(html, _url) };
     });
     const sleep = vi.fn(async (_ms: number) => {});
     const result = await collectOdds(DB, now, { fetch, sleep });
@@ -75,7 +81,7 @@ describe('Boatrace win odds collection', () => {
   it('skips a duplicate cron poll inside the polling cooldown', async () => {
     race('dup-race', now.getTime() + 5 * 60_000);
     const html = readFileSync(resolve(root, 'data/fixtures/boatrace/oddstf_24_12_20261009.html'), 'utf8');
-    const fetch = vi.fn(async () => ({ ok: true, status: 200, text: async () => html }));
+    const fetch = vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => collectionPage(html, _url) }));
     const sleep = vi.fn(async () => {});
     await collectOdds(DB, now, { fetch, sleep });
     const second = await collectOdds(DB, new Date(now.getTime() + 4000), { fetch, sleep });
@@ -86,7 +92,7 @@ describe('Boatrace win odds collection', () => {
   it('releases the lock and polls again on the next minute', async () => {
     race('minute-race', now.getTime() + 5 * 60_000);
     const html = readFileSync(resolve(root, 'data/fixtures/boatrace/oddstf_24_12_20261009.html'), 'utf8');
-    const fetch = vi.fn(async () => ({ ok: true, status: 200, text: async () => html }));
+    const fetch = vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => collectionPage(html, _url) }));
     const sleep = vi.fn(async () => {});
     await collectOdds(DB, now, { fetch, sleep });
     expect(sqlite.prepare("SELECT value FROM settings WHERE key='odds_lock'").get()).toMatchObject({ value: '' });
@@ -108,7 +114,7 @@ describe('Boatrace win odds collection', () => {
   it('runs only odds collection on the minute trigger', async () => {
     race('scheduled-minute-race', Date.now() + 5 * 60_000);
     const html = readFileSync(resolve(root, 'data/fixtures/boatrace/oddstf_24_12_20261009.html'), 'utf8');
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, text: async () => html })));
+    vi.stubGlobal('fetch', vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => collectionPage(html, _url) })));
     await worker.scheduled({ cron: '* * * * *' } as never, { DB, ENABLE_AUTO_BET: 'true', ENABLE_BOATRACE_ODDS_SCRAPE: 'true' } as never);
     expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='scheduled-minute-race'").get()).toMatchObject({ n: 6 });
     expect(sqlite.prepare('SELECT COUNT(*) n FROM bets').get()).toMatchObject({ n: 0 });
@@ -121,5 +127,28 @@ describe('Boatrace win odds collection', () => {
     await worker.scheduled({ cron: '*/10 * * * *' } as never, { DB, ENABLE_AUTO_BET: 'true', ENABLE_BOATRACE_ODDS_SCRAPE: 'true' } as never);
     expect(fetch).not.toHaveBeenCalled();
     expect(sqlite.prepare('SELECT COUNT(*) n FROM odds_snapshots').get()).toMatchObject({ n: 0 });
+  });
+});
+
+describe('win odds quality exclusions', () => {
+  const html=()=>readFileSync(resolve(root,'data/fixtures/boatrace/oddstf_24_12_20261009.html'),'utf8').replace('締切時オッズ','オッズ更新時間 9:49');
+  it('logs a rejected pool as skipped with diagnostics, never as a transport failure',async()=>{
+    race('quality-race',now.getTime()+300000);
+    const fetch=vi.fn(async(url:string)=>({ok:true,status:200,text:async()=>collectionPage(html().replaceAll(/<td class="oddsPoint">[^<]*<\/td>/g,'<td class="oddsPoint">99.9</td>'),url)}));
+    expect(await collectOdds(DB,now,{fetch,sleep:async()=>{}})).toMatchObject({status:'skipped',records:0,failed:0,excluded:1});
+    expect(sqlite.prepare('SELECT status,error,reason FROM collection_runs').get()).toMatchObject({status:'skipped',error:null,reason:expect.stringContaining('sum=0.0601')});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM odds_snapshots').get()).toEqual({n:0});
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it('keeps an HTTP failure and a quality skip separate in the same run',async()=>{
+    race('quality-race',now.getTime()+300000);race('network-race',now.getTime()+360000,'real','scheduled',2);
+    const fetch=vi.fn(async(url:string)=>url.includes('rno=2&')?{ok:false,status:503,text:async()=>''}:{ok:true,status:200,text:async()=>collectionPage(html().replaceAll(/<td class="oddsPoint">[^<]*<\/td>/g,'<td class="oddsPoint">99.9</td>'),url)});
+    expect(await collectOdds(DB,now,{fetch,sleep:async()=>{}})).toMatchObject({status:'partial',failed:1,excluded:1});
+    expect(sqlite.prepare('SELECT error,reason FROM collection_runs').get()).toMatchObject({error:'network-race: HTTP 503',reason:expect.stringContaining('quality-race')});
+  });
+  it('treats changed markup as a parse error, not a pool quality skip',async()=>{
+    race('parse-race',now.getTime()+300000);
+    expect(await collectOdds(DB,now,{fetch:async()=>({ok:true,status:200,text:async()=>'<html>maintenance</html>'}),sleep:async()=>{}})).toMatchObject({status:'failed',failed:1,excluded:0});
+    expect(sqlite.prepare('SELECT error,reason FROM collection_runs').get()).toMatchObject({error:expect.stringContaining('identity tabs missing'),reason:null});
   });
 });
