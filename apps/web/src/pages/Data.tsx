@@ -8,6 +8,7 @@ export function DataPage() {
   if (q.error) return <div className="card"><ErrorState error={q.error} onRetry={q.reload} /></div>
   if (!q.data) return <div className="card"><Loading rows={5} /></div>
   const d = q.data
+  const exclusions = d.qualityExclusions ?? []
   const total = Object.values(d.tableCounts).reduce((a, b) => a + b, 0)
 
   return (
@@ -23,7 +24,7 @@ export function DataPage() {
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Kpi label="データソース" value={d.sources.length} sub={`有効 ${d.sources.filter((s) => s.enabled).length}`} />
         <Kpi label="総レコード数" value={total.toLocaleString()} sub="D1 全テーブル" />
-        <Kpi label="エラー（直近）" value={d.errors.length} valueClass={d.errors.length ? 'text-neg' : ''} />
+        <Kpi label="通信・解析等のエラー（直近）" value={d.errors.length} valueClass={d.errors.length ? 'text-neg' : ''} />
         <Kpi label="D1 使用量（概算）" value={`${d.freeTier.d1RowsApprox.toLocaleString()} 行`} sub="無料枠内" />
       </div>
 
@@ -50,7 +51,7 @@ export function DataPage() {
                       <div>{dateTime(s.lastRunAt)}</div>
                       <div className="text-faint">成功 {dateTime(s.lastSuccessAt)}</div>
                     </td>
-                    <td className={`num px-2 py-2.5 text-right ${s.enabled && s.successRate != null && s.successRate < 0.9 ? 'text-warn' : ''}`}>{s.enabled ? pct(s.successRate, 0) : <span className="text-faint">—</span>}<div className="text-[10px] text-faint">{s.runs} 回</div></td>
+                    <td className={`num px-2 py-2.5 text-right ${s.enabled && s.successRate != null && s.successRate < 0.9 ? 'text-warn' : ''}`}>{s.enabled ? pct(s.successRate, 0) : <span className="text-faint">—</span>}<div className="text-[10px] text-faint">{s.runs} 回 · 品質除外 {s.qualityExclusions ?? 0} レース試行</div></td>
                     <td className="num px-2 py-2.5 text-right">{s.records.toLocaleString()}</td>
                     <td className={`num px-4 py-2.5 text-xs ${s.enabled && (s.freshnessMinutes == null || s.freshnessMinutes > 60 * 48) ? 'text-warn' : ''}`}>{s.enabled ? freshness(s.freshnessMinutes) : <span className="text-faint">取得停止中</span>}</td>
                   </tr>
@@ -61,8 +62,18 @@ export function DataPage() {
         )}
       </Section>
 
+      <Section title="品質チェックによる除外（直近）">
+        <p className="px-4 py-2 text-xs text-muted">{exclusions.reduce((n, row) => n + row.count, 0)} レース試行。通信失敗ではありません。基準外のオッズは保存せず、判定・購入に使いません。成功率から品質のみの除外試行を除きます。</p>
+        {exclusions.length === 0 ? <Empty>品質除外はありません。</Empty> : <ul className="divide-y divide-line">{exclusions.map((row, i) => (
+          <li key={i} className="px-4 py-2.5 text-sm">
+            <div className="flex justify-between text-xs text-muted"><span className="font-mono">{row.source} · {row.count} レース試行</span><span className="num">{dateTime(row.at)}</span></div>
+            <div className="mt-0.5 break-words text-warn">{row.reason}</div>
+          </li>
+        ))}</ul>}
+      </Section>
+
       <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
-        <Section title="エラー履歴">
+        <Section title="通信・解析等のエラー履歴">
           {d.errors.length === 0 ? <Empty>エラーはありません。</Empty> : (
             <ul className="divide-y divide-line">
               {d.errors.map((e, i) => (

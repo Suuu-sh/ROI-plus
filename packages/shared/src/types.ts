@@ -147,11 +147,12 @@ export interface ModelInfo {
 
 export interface CollectionSource {
   source: string; sport: Sport; enabled: boolean; lastRunAt: string | null; lastSuccessAt: string | null;
-  successRate: number | null; runs: number; records: number; freshnessMinutes: number | null; note: string | null;
+  successRate: number | null; runs: number; records: number; qualityExclusions?: number; freshnessMinutes: number | null; note: string | null;
 }
 export interface CollectionStatus {
   sources: CollectionSource[];
   errors: { at: string; source: string; error: string }[];
+  qualityExclusions?: { at: string; source: string; count: number; reason: string }[];
   tableCounts: Record<string, number>;
   freeTier: { d1RowsApprox: number; d1RowLimitNote: string };
 }

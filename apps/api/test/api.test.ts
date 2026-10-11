@@ -681,3 +681,17 @@ describe('EdgeLab API',()=>{
   expect(byId['sample-wait-bet'].resultWaitReason).toBe('sampledata');
  });
 });
+
+describe('collection status quality compatibility',()=>{
+ it('reports quality exclusions independently, retains mixed failures and keeps the collector enabled',async()=>{
+  const insert=sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,records,error,reason) VALUES(?,'boatrace-odds-worker','boat','2026-10-11',?,?,?,?,?)");
+  insert.run('old','2026-10-11T00:00:00Z','failed',0,'race-a: odds pool not stable (overround out of range)',null);
+  insert.run('mixed','2026-10-11T00:01:00Z','partial',0,'race-b: odds pool not stable (overround out of range); race-c: HTTP 503',null);
+  insert.run('new','2026-10-11T00:02:00Z','skipped',0,null,'quality_excluded: race-d: odds pool not stable (overround out of range), valid=6/6, sum=0.8');
+  const r=await app.request('/api/collection/status',{},env());
+  expect(r.status).toBe(200);const body=await r.json() as any;
+  expect(body.errors.filter((e:any)=>e.source==='boatrace-odds-worker')).toEqual([{at:'2026-10-11T00:01:00Z',source:'boatrace-odds-worker',error:'race-c: HTTP 503'}]);
+  expect(body.qualityExclusions.filter((e:any)=>e.source==='boatrace-odds-worker')).toHaveLength(3);
+  expect(body.sources.find((s:any)=>s.source==='boatrace-odds-worker')).toMatchObject({enabled:true,qualityExclusions:3,successRate:0});
+ });
+});
