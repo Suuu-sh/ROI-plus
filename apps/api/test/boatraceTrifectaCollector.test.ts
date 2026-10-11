@@ -26,6 +26,7 @@ function livePage(raceDate:string,raceNo=3){
 beforeEach(()=>{
   sqlite=new Sqlite(':memory:');DB=new D1SqliteAdapter(sqlite);
   for(const file of readdirSync(resolve(root,'db/migrations')).filter(x=>x.endsWith('.sql')).sort())sqlite.exec(readFileSync(resolve(root,'db/migrations',file),'utf8'));
+  sqlite.prepare("INSERT INTO settings(key,value) VALUES('roi_d1_write_budget_utc',?)").run(JSON.stringify({date:new Date().toISOString().slice(0,10),reserved:0,oddsReserved:0}));
   const raceDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('09','boat','Test venue')").run();
   sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES('boat-collector-test','boat','09',?,3,?,'scheduled','real',?)").run(raceDate,jstIso(Date.now()+10*60_000),jstIso());
@@ -60,4 +61,12 @@ describe('trifecta odds collector provenance',()=>{
     expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='boat-collector-test'").get()).toMatchObject({n:120});
     expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='boat-collector-test-2'").get()).toMatchObject({n:0});
   });
+  it('does not fetch or write when the shared D1 odds reservation is exhausted',async()=>{
+    sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:new Date().toISOString().slice(0,10),reserved:10000,oddsReserved:10000}));
+    let fetched=false; const result=await collectTrifectaOdds(DB,new Date(),{fetch:async()=>{fetched=true;throw new Error('should not fetch');}});
+    expect(result).toMatchObject({status:'skipped',records:0,attempted:0});expect(fetched).toBe(false);
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='trifecta_odds_lock'").get()).toMatchObject({n:0});
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs").get()).toMatchObject({n:0});
+  });
+
 });

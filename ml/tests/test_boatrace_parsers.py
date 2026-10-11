@@ -39,6 +39,7 @@ def test_fresh_cached_october_fourth_b_k_rows_keep_overlapping_venues_separate()
         assert payout == [expected]
 
 
+
 def test_fixture_b_program_rows():
     parsed = parse_b((FIXTURES / "b260901.txt").read_bytes())
     race_id = "boat-20260901-24-01"

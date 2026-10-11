@@ -63,6 +63,20 @@ feedback artifactは各Actionの `learning-feedback-*` / `learning-report-*` と
 - `CLOUDFLARE_API_TOKEN`: Wrangler D1 情報取得用 token
 - `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account ID
 
+### venue v2 キャッシュ移行と単勝候補の復旧
+
+`daily.yml` は `ml/data/boat-venue-v2.json` がない場合、対になったキャッシュ済み
+B/K ファイルだけからローカル正規化行を再構築します。過去予測・オッズ履歴は保持し、
+旧レース・結果・払戻・モデル状態は再利用しません。この移行処理自体は API へ同期せず、
+マーカー作成後の日次処理は通常どおり続きます。
+
+`.github/workflows/recover-win-baseline.yml` は手動 dispatch 専用です。既定の厳密な日次
+キャッシュキー以外を拒否し、cache fallback や公式データの再取得はしません。候補を固定
+train/validation/test 期間で評価し、candidate 状態だけを登録します。認証済みレジストリ
+検証レポートと JSON/pickle artifact ペアを90日保存します。自動昇格・仮想購入の有効化は
+しません。手動昇格後に daily でartifactを復旧する場合は、`validated_model_run_id` と
+その run の正確な `validated_model_artifact_name` を指定してください。
+
 初回は Actions cache が空です。まず `ml/state/backfill_state.json` の `done` に
 リポジトリへ投入済みの backfill 範囲（例: `2026-07-01` から前日までの日付）を
 記録してコミットしてください。初回 daily 実行はこのファイルを

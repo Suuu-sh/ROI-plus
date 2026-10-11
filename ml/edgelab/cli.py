@@ -68,11 +68,26 @@ def _verify_runtime_artifact(model_row: dict[str, Any], artifact_path: Path) -> 
         if not isinstance(metrics, dict):
             metrics = json.loads(model_row.get("metrics_json") or "{}")
         expected = metrics.get("boatArtifactSha256")
-        if metrics.get("boatFeatureSchemaVersion") != "boat-base-v1" or not expected:
+        source_digest = metrics.get("correctedTrainingDataSha256")
+        if (metrics.get("boatFeatureSchemaVersion") != "boat-base-v1" or not expected
+                or metrics.get("boatVenueSchemaVersion") != "boat-venue-v2"
+                or not isinstance(source_digest, str) or len(source_digest) != 64
+                or any(char not in "0123456789abcdef" for char in source_digest)):
             raise RuntimeError("active boat model lacks verified safe-schema/artifact identity metadata")
         actual = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
         if actual != expected:
             raise RuntimeError("active boat model artifact bytes do not match the registry-approved SHA256")
+        from edgelab.predict import load_artifact
+        sidecar_path = artifact_path.with_suffix(".json")
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        artifact = load_artifact(artifact_path)
+        pickle_metadata = artifact.get("metadata") or {}
+        for metadata in (sidecar, pickle_metadata):
+            if (metadata.get("boatVenueSchemaVersion") != "boat-venue-v2"
+                    or metadata.get("correctedTrainingDataSha256") != source_digest
+                    or sidecar.get("id") != model_row.get("id")
+                    or pickle_metadata.get("id") != model_row.get("id")):
+                raise RuntimeError("active boat artifact metadata does not match venue-v2 registry provenance")
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         raise RuntimeError("active boat model has invalid safe-schema/artifact identity metadata") from exc
 
@@ -184,7 +199,7 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     try:
         from edgelab.backfill_sync import run as backfill_run
         backfill = backfill_run(since="2026-07-01", until=(target - timedelta(days=1)).isoformat(),
-                                budget=int(__import__("os").environ.get("BACKFILL_BUDGET", "35000")),
+                                budget=int(__import__("os").environ.get("BACKFILL_BUDGET", "20000")),
                                 database="roi-plus")
     except Exception as exc:
         backfill = {"skipped": True, "reason": f"{type(exc).__name__}: {exc}"}
@@ -443,7 +458,7 @@ def preview_boat_day(day: str, raw_dir: str | Path, output: str | Path) -> dict[
 
 
 def preview_boat_cache(raw_dir: str | Path, output: str | Path) -> dict[str, Any]:
-    """Rebuild every paired cached B/K day into a clean separate snapshot."""
+    """Rebuild paired locally cached B/K days to a separate safe snapshot."""
     from edgelab.collectors.boatrace import read_lzh
     from edgelab.parsers.boatrace_b import parse_b
     from edgelab.parsers.boatrace_k import parse_k
@@ -456,29 +471,75 @@ def preview_boat_cache(raw_dir: str | Path, output: str | Path) -> dict[str, Any
     files = {path.stem[0].lower() + path.stem[1:]: path for path in raw_path.glob("*.lzh")
              if len(path.stem) == 7 and path.stem[0].lower() in {"b", "k"}
              and path.stem[1:].isdigit()}
-    days = sorted({key[1:] for key in files if "b" + key[1:] in files and "k" + key[1:] in files})
-    if not days:
-        raise FileNotFoundError(f"no paired cached B/K LZH days found in {raw_path}")
-    snapshot: dict[str, list[dict[str, Any]]] = {
-        key: [] for key in ("races", "entries", "odds_snapshots", "results", "payouts",
-                            "predictions", "ticket_predictions", "models", "collection_runs")
-    }
-    for stamp in days:
+    paired = sorted(key[1:] for key in files if key.startswith("b") and "k" + key[1:] in files)
+    if not paired:
+        raise FileNotFoundError(f"no paired B/K cache files in {raw_path}")
+    snapshot: dict[str, list[dict[str, Any]]] = {key: [] for key in (
+        "races", "entries", "odds_snapshots", "results", "payouts", "predictions",
+        "ticket_predictions", "models", "collection_runs")}
+    for stamp in paired:
         day = datetime.strptime(stamp, "%y%m%d").date().isoformat()
-        for kind, parser in (("b", parse_b), ("k", parse_k)):
-            merge_rows(snapshot, parser(read_lzh(files[kind + stamp]), race_date=day))
+        for prefix, parser in (("b", parse_b), ("k", parse_k)):
+            merge_rows(snapshot, parser(read_lzh(files[prefix + stamp]), race_date=day))
+    source_paths = sorted((files[prefix + stamp] for stamp in paired for prefix in ("b", "k")),
+                          key=lambda path: path.name)
+    source_files = [{"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                    for path in source_paths]
     report = {"networkAccess": False, "storeModified": False,
-              "sourceFiles": sorted(str(path) for path in files.values()),
-              "pairedDays": [datetime.strptime(stamp, "%y%m%d").date().isoformat() for stamp in days],
-              "unpairedFileCount": len(files) - 2 * len(days),
-              "rowCounts": {table: len(rows) for table, rows in snapshot.items()},
-              "snapshot": snapshot}
+              "sourceFiles": source_files,
+              "pairedDays": [datetime.strptime(stamp, "%y%m%d").date().isoformat() for stamp in paired],
+              "unpairedFileCount": len(files) - 2 * len(paired),
+              "rowCounts": {table: len(rows) for table, rows in snapshot.items()}, "snapshot": snapshot}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
                            encoding="utf-8")
     return {"output": str(output_path), "networkAccess": False, "storeModified": False,
-            "pairedDays": len(days), "unpairedFileCount": report["unpairedFileCount"],
+            "pairedDays": len(paired), "unpairedFileCount": report["unpairedFileCount"],
             "rowCounts": report["rowCounts"]}
+
+
+def migrate_boat_venue_cache(raw_dir: str | Path, marker_path: str | Path) -> dict[str, Any]:
+    """One-time local cache migration; never synchronizes or changes remote rows."""
+    from edgelab.collectors.boatrace import read_lzh
+    from edgelab.parsers.boatrace_b import parse_b
+    from edgelab.parsers.boatrace_k import parse_k
+
+    marker = Path(marker_path)
+    if marker.exists():
+        saved = json.loads(marker.read_text(encoding="utf-8"))
+        if saved.get("schemaVersion") != "boat-venue-v2":
+            raise RuntimeError("existing boat venue migration marker has an unknown version")
+        return {"status": "already_migrated", "schemaVersion": saved["schemaVersion"],
+                "remoteSyncPerformed": False}
+    raw_path = Path(raw_dir)
+    files = {path.stem[0].lower() + path.stem[1:]: path for path in raw_path.glob("*.lzh")
+             if len(path.stem) == 7 and path.stem[0].lower() in {"b", "k"}
+             and path.stem[1:].isdigit()}
+    paired = sorted(key[1:] for key in files if key.startswith("b") and "k" + key[1:] in files)
+    if not paired:
+        raise FileNotFoundError("venue migration requires locally cached paired B/K files; no network fallback")
+    old = load_rows()
+    clean: dict[str, list[dict[str, Any]]] = {key: [] for key in (
+        "races", "entries", "odds_snapshots", "results", "payouts", "predictions", "models", "collection_runs")}
+    for stamp in paired:
+        day = datetime.strptime(stamp, "%y%m%d").date().isoformat()
+        for prefix, parse in (("b", parse_b), ("k", parse_k)):
+            merge_rows(clean, parse(read_lzh(files[prefix + stamp]), race_date=day))
+    clean["predictions"] = list(old.get("predictions", []))
+    clean["odds_snapshots"] = list(old.get("odds_snapshots", []))
+    save_rows(clean)
+    source_paths = sorted((files[prefix + stamp] for stamp in paired for prefix in ("b", "k")),
+                          key=lambda path: path.name)
+    source_files = [{"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                    for path in source_paths]
+    marker_value = {"schemaVersion": "boat-venue-v2", "migratedAt": _now(),
+        "source": "paired local B/K LZH cache", "pairedDays": len(paired), "sourceFiles": source_files,
+        "rowCounts": {table: len(rows) for table, rows in clean.items()},
+        "preservedHistoricalPredictions": len(clean["predictions"]),
+        "preservedHistoricalOddsSnapshots": len(clean["odds_snapshots"]), "remoteSyncPerformed": False}
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps(marker_value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"status": "migrated", **marker_value}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -511,7 +572,7 @@ def _parser() -> argparse.ArgumentParser:
     bf = sub.add_parser("backfill-sync", help="send historical race days to D1 within the daily write budget")
     bf.add_argument("--since", required=True)
     bf.add_argument("--until")
-    bf.add_argument("--budget", type=int, default=90_000, help="max rows_written_24h incl. current usage")
+    bf.add_argument("--budget", type=int, default=20_000, help="max estimated D1 rows for historical backfill (hard-capped at 20k)")
     bf.add_argument("--database", default="roi-plus")
     bf.add_argument("--dry-run", action="store_true")
     rebuild = sub.add_parser("rebuild", help="rebuild normalized rows from local raw Boatrace LZH files")
@@ -520,9 +581,12 @@ def _parser() -> argparse.ArgumentParser:
     preview.add_argument("--date", required=True)
     preview.add_argument("--raw", default="data/raw/boatrace")
     preview.add_argument("--output", required=True, help="new path; will not overwrite existing files")
-    cache_preview = sub.add_parser("preview-boat-cache", help="rebuild all paired cached B/K files to a separate clean snapshot")
+    cache_preview = sub.add_parser("preview-boat-cache", help="rebuild paired B/K files to a separate safe snapshot")
     cache_preview.add_argument("--raw", default="data/raw/boatrace")
-    cache_preview.add_argument("--output", required=True, help="new path; will not overwrite existing files")
+    cache_preview.add_argument("--output", required=True, help="new output path; existing store is never modified")
+    migration = sub.add_parser("migrate-boat-venue-cache", help="one-time local clean rebuild for venue identity v2")
+    migration.add_argument("--raw", default="data/raw/boatrace")
+    migration.add_argument("--marker", default="ml/data/boat-venue-v2.json")
     live = sub.add_parser("live", help="collect today's program and near-deadline win odds")
     live.add_argument("--date", required=True)
     live.add_argument("--window-min", type=int, default=25)
@@ -616,6 +680,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"modelId": model_id, "cutoff": args.cutoff,
                           "ticketPredictions": len(predictions), "synced": False}, ensure_ascii=False))
         return 0
+    if args.command == "migrate-boat-venue-cache":
+        print(json.dumps(migrate_boat_venue_cache(args.raw, args.marker), ensure_ascii=False))
+        return 0
+
     if args.command == "backfill":
         code = collect_boat(args.date_from, args.date_to)
         return code

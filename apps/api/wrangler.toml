@@ -9,8 +9,10 @@ database_id = "1341e66e-2e13-4051-8a2d-b89eab26337e"
 migrations_dir = "../../db/migrations"
 
 [triggers]
-crons = ["* * * * *", "*/10 * * * *"]
+crons = ["* * * * *"]
 
 [vars]
 ENABLE_AUTO_BET = "true"
 ENABLE_BOATRACE_ODDS_SCRAPE = "true"
+
+ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE = "true"

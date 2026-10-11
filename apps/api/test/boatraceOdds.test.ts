@@ -10,18 +10,20 @@ import { D1SqliteAdapter } from './d1-adapter.js';
 const root = resolve(import.meta.dirname, '../../..');
 const privateOddsFixture = resolve(root, 'data/private_fixtures/boatrace/oddstf_24_12_20261009.html');
 const hasPrivateOddsFixture = (() => { try { readFileSync(privateOddsFixture); return true; } catch { return false; } })();
-const now = new Date('2026-10-09T01:00:00.000Z');
+const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const now = new Date(`${today}T03:00:00.000Z`);
 const stamp = (ms: number) => new Date(ms + 9 * 60 * 60_000).toISOString().replace('Z', '+09:00');
 let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
 beforeEach(() => {
   sqlite = new Sqlite(':memory:'); DB = new D1SqliteAdapter(sqlite);
   for (const f of readdirSync(resolve(root, 'db/migrations')).filter(f => f.endsWith('.sql')).sort()) sqlite.exec(readFileSync(resolve(root, 'db/migrations', f), 'utf8'));
+  sqlite.prepare("INSERT INTO settings(key,value) VALUES('roi_d1_write_budget_utc',?)").run(JSON.stringify({ date: new Date().toISOString().slice(0, 10), reserved: 0, oddsReserved: 0 }));
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('24','boat','Fixture')").run();
 });
 afterEach(() => { vi.unstubAllGlobals(); sqlite.close(); });
 function race(id: string, post: number, origin = 'real', status = 'scheduled', no = 1) {
   sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at)
-    VALUES(?,'boat','24','2026-10-09',?,?,?, ?,?)`).run(id, no, stamp(post), status, origin, stamp(now.getTime()));
+    VALUES(?,'boat','24',?,?,?, ?,?,?)`).run(id, today, no, stamp(post), status, origin, stamp(now.getTime()));
 }
 
 describe('Boatrace win odds collection', () => {

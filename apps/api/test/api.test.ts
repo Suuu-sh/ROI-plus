@@ -5,6 +5,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { app, settleOpen, autoBet } from '../src/index.js';
 import { D1SqliteAdapter } from './d1-adapter.js';
+import { payoutYen, settleValues } from '../src/services/logic.js';
 
 const root=resolve(import.meta.dirname,'../../..');
 let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
@@ -17,8 +18,9 @@ const sha256Text=(value:string)=>createHash('sha256').update(value,'utf8').diges
 beforeEach(()=>{
  sqlite=new Sqlite(':memory:'); DB=new D1SqliteAdapter(sqlite);
  for (const f of readdirSync(resolve(root,'db/migrations')).filter(f=>f.endsWith('.sql')).sort()) sqlite.exec(readFileSync(resolve(root,'db/migrations',f),'utf8'));
+ sqlite.prepare("INSERT INTO settings(key,value) VALUES('roi_d1_write_budget_utc',?)").run(JSON.stringify({date:new Date().toISOString().slice(0,10),reserved:0,oddsReserved:0}));
  sqlite.exec(readFileSync(resolve(root,'db/seed/sample.sql'),'utf8'));
- sqlite.prepare("UPDATE models SET metrics_json=json_set(CASE WHEN json_valid(metrics_json) THEN metrics_json ELSE '{}' END,'$.boatFeatureSchemaVersion','boat-base-v1','$.boatArtifactSha256',?) WHERE id='boat-active'").run('a'.repeat(64));
+ sqlite.prepare("UPDATE models SET metrics_json=json_set(CASE WHEN json_valid(metrics_json) THEN metrics_json ELSE '{}' END,'$.boatVenueSchemaVersion','boat-venue-v2','$.correctedTrainingDataSha256',?,'$.boatArtifactSha256',?) WHERE id='boat-active'").run('f'.repeat(64),'a'.repeat(64));
  sqlite.prepare("UPDATE races SET post_time=? WHERE data_origin='sample' AND status='scheduled'").run(jstIso(Date.now()+60*60_000));
 });
 afterEach(()=>sqlite.close());
@@ -64,6 +66,30 @@ describe('EdgeLab API',()=>{
   expect((await req()).status).toBe(200); expect((await req()).status).toBe(200);
   expect(sqlite.prepare('SELECT COUNT(*) n FROM races WHERE id=?').get(race.id)).toMatchObject({n:1});
  });
+ it('does not spend D1 budget for no-op natural-key replays or synthetic timestamp/ID changes',async()=>{
+  const raceId='boat-20990101-88-01', post=(endpoint:string,rows:unknown[])=>app.request(`/api/ingest/${endpoint}`,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify(rows)},env());
+  const race={id:raceId,sport:'boat',venue_id:'b01',race_date:'2099-01-01',race_no:1,status:'scheduled',data_origin:'real',updated_at:'2099-01-01T00:00:00Z'};
+  expect((await post('races',[race])).status).toBe(200);
+  const firstEntry={id:'source-id-one',race_id:raceId,number:1,name:'Lane 1',available_at:'2098-12-31T00:00:00Z',data_origin:'real'};
+  expect(await (await post('entries',[firstEntry])).json()).toMatchObject({changed:1});
+  const before=JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
+  expect(await (await post('races',[{...race,updated_at:'2099-01-02T00:00:00Z'}])).json()).toMatchObject({changed:0});
+  expect(await (await post('entries',[{...firstEntry,id:'source-id-two'}])).json()).toMatchObject({changed:0});
+  const after=JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
+  expect(after).toEqual(before);
+  expect(sqlite.prepare('SELECT id FROM entries WHERE race_id=? AND number=1').get(raceId)).toMatchObject({id:'source-id-one'});
+ });
+ it('reports shared D1 budget and refuses missing state until an explicit full-day seed',async()=>{
+  const authHeader={authorization:'Bearer test-token','content-type':'application/json'};
+  expect((await app.request('/api/ingest/write-budget',{},env())).status).toBe(401);
+  expect(await (await app.request('/api/ingest/write-budget',{headers:authHeader},env())).json()).toMatchObject({state:'known',limit:20000,oddsLimit:10000,remaining:20000});
+  sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();
+  const payload=[{id:'boat-20990101-09-01',sport:'boat',venue_id:'b01',race_date:'2099-01-01',race_no:9,status:'scheduled',data_origin:'real'}];
+  const denied=await app.request('/api/ingest/races',{method:'POST',headers:authHeader,body:JSON.stringify(payload)},env());
+  expect(denied.status).toBe(429); expect(await denied.json()).toMatchObject({code:'d1_write_budget_unavailable',budget:{state:'missing'}});
+  const seed=await app.request('/api/ingest/write-budget/seed',{method:'POST',headers:authHeader,body:JSON.stringify({date:new Date().toISOString().slice(0,10),confirmed:true})},env());
+  expect(seed.status).toBe(201); expect(await seed.json()).toMatchObject({state:'exhausted',remaining:0});
+ });
  it('ingests venues and payouts idempotently and finishes paid-out races',async()=>{
   const raceId='boat-20990101-01-01';
   const race={id:raceId,sport:'boat',venue_id:'01',race_date:'2099-01-01',race_no:1,status:'scheduled',data_origin:'real',updated_at:'2099-01-01T00:00:00Z'};
@@ -87,6 +113,31 @@ describe('EdgeLab API',()=>{
   const sample=await (await req('sample')).json() as any[];
   expect(real.map(x=>x.id)).toEqual(['boat-20990101-01-01']);
   expect(sample).toEqual([]);
+ });
+ it('hides quarantined phantom races and prevents ingest from resurrecting them',async()=>{
+  const race=sqlite.prepare("SELECT * FROM races WHERE sport='boat' AND data_origin='sample' AND status='finished' LIMIT 1").get() as any;
+  const entry=sqlite.prepare('SELECT number FROM entries WHERE race_id=? ORDER BY number LIMIT 1').get(race.id) as {number:number};
+  const unusualProbability=0.987654321;
+  sqlite.prepare('UPDATE races SET post_time=? WHERE id=?').run(jstIso(Date.now()-30000),race.id);
+  sqlite.prepare("INSERT INTO predictions(id,race_id,model_id,number,probability,prob_std,predicted_at,data_origin) VALUES('phantom-calibration-p',?,'boat-active',?,?,0.01,?,'sample')").run(race.id,entry.number,unusualProbability,jstIso(Date.now()-60000));
+  sqlite.prepare("INSERT INTO data_repair_quarantined_races(race_id,repair_id,reason) VALUES(?,?,?)").run(race.id,'repair-test','absent from authoritative held-venue source');
+  sqlite.prepare("UPDATE races SET status='closed' WHERE id=?").run(race.id);
+  const listed=await (await app.request(`/api/races?date=${race.race_date}&sport=boat&origin=sample`,{},env())).json() as any[];
+  expect(listed.some(x=>x.id===race.id)).toBe(false);
+  expect((await app.request(`/api/races/${race.id}`,{},env())).status).toBe(404);
+  const ranked=await (await app.request(`/api/rankings?date=${race.race_date}&sport=boat&origin=sample`,{},env())).json() as any[];
+  expect(ranked.some(x=>x.raceId===race.id)).toBe(false);
+  const ingest=await app.request('/api/ingest/races',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify([{...race,status:'scheduled'}])},env());
+  expect(ingest.status).toBe(400);
+  const results=await app.request('/api/ingest/results',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify([{race_id:race.id,finish_order:1,number:entry.number,data_origin:'sample'}])},env());
+  expect(results.status).toBe(400);
+  const predictions=await app.request('/api/ingest/predictions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify([{id:'blocked-phantom-p',race_id:race.id,model_id:'boat-active',number:entry.number,probability:0.5,predicted_at:jstIso(Date.now()-10000),data_origin:'sample'}])},env());
+  expect(predictions.status).toBe(400);
+  expect(sqlite.prepare('SELECT status FROM races WHERE id=?').get(race.id)).toMatchObject({status:'closed'});
+  // Even if a separate path bypasses ingestion and flips status, calibration keeps the phantom excluded.
+  sqlite.prepare("UPDATE races SET status='finished' WHERE id=?").run(race.id);
+  const performance=await (await app.request('/api/performance/breakdown?origin=sample',{},env())).json() as any;
+  expect(performance.calibration.some((x:any)=>Math.abs(x.predicted-unusualProbability)<1e-8)).toBe(false);
  });
  it('ingest preserves terminal races and manually managed model rows',async()=>{
   const post=(endpoint:string,body:unknown)=>app.request(`/api/ingest/${endpoint}`,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify(body)},env());
@@ -154,6 +205,44 @@ describe('EdgeLab API',()=>{
   expect(await settleOpen(DB)).toBe(1);
   const settled=sqlite.prepare('SELECT * FROM bets WHERE id=?').get(bet.id) as any;expect(settled.status).toBe('won');expect(settled.payout).toBe(450);expect(settled.profit).toBe(350);expect(settled.final_odds).toBe(4.5);
  });
+ it('places an atomic multi-pick ticket with frozen rank, arbitrary yen stakes, idempotency, and equal-budget comparison',async()=>{
+  const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 1").get() as any;
+  const entries=sqlite.prepare('SELECT number FROM entries WHERE race_id=? ORDER BY number LIMIT 2').all(race.id) as {number:number}[];
+  const at=jstIso(Date.now()-5000),predAt=jstIso(Date.now()-10000);
+  const odds=[3,2],probs=[0.6,0.5];
+  entries.forEach((entry,i)=>{
+   sqlite.prepare('INSERT INTO predictions(id,race_id,model_id,number,probability,prob_std,predicted_at,data_origin) VALUES(?,? ,\'boat-active\',?,?,0.01,?,\'sample\')').run(`multi-p-${i}`,race.id,entry.number,probs[i],predAt);
+   sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES(?,?,'win',?,?,?,'test','sample')").run(`multi-o-${i}`,race.id,String(entry.number),odds[i],at);
+  });
+  const selections=entries.map((entry,i)=>({selection:String(entry.number),stake:i===0?25:75}));
+  const post=(stakes=selections)=>app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId:race.id,betType:'win',requestId:'same-ticket-id',selections:stakes})},env());
+  sqlite.prepare("UPDATE settings SET value='99' WHERE key='initial_bankroll'").run();
+  expect((await post()).status).toBe(400);
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE bet_group_id='same-ticket-id'").get()).toMatchObject({n:0});
+  sqlite.prepare("UPDATE settings SET value='100000' WHERE key='initial_bankroll'").run();
+  const placed=await post();expect(placed.status).toBe(201);const body=await placed.json() as any;
+  expect(body.bets).toHaveLength(2);expect(body.bets.map((b:any)=>b.stake)).toEqual([25,75]);
+  expect(body.bets.map((b:any)=>b.candidateRank)).toEqual([1,2]);
+  expect(body.bets.every((b:any)=>b.candidateCount===2&&b.groupId==='same-ticket-id'&&b.oddsCapturedAt===at&&b.predictedAtAtBet===predAt)).toBe(true);
+  expect((await post()).status).toBe(200);
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE bet_group_id='same-ticket-id'").get()).toMatchObject({n:2});
+  expect((await post([{selection:String(entries[0].number),stake:100}])).status).toBe(409);
+  const divergent=(selection:string)=>app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId:race.id,betType:'win',requestId:'concurrent-divergence',selections:[{selection,stake:10}]})},env());
+  const concurrent=await Promise.all([divergent(String(entries[0].number)),divergent(String(entries[1].number))]);
+  expect(concurrent.map(x=>x.status).sort()).toEqual([201,409]);
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE bet_group_id='concurrent-divergence'").get()).toMatchObject({n:1});
+  // Rank 1 wins; compare its official payout at the same total group budget.
+  sqlite.prepare("UPDATE races SET status='finished' WHERE id=?").run(race.id);
+  const field=sqlite.prepare('SELECT number FROM entries WHERE race_id=? ORDER BY number').all(race.id) as {number:number}[];
+  for(const [i,runner] of field.entries())sqlite.prepare('INSERT INTO results(race_id,finish_order,number,data_origin) VALUES(?,?,?,\'sample\')').run(race.id,runner.number===entries[0].number?1:i+2,runner.number);
+  sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,popularity,data_origin) VALUES(?,'win',?,300,1,'sample')").run(race.id,String(entries[0].number));
+  expect(await settleOpen(DB)).toBe(3);
+  const comparison=await (await app.request('/api/performance/rank-comparison?origin=sample',{},env())).json() as any;
+  expect(comparison).toMatchObject({comparedRaceCount:1,totalStake:100,multiple:{stake:100,payout:75,profit:-25,roi:0.75},firstOnly:{stake:100,payout:300,profit:200,roi:3}});
+  expect(settleValues(1,150,true)).toMatchObject({payout:1,profit:0,finalOdds:1.5});
+  expect(settleValues(100,290,true)).toMatchObject({payout:290,profit:190,finalOdds:2.9});
+  expect(payoutYen(1,150)).toBe(1);
+ });
  it('auto bets reserve available bankroll and stop at the cap, including existing open stakes',async()=>{
   sqlite.exec('DELETE FROM bets');
   sqlite.prepare("UPDATE settings SET value='200' WHERE key='initial_bankroll'").run();
@@ -171,6 +260,22 @@ describe('EdgeLab API',()=>{
   expect(auto.odds_captured_at).toBe(selectedOdds.captured_at);
   const listed=await app.request('/api/bets?origin=sample',{},env());
   expect((await listed.json() as any[]).find(x=>x.id===auto.id)).toMatchObject({oddsCapturedAt:selectedOdds.captured_at});
+ });
+ it('splits a bounded auto race budget across ranked picks and records one complete group',async()=>{
+  const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 1").get() as {id:string};
+  const entries=sqlite.prepare('SELECT number FROM entries WHERE race_id=? ORDER BY number LIMIT 2').all(race.id) as {number:number}[];
+  addBetInputs(race.id,'auto-multi');
+  const second=entries[1];
+  sqlite.prepare("INSERT INTO predictions(id,race_id,model_id,number,probability,prob_std,predicted_at,data_origin) VALUES('auto-multi-p2',?,'boat-active',?,0.5,0.01,?,'sample')").run(race.id,second.number,jstIso(Date.now()-10000));
+  sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('auto-multi-o2',?,'win',?,4,?,'test','sample')").run(race.id,String(second.number),jstIso(Date.now()-5000));
+  sqlite.prepare("UPDATE settings SET value='2' WHERE key='auto_bet_max_picks'").run();
+  sqlite.prepare("UPDATE settings SET value='100' WHERE key='auto_bet_race_budget'").run();
+  expect(await Promise.all([autoBet(DB,true),autoBet(DB,true)])).toEqual(expect.arrayContaining([0,2]));
+  const placed=sqlite.prepare("SELECT bet_group_id,candidate_rank,candidate_count,stake FROM bets WHERE mode='auto' AND race_id=? ORDER BY candidate_rank").all(race.id) as any[];
+  expect(placed).toHaveLength(2);expect(placed.map(x=>x.stake)).toEqual([50,50]);
+  expect(placed.map(x=>x.candidate_rank)).toEqual([1,2]);expect(placed[0].bet_group_id).toBe(placed[1].bet_group_id);
+  expect(placed.every(x=>x.candidate_count===2)).toBe(true);
+  expect(sqlite.prepare("SELECT SUM(stake) stake FROM bets WHERE mode='auto' AND race_id=?").get(race.id)).toMatchObject({stake:100});
  });
  it('manual placement rejects a stake that would exceed bankroll after open stakes',async()=>{
   sqlite.exec('DELETE FROM bets');
@@ -325,10 +430,12 @@ describe('EdgeLab API',()=>{
  it('accepts only an intact, current ML-generated initial-baseline validation contract',async()=>{
   const validation=JSON.parse(readFileSync(resolve(root,'ml/tests/fixtures/initial_baseline_validation.synthetic.json'),'utf8')) as any;
   validation.validatedAt=new Date().toISOString();
+  validation.boatVenueSchemaVersion='boat-venue-v2';
+  validation.correctedTrainingDataSha256='f'.repeat(64);
   const id=validation.candidateModelId, active=sqlite.prepare("SELECT * FROM models WHERE id='boat-active'").get() as any;
   const metrics={promotionEligible:false,promotionReason:'initial baseline requires a separate human decision',
     initialBaselineEligible:true,initialBaselineReason:null,initialBaselineValidation:validation,
-    boatFeatureSchemaVersion:'boat-base-v1',boatArtifactSha256:validation.artifact.pickleSha256};
+    boatVenueSchemaVersion:'boat-venue-v2',correctedTrainingDataSha256:'f'.repeat(64),boatArtifactSha256:validation.artifact.pickleSha256};
   sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status,train_from,train_to,valid_from,valid_to,test_from,test_to,n_train,metrics_json,trained_at,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
     .run(id,'boat','win',validation.artifact.version,'fixture','candidate','2026-01-01','2026-03-11','2026-03-12','2026-03-26','2026-03-27','2026-04-10',2100,JSON.stringify(metrics),validation.validatedAt,'synthetic validation fixture');
   validation.candidateRegistryIdentity={id,version:validation.artifact.version,status:'candidate'};
@@ -337,6 +444,26 @@ describe('EdgeLab API',()=>{
   const fingerprintPayload={...validation}; delete fingerprintPayload.fingerprint; delete fingerprintPayload.validatedAt;
   delete fingerprintPayload.initialBaselineEligible; delete fingerprintPayload.initialBaselineReason;
   validation.fingerprint=sha256Json(fingerprintPayload); metrics.initialBaselineValidation=validation;
+  sqlite.prepare('UPDATE models SET metrics_json=? WHERE id=?').run(JSON.stringify(metrics),id);
+  const rejectIdentity=async(schema:string|undefined,source:string|undefined)=>{
+    if(schema===undefined) delete validation.boatVenueSchemaVersion; else validation.boatVenueSchemaVersion=schema;
+    if(source===undefined) delete validation.correctedTrainingDataSha256; else validation.correctedTrainingDataSha256=source;
+    const fp={...validation}; delete fp.fingerprint; delete fp.validatedAt;
+    delete fp.initialBaselineEligible; delete fp.initialBaselineReason;
+    validation.fingerprint=sha256Json(fp); metrics.initialBaselineValidation=validation;
+    sqlite.prepare('UPDATE models SET metrics_json=? WHERE id=?').run(JSON.stringify(metrics),id);
+    const response=await app.request(`/api/models/${id}/promote`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:'initial_baseline',validationFingerprint:validation.fingerprint,confirmed:true})},env());
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({error:'validated artifact identity is incomplete'});
+  };
+  await rejectIdentity(undefined,'f'.repeat(64));
+  await rejectIdentity('boat-base-v1','f'.repeat(64));
+  await rejectIdentity('boat-venue-v2',undefined);
+  await rejectIdentity('boat-venue-v2','e'.repeat(64));
+  validation.boatVenueSchemaVersion='boat-venue-v2'; validation.correctedTrainingDataSha256='f'.repeat(64);
+  const finalFingerprint={...validation}; delete finalFingerprint.fingerprint; delete finalFingerprint.validatedAt;
+  delete finalFingerprint.initialBaselineEligible; delete finalFingerprint.initialBaselineReason;
+  validation.fingerprint=sha256Json(finalFingerprint); metrics.initialBaselineValidation=validation;
   sqlite.prepare('UPDATE models SET metrics_json=? WHERE id=?').run(JSON.stringify(metrics),id);
   const payload={mode:'initial_baseline',validationFingerprint:validation.fingerprint,confirmed:true};
   const promoted=await app.request(`/api/models/${id}/promote`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)},env());
@@ -409,11 +536,27 @@ describe('EdgeLab API',()=>{
   sqlite.prepare("UPDATE models SET metrics_json='{}' WHERE id='boat-active'").run();
   const legacyCalibration=await (await app.request('/api/performance/breakdown?origin=real',{},env())).json() as any;
   expect(legacyCalibration.calibration).toEqual([]);
-  sqlite.prepare("UPDATE models SET metrics_json=json_set('{}','$.boatFeatureSchemaVersion','boat-base-v1','$.boatArtifactSha256',?) WHERE id='boat-active'").run('a'.repeat(64));
+  sqlite.prepare("UPDATE models SET metrics_json=json_set('{}','$.boatVenueSchemaVersion','boat-venue-v2','$.correctedTrainingDataSha256',?,'$.boatArtifactSha256',?) WHERE id='boat-active'").run('f'.repeat(64),'a'.repeat(64));
   const all=await (await app.request('/api/performance/breakdown?origin=sample',{},env())).json() as any;
   const n=all.calibration.reduce((a:number,x:any)=>a+x.count,0);
-  const finished=sqlite.prepare("SELECT COUNT(*) n FROM predictions p JOIN races race ON race.id=p.race_id AND race.data_origin=p.data_origin JOIN models m ON m.id=p.model_id AND m.sport=race.sport AND m.bet_type='win' AND (race.sport<>'boat' OR (json_extract(m.metrics_json,'$.boatFeatureSchemaVersion')='boat-base-v1' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*')) JOIN results r ON r.race_id=p.race_id AND r.number=p.number AND r.data_origin=race.data_origin WHERE race.data_origin='sample' AND race.status='finished' AND race.post_time IS NOT NULL AND julianday(p.predicted_at)<=julianday(race.post_time) AND p.predicted_at=(SELECT p2.predicted_at FROM predictions p2 WHERE p2.race_id=p.race_id AND p2.model_id=p.model_id AND p2.number=p.number AND p2.data_origin=race.data_origin AND julianday(p2.predicted_at)<=julianday(race.post_time) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1)").get() as {n:number};
+  const finished=sqlite.prepare("SELECT COUNT(*) n FROM predictions p JOIN races race ON race.id=p.race_id AND race.data_origin=p.data_origin JOIN models m ON m.id=p.model_id AND m.sport=race.sport AND m.bet_type='win' AND (race.sport<>'boat' OR (json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*')) JOIN results r ON r.race_id=p.race_id AND r.number=p.number AND r.data_origin=race.data_origin WHERE race.data_origin='sample' AND race.status='finished' AND race.post_time IS NOT NULL AND julianday(p.predicted_at)<=julianday(race.post_time) AND p.predicted_at=(SELECT p2.predicted_at FROM predictions p2 WHERE p2.race_id=p.race_id AND p2.model_id=p.model_id AND p2.number=p.number AND p2.data_origin=race.data_origin AND julianday(p2.predicted_at)<=julianday(race.post_time) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1)").get() as {n:number};
   expect(n).toBe(finished.n);
+ });
+ it('quarantines explicitly marked bets from settlement, listings, performance, and bankroll while reporting their totals',async()=>{
+  const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND sport='boat' AND status='finished' LIMIT 1").get() as {id:string};
+  sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,placed_at,status,payout,profit,settled_at,data_origin) VALUES('quarantined-ledger',?,'boat','win','1',100,'manual',0.5,2,0,'NEUTRAL',?,'won',500,400,?,'sample')").run(race.id,jstIso(),jstIso());
+  sqlite.prepare("INSERT INTO data_repair_audit_marks(repair_id,race_id,record_type,record_id,reason) VALUES('repair-test',?,'bet','quarantined-ledger','source correction')").run(race.id);
+  sqlite.prepare("INSERT INTO data_repair_audit_marks(repair_id,race_id,record_type,record_id,reason) VALUES('repair-test',?,'prediction','quarantined-prediction','source correction')").run(race.id);
+  const listed=await (await app.request('/api/bets',{},env())).json() as any[];
+  expect(listed.some(x=>x.id==='quarantined-ledger')).toBe(false);
+  const summary=await (await app.request('/api/bets/quarantine-summary?origin=sample',{},env())).json() as any;
+  expect(summary).toMatchObject({count:1,stake:100,payout:500,profit:400});
+  const overview=await (await app.request('/api/performance/overview?origin=sample',{},env())).json() as any;
+  expect(overview.quarantined).toMatchObject({count:1,stake:100,payout:500,profit:400});
+  expect(await settleOpen(DB)).toBe(0);
+  expect(sqlite.prepare("SELECT status FROM bets WHERE id='quarantined-ledger'").get()).toEqual({status:'won'});
+  sqlite.prepare("INSERT INTO settings(key,value) VALUES('auto_bet_paused','true') ON CONFLICT(key) DO UPDATE SET value='true'").run();
+  expect(await autoBet(DB,true)).toBe(0);
  });
  it('accepts dead heats and wide payouts from real data',async()=>{
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('09','boat','津')").run();
@@ -430,11 +573,66 @@ describe('EdgeLab API',()=>{
   expect((await app.request('/api/health',{},e)).status).toBe(200);
   expect((await app.request('/api/ingest/venues',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:'[]'},e)).status).toBe(200);
  });
+ it('blocks boat win runtime, promotion, rollback and rebuy without venue-v2 and corrected-data SHA metadata',async()=>{
+  const race=sqlite.prepare("SELECT r.id FROM races r WHERE r.data_origin='sample' AND r.sport='boat' AND r.status='scheduled' LIMIT 1").get() as any;
+  const selection=addBetInputs(race.id,'legacy-model');
+  const legacyMetrics={boatFeatureSchemaVersion:'boat-base-v1',boatArtifactSha256:'a'.repeat(64),promotionEligible:true};
+  sqlite.prepare('UPDATE models SET metrics_json=? WHERE id=\'boat-active\'').run(JSON.stringify(legacyMetrics));
+  const buy=await app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId:race.id,betType:'win',selection,stake:100})},env());
+  expect(buy.status).toBe(400);
+  const legacyCandidate='boat-legacy-candidate';
+  sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status,metrics_json) VALUES(?,'boat','win','old','fixture','candidate',?)").run(legacyCandidate,JSON.stringify(legacyMetrics));
+  expect((await app.request(`/api/models/${legacyCandidate}/promote`,{method:'POST'},env())).status).toBe(400);
+  const legacyRetired='boat-legacy-retired';
+  sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status,metrics_json) VALUES(?,'boat','win','old-retired','fixture','retired',?)").run(legacyRetired,JSON.stringify(legacyMetrics));
+  expect((await app.request('/api/models/boat-active/rollback',{method:'POST'},env())).status).toBe(400);
+  expect(sqlite.prepare('SELECT status FROM models WHERE id=?').get(legacyRetired)).toMatchObject({status:'retired'});
+ });
  it('collection source is disabled when its latest run was skipped',async()=>{
   sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,records) VALUES('run-success','boat-official','boat','2099-01-01','2099-01-01T00:00:00Z','success',10)").run();
   sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,records) VALUES('run-skipped','boat-official','boat','2099-01-01','2099-01-02T00:00:00Z','skipped',0)").run();
   const response=await app.request('/api/collection/status',{},env());
   const result=await response.json() as any;
   expect(result.sources.find((x:any)=>x.source==='boat-official').enabled).toBe(false);
+ });
+ it('reports truthful result-wait reasons and date-scoped result collection telemetry in bet history',async()=>{
+  const venueId=(sqlite.prepare("SELECT venue_id FROM races WHERE data_origin='sample' LIMIT 1").get() as any).venue_id;
+  const makeRace=(id:string,status:string,postTime:string|null,raceDate='2099-01-01')=>{
+   sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,status,post_time,data_origin,updated_at) VALUES(?,'boat',?,?,?,?,?, 'real','2099-01-01T00:00:00Z')").run(id,venueId,raceDate,Number(id.slice(-2)),status,postTime);
+   for(let number=1;number<=2;number++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,features_json,available_at,data_origin) VALUES(?,?,?,?,'{}','2099-01-01T00:00:00Z','real')").run(`${id}-${number}`,id,number,`Entry ${number}`);
+   sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES(?,?,'boat','win','1',100,'manual','INSUFFICIENT_DATA','2099-01-01T00:00:00Z','open','real')").run(`${id}-bet`,id);
+  };
+  makeRace('boat-20990101-01-01','scheduled','2099-01-01T12:00:00Z');
+  makeRace('boat-20990101-01-02','finished',null);
+  makeRace('boat-20990101-01-03','finished',null);
+  makeRace('boat-20990101-01-04','finished',null);
+  makeRace('boat-20990102-01-05','finished',null,'2099-01-02');
+  makeRace('boat-20990103-01-06','finished',null,'2099-01-03');
+  makeRace('boat-20990103-01-07','cancelled',null,'2099-01-03');
+  sqlite.prepare("UPDATE entries SET features_json='{\"finish_code\":\"失格\"}' WHERE race_id='boat-20990103-01-06' AND number=1").run();
+  sqlite.prepare("INSERT INTO results(race_id,finish_order,number,data_origin) VALUES('boat-20990101-01-03',1,1,'real'),('boat-20990101-01-03',2,2,'real'),('boat-20990101-01-04',1,1,'real'),('boat-20990101-01-04',2,2,'real')").run();
+  sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,popularity,data_origin) VALUES('boat-20990101-01-04','win','1',230,1,'real')").run();
+  const runAt=(minutesAgo:number)=>new Date(Date.now()-minutesAgo*60_000).toISOString();
+  const lastSuccessAt=runAt(20),lastSuccessFinishedAt=runAt(19),latestAttemptAt=runAt(5);
+  const runs=sqlite.prepare('INSERT INTO collection_runs(id,source,sport,target_date,started_at,finished_at,status,records) VALUES(?,?,\'boat\',\'2099-01-01\',?,?,?,?)');
+  runs.run('run-result-success','mbrace-boat',lastSuccessAt,lastSuccessFinishedAt,'success',4);
+  runs.run('run-odds-only','boatrace-odds',runAt(10),runAt(9),'failed',0);
+  // Latest matching attempt is failed; prior success remains separately visible. Odds telemetry is not result telemetry.
+  runs.run('run-result-failed-latest','mbrace-boat',latestAttemptAt,runAt(4),'failed',0);
+  runs.run('run-result-future','mbrace-boat','2099-01-06T00:00:00Z','2099-01-06T00:01:00Z','success',99);
+  const sampleRace=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' LIMIT 1").get() as any;
+  sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES('sample-wait-bet',?,'boat','win','1',100,'manual','INSUFFICIENT_DATA','2099-01-01T00:00:00Z','open','sample')").run(sampleRace.id);
+  const response=await app.request('/api/bets?origin=all',{},env());
+  expect(response.status).toBe(200);
+  const bets=await response.json() as any[];
+  const byId=Object.fromEntries(bets.map((bet:any)=>[bet.id,bet]));
+  expect(byId['boat-20990101-01-01-bet'].resultWaitReason).toBe('notstarted');
+  expect(byId['boat-20990101-01-02-bet']).toMatchObject({resultWaitReason:'collectionfailed',resultCollectionSource:'mbrace-boat',resultCollectionStatus:'failed',resultCollectionLastAttemptAt:latestAttemptAt,resultCollectionLastSuccessAt:lastSuccessFinishedAt});
+  expect(byId['boat-20990101-01-03-bet'].resultWaitReason).toBe('payoutmissing');
+  expect(byId['boat-20990101-01-04-bet'].resultWaitReason).toBe('settlementpending');
+  expect(byId['boat-20990102-01-05-bet'].resultWaitReason).toBe('officialresultmissing');
+  expect(byId['boat-20990103-01-06-bet'].resultWaitReason).toBe('disqualified');
+  expect(byId['boat-20990103-01-07-bet'].resultWaitReason).toBe('cancelled');
+  expect(byId['sample-wait-bet'].resultWaitReason).toBe('sampledata');
  });
 });
