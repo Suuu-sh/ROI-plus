@@ -59,13 +59,15 @@ export async function collectTrifectaOdds(db: Db, now: Date, opts: CollectTrifec
         const parsed = parseTrifectaOdds(html, { raceDate: race.race_date, venueCode: race.venue_id, raceNo: race.race_no });
         const capturedAt = jstIso(Date.now());
         const sourceHash = await sha256(bytes);
-        for (const row of parsed.odds) {
-          statements.push(db.prepare(`INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin,source_url,source_sha256,quality_status)
-            VALUES(?,?,'trifecta',?,?,?,'boatrace-trifecta-official-v1','real',?,?,?)
-            ON CONFLICT(race_id,bet_type,selection,captured_at) DO UPDATE SET odds=excluded.odds,source=excluded.source,data_origin='real',source_url=excluded.source_url,source_sha256=excluded.source_sha256,quality_status=excluded.quality_status`)
-            .bind(`${race.id}:trifecta:${row.selection}:${capturedAt}`, race.id, row.selection, row.odds, capturedAt, url, sourceHash, parsed.qualityStatus));
-          records++;
-        }
+        // One atomic statement per complete market avoids 120 subqueries per
+        // race and never exposes a partially written combination set.
+        const market=parsed.odds.map(row=>({...row,id:`${race.id}:trifecta:${row.selection}:${capturedAt}`}));
+        statements.push(db.prepare(`INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin,source_url,source_sha256,quality_status)
+          SELECT json_extract(value,'$.id'),?,'trifecta',json_extract(value,'$.selection'),json_extract(value,'$.odds'),?,'boatrace-trifecta-official-v1','real',?,?,?
+          FROM json_each(?) WHERE 1
+          ON CONFLICT(race_id,bet_type,selection,captured_at) DO UPDATE SET odds=excluded.odds,source=excluded.source,data_origin='real',source_url=excluded.source_url,source_sha256=excluded.source_sha256,quality_status=excluded.quality_status`)
+          .bind(race.id,capturedAt,url,sourceHash,parsed.qualityStatus,JSON.stringify(market)));
+        records+=market.length;
       } catch (error) {
         failed++;
         errors.push(`${race.id}: ${error instanceof Error ? error.message : String(error)}`);

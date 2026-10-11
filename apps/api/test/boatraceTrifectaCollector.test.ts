@@ -37,10 +37,12 @@ afterEach(()=>sqlite.close());
 describe('trifecta odds collector provenance',()=>{
   it('stores a complete live official page hash and uses the shared per-cron fetch budget',async()=>{
     const date=sqlite.prepare("SELECT race_date FROM races WHERE id='boat-collector-test'").get() as {race_date:string};
+    const originalPrepare=DB.prepare.bind(DB);let insertStatements=0;DB.prepare=(sql:string)=>{if(sql.startsWith('INSERT INTO odds_snapshots'))insertStatements++;return originalPrepare(sql);};
     const body=livePage(date.race_date),bytes=new TextEncoder().encode(body),requestBudget={used:48,max:49},pauses:number[]=[];
     const result=await collectTrifectaOdds(DB,new Date(),{requestBudget,sleep:async(ms)=>{pauses.push(ms)},fetch:async()=>({ok:true,status:200,arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)})});
     expect(result).toMatchObject({status:'success',records:120,targets:1,attempted:1});
     expect(requestBudget.used).toBe(49);
+    expect(insertStatements).toBe(1); // complete 120-row market in one atomic query
     expect(pauses).toEqual([3000]); // shared budget means a prior win fetch also requires spacing
     const evidence=sqlite.prepare("SELECT COUNT(*) n,MIN(source_sha256) hash,MAX(source_sha256) hash2,MIN(quality_status) quality,MIN(source) source,MIN(source_url) url FROM odds_snapshots WHERE race_id='boat-collector-test' AND bet_type='trifecta'").get() as any;
     expect(evidence).toMatchObject({n:120,hash:createHash('sha256').update(bytes).digest('hex'),hash2:createHash('sha256').update(bytes).digest('hex'),quality:'verified-complete-v1',source:'boatrace-trifecta-official-v1',url:expect.stringContaining('/odds3t?')});
