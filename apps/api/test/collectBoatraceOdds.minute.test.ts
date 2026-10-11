@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import worker from '../src/index.js';
 import { collectOdds, selectOddsTargets } from '../src/services/collectBoatraceOdds.js';
-import { DAILY_D1_WRITE_BUDGET, DAILY_ESSENTIAL_WRITE_BUDGET, DAILY_ODDS_WRITE_BUDGET, DAILY_OPTIONAL_WRITE_BUDGET, readWriteBudget, reserveWriteBudget, reserveWriteBudgets } from '../src/services/writeBudget.js';
+import { DAILY_COLLECTION_LOG_RESERVE, DAILY_D1_WRITE_BUDGET, DAILY_ESSENTIAL_WRITE_BUDGET, DAILY_ODDS_WRITE_BUDGET, DAILY_OPTIONAL_WRITE_BUDGET, readWriteBudget, reserveWriteBudget, reserveWriteBudgets } from '../src/services/writeBudget.js';
 import { D1SqliteAdapter } from './d1-adapter.js';
 
 const root = resolve(import.meta.dirname, '../../..');
@@ -96,7 +96,7 @@ describe('minute odds collection controls', () => {
     ]);
     expect(reserves.filter(Boolean)).toHaveLength(1);
     const stored = JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as { value: string }).value);
-    expect(stored).toEqual({ date: now.toISOString().slice(0, 10), reserved: 20, oddsReserved: 20, essentialReserved: 0, optionalReserved: 20 });
+    expect(stored).toEqual({ date: now.toISOString().slice(0, 10), reserved: 20, oddsReserved: 20, essentialReserved: 0, optionalReserved: 20, collectionReserved: 0 });
     sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({ date: now.toISOString().slice(0, 10), reserved: 9_920, oddsReserved: 9_920 }));
     expect(await reserveWriteBudget(DB, now.toISOString().slice(0, 10), 100, 'odds')).toBe(false);
     expect(await reserveWriteBudget(DB, now.toISOString().slice(0, 10), 1, 'ingest')).toBe(false);
@@ -110,10 +110,23 @@ describe('minute odds collection controls', () => {
     const day = now.toISOString().slice(0, 10);
     expect(await reserveWriteBudget(DB, day, DAILY_OPTIONAL_WRITE_BUDGET, 'optional')).toBe(true);
     expect(await reserveWriteBudget(DB, day, 1, 'odds')).toBe(false);
-    expect(await reserveWriteBudget(DB, day, DAILY_ESSENTIAL_WRITE_BUDGET, 'essential')).toBe(true);
+    expect(await reserveWriteBudget(DB, day, DAILY_ESSENTIAL_WRITE_BUDGET - DAILY_COLLECTION_LOG_RESERVE, 'essential')).toBe(true);
     expect(await reserveWriteBudget(DB, day, 1, 'essential')).toBe(false);
     const budget = await readWriteBudget(DB, day);
-    expect(budget).toMatchObject({ reserved: DAILY_D1_WRITE_BUDGET, essentialReserved: 16_000, optionalReserved: 4_000, state: 'exhausted' });
+    expect(budget).toMatchObject({ reserved: DAILY_D1_WRITE_BUDGET - DAILY_COLLECTION_LOG_RESERVE, essentialReserved: 15_500, optionalReserved: 4_000, state: 'known' });
+  });
+
+  it('reserves collection log capacity inside the existing essential cap, even after optional exhaustion', async () => {
+    const day = now.toISOString().slice(0, 10);
+    expect(await reserveWriteBudget(DB, day, DAILY_OPTIONAL_WRITE_BUDGET, 'optional')).toBe(true);
+    expect(await reserveWriteBudget(DB, day, 5, 'collection')).toBe(true);
+    const beforeEssentials = await readWriteBudget(DB, day);
+    expect(beforeEssentials).toMatchObject({ reserved: DAILY_OPTIONAL_WRITE_BUDGET + 5, essentialReserved: 5, optionalReserved: DAILY_OPTIONAL_WRITE_BUDGET });
+    // Regular essential work cannot consume the still-unused portion of the protected 500-unit log reserve.
+    expect(await reserveWriteBudget(DB, day, DAILY_ESSENTIAL_WRITE_BUDGET - 5, 'essential')).toBe(false);
+    expect(await reserveWriteBudget(DB, day, DAILY_ESSENTIAL_WRITE_BUDGET - DAILY_COLLECTION_LOG_RESERVE, 'essential')).toBe(true);
+    expect(await reserveWriteBudget(DB, day, 1, 'collection')).toBe(true);
+    expect(await readWriteBudget(DB, day)).toMatchObject({ essentialReserved: DAILY_ESSENTIAL_WRITE_BUDGET - DAILY_COLLECTION_LOG_RESERVE + 6, collectionReserved: 6, optionalReserved: DAILY_OPTIONAL_WRITE_BUDGET });
   });
 
   it('does not charge either bucket when a mixed request cannot reserve both', async () => {

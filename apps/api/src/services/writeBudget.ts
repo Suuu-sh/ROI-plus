@@ -3,6 +3,9 @@ import type { Db } from '../repo/db.js';
 export const DAILY_D1_WRITE_BUDGET = 20_000;
 export const DAILY_ESSENTIAL_WRITE_BUDGET = 16_000;
 export const DAILY_OPTIONAL_WRITE_BUDGET = 4_000;
+// Collection telemetry is carved out of (not added to) the essential ceiling.
+// This small reserve prevents optional work from starving the daily run log.
+export const DAILY_COLLECTION_LOG_RESERVE = 500;
 // Odds are optional work and share the optional 4k ceiling (not an additional allowance).
 export const DAILY_ODDS_WRITE_BUDGET = 4_000;
 export const D1_WRITE_BUDGET_KEY = 'roi_d1_write_budget_utc';
@@ -17,6 +20,7 @@ export type WriteBudget = {
   oddsReserved: number;
   essentialReserved: number;
   optionalReserved: number;
+  collectionReserved: number;
   allowance?: OneDayAllowance;
 };
 export type WriteBudgetStatus = {
@@ -30,12 +34,14 @@ export type WriteBudgetStatus = {
   essentialReserved: number | null;
   optionalReserved: number | null;
   oddsReserved: number | null;
+  collectionReserved: number | null;
+  collectionRemaining: number | null;
   remaining: number | null;
   essentialRemaining: number | null;
   optionalRemaining: number | null;
   state: 'known' | 'exhausted' | 'missing' | 'invalid';
 };
-export type WriteCategory = 'odds' | 'optional' | 'essential' | 'ingest' | 'worker';
+export type WriteCategory = 'odds' | 'optional' | 'essential' | 'collection' | 'ingest' | 'worker';
 export type IngestTable = 'venues' | 'races' | 'entries' | 'odds_snapshots' | 'results' | 'payouts' | 'predictions' | 'ticket_predictions' | 'models' | 'collection_runs';
 
 const validDate = (value: unknown): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -75,7 +81,9 @@ function parse(value: string): WriteBudget | null {
       essentialReserved = parsed.essentialReserved as number;
       optionalReserved = parsed.optionalReserved as number;
     }
-    return { date: parsed.date, reserved: parsed.reserved as number, oddsReserved: parsed.oddsReserved as number, essentialReserved, optionalReserved, ...(allowance ? { allowance } : {}) };
+    const collectionReserved = parsed.collectionReserved === undefined ? 0 : parsed.collectionReserved;
+    if (!Number.isSafeInteger(collectionReserved) || collectionReserved < 0 || collectionReserved > DAILY_COLLECTION_LOG_RESERVE || collectionReserved > essentialReserved) return null;
+    return { date: parsed.date, reserved: parsed.reserved as number, oddsReserved: parsed.oddsReserved as number, essentialReserved, optionalReserved, collectionReserved, ...(allowance ? { allowance } : {}) };
   } catch { return null; }
 }
 
@@ -84,9 +92,9 @@ export const utcDate = (date = new Date()) => date.toISOString().slice(0, 10);
 export async function readWriteBudget(db: Db, date = utcDate()): Promise<WriteBudgetStatus> {
   const row = await db.prepare(`SELECT value FROM settings WHERE key=?`).bind(D1_WRITE_BUDGET_KEY).first<{ value: string }>();
   const common = { date, limit: DAILY_D1_WRITE_BUDGET, essentialLimit: DAILY_ESSENTIAL_WRITE_BUDGET, optionalLimit: DAILY_OPTIONAL_WRITE_BUDGET, oddsLimit: DAILY_ODDS_WRITE_BUDGET, allowance: null as OneDayAllowance | null };
-  if (!row) return { ...common, reserved: null, essentialReserved: null, optionalReserved: null, oddsReserved: null, remaining: null, essentialRemaining: null, optionalRemaining: null, state: 'missing' };
+  if (!row) return { ...common, reserved: null, essentialReserved: null, optionalReserved: null, oddsReserved: null, collectionReserved: null, collectionRemaining: null, remaining: null, essentialRemaining: null, optionalRemaining: null, state: 'missing' };
   const value = parse(row.value);
-  if (!value || value.date > date) return { ...common, reserved: null, essentialReserved: null, optionalReserved: null, oddsReserved: null, remaining: null, essentialRemaining: null, optionalRemaining: null, state: 'invalid' };
+  if (!value || value.date > date) return { ...common, reserved: null, essentialReserved: null, optionalReserved: null, oddsReserved: null, collectionReserved: null, collectionRemaining: null, remaining: null, essentialRemaining: null, optionalRemaining: null, state: 'invalid' };
   const sameDay = value.date === date;
   const allowance = sameDay ? value.allowance ?? null : null;
   const effective = allowance ?? DEFAULT_LIMITS;
@@ -94,7 +102,9 @@ export async function readWriteBudget(db: Db, date = utcDate()): Promise<WriteBu
   const essentialReserved = sameDay ? value.essentialReserved : 0;
   const optionalReserved = sameDay ? value.optionalReserved : 0;
   const oddsReserved = sameDay ? value.oddsReserved : 0;
-  return { ...common, ...effective, allowance, reserved, essentialReserved, optionalReserved, oddsReserved,
+  const collectionReserved = sameDay ? value.collectionReserved : 0;
+  return { ...common, ...effective, allowance, reserved, essentialReserved, optionalReserved, oddsReserved, collectionReserved,
+    collectionRemaining: DAILY_COLLECTION_LOG_RESERVE - collectionReserved,
     remaining: effective.limit - reserved,
     essentialRemaining: effective.essentialLimit - essentialReserved,
     optionalRemaining: effective.optionalLimit - optionalReserved,
@@ -123,18 +133,29 @@ export async function reserveWriteBudgets(db: Db, date: string, reservations: Ar
   const essentialReserved = sameDay ? prior.essentialReserved : 0;
   const optionalReserved = sameDay ? prior.optionalReserved : 0;
   const oddsReserved = sameDay ? prior.oddsReserved : 0;
+  const collectionReserved = sameDay ? prior.collectionReserved : 0;
   const allowance = sameDay ? prior.allowance : undefined;
   const limits = allowance ?? DEFAULT_LIMITS;
+  const requestedCollection = reservations.filter(x => x.category === 'collection').reduce((sum,x) => sum+x.units,0);
   const requestedEssential = reservations.filter(x => x.category === 'essential').reduce((sum,x) => sum+x.units,0);
-  const requestedOptional = reservations.filter(x => x.category !== 'essential').reduce((sum,x) => sum+x.units,0);
+  const requestedOptional = reservations.filter(x => x.category !== 'essential' && x.category !== 'collection').reduce((sum,x) => sum+x.units,0);
   const requestedOdds = reservations.filter(x => x.category === 'odds').reduce((sum,x) => sum+x.units,0);
-  const requested = requestedEssential + requestedOptional;
+  const requested = requestedEssential + requestedCollection + requestedOptional;
+  const nextCollectionReserved = collectionReserved + requestedCollection;
+  // Legacy ledgers may already have spent into the would-be reserve. Never
+  // invalidate their remaining headroom; protect only capacity still available.
+  const nonLogEssentialReserved = essentialReserved - collectionReserved;
+  const reserveStillProtected = nonLogEssentialReserved <= limits.essentialLimit - DAILY_COLLECTION_LOG_RESERVE
+    ? Math.max(0, DAILY_COLLECTION_LOG_RESERVE - nextCollectionReserved) : 0;
   if (reserved + requested > limits.limit
-    || essentialReserved + requestedEssential > limits.essentialLimit
+    || essentialReserved + requestedEssential + requestedCollection > limits.essentialLimit
+    || nextCollectionReserved > DAILY_COLLECTION_LOG_RESERVE
+    || nonLogEssentialReserved + requestedEssential > limits.essentialLimit - reserveStillProtected
     || optionalReserved + requestedOptional > limits.optionalLimit
     || (requestedOdds > 0 && oddsReserved + requestedOdds > limits.oddsLimit)) return false;
   const next = JSON.stringify({ date, reserved: reserved + requested, oddsReserved: oddsReserved + requestedOdds,
-    essentialReserved: essentialReserved + requestedEssential, optionalReserved: optionalReserved + requestedOptional, ...(allowance ? { allowance } : {}) });
+    essentialReserved: essentialReserved + requestedEssential + requestedCollection, optionalReserved: optionalReserved + requestedOptional,
+    collectionReserved: nextCollectionReserved, ...(allowance ? { allowance } : {}) });
   const result = await db.prepare(`UPDATE settings SET value=? WHERE key=? AND value=?`)
     .bind(next, D1_WRITE_BUDGET_KEY, row.value).run();
   return result.meta?.changes === 1;
@@ -161,7 +182,7 @@ export async function allowOneDayWriteBudget(db: Db, date: string): Promise<bool
 export async function seedUnknownWriteBudget(db: Db, date: string): Promise<boolean> {
   if (!validDate(date)) return false;
   const value = JSON.stringify({ date, reserved: DAILY_D1_WRITE_BUDGET, oddsReserved: DAILY_ODDS_WRITE_BUDGET,
-    essentialReserved: DAILY_ESSENTIAL_WRITE_BUDGET, optionalReserved: DAILY_OPTIONAL_WRITE_BUDGET });
+    essentialReserved: DAILY_ESSENTIAL_WRITE_BUDGET, optionalReserved: DAILY_OPTIONAL_WRITE_BUDGET, collectionReserved: 0 });
   const result = await db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING`)
     .bind(D1_WRITE_BUDGET_KEY, value).run();
   return result.meta?.changes === 1;
