@@ -7,10 +7,13 @@ class BoundStatement implements Statement {
   bind(...values: unknown[]) { this.values = values; return this; }
   async first<T>() { return (this.db.prepare(this.sql).get(...this.values) as T | undefined) ?? null; }
   async all<T>() { return { results: this.db.prepare(this.sql).all(...this.values) as T[] }; }
-  async run() { const r = this.db.prepare(this.sql).run(...this.values); return { success: true, meta: { changes: r.changes } }; }
+  runSync() { const r = this.db.prepare(this.sql).run(...this.values); return { success: true, meta: { changes: r.changes } }; }
+  async run() { return this.runSync(); }
 }
 export class D1SqliteAdapter implements Db {
   constructor(readonly sqlite: Sqlite.Database) {}
   prepare(sql: string) { return new BoundStatement(this.sqlite, sql); }
-  async batch(statements: Statement[]) { return Promise.all(statements.map(s=>s.run())); }
+  async batch(statements: Statement[]) {
+    return this.sqlite.transaction(() => statements.map(s => (s as BoundStatement).runSync()))();
+  }
 }

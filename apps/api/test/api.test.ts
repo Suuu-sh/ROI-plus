@@ -3,7 +3,7 @@ import Sqlite from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { app, settleOpen, autoBet, cron } from '../src/index.js';
+import { app, settleOpen, autoBet, autoBetWithReport, recordPaperAbstention, cron } from '../src/index.js';
 import { D1SqliteAdapter } from './d1-adapter.js';
 import { payoutYen, settleValues } from '../src/services/logic.js';
 import { readWriteBudget, reserveWriteBudget } from '../src/services/writeBudget.js';
@@ -13,7 +13,7 @@ let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
 const env=(extra:Record<string,unknown>={})=>({DB,INGEST_TOKEN:'test-token',ENABLE_AUTO_BET:'true',...extra});
 const jstIso=(ms=Date.now())=>new Date(ms+9*60*60*1000).toISOString().replace('Z','+09:00');
 const jstDate=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
-const setPaperCutoff=(raceId:string,decisionAt:number)=>sqlite.prepare('UPDATE races SET race_date=?,post_time=? WHERE id=?').run(jstDate(),jstIso(decisionAt+60_000),raceId);
+const setPaperCutoff=(raceId:string,decisionAt:number)=>sqlite.prepare('UPDATE races SET race_date=?,post_time=?,betting_cutoff_at=?,betting_cutoff_source=? WHERE id=?').run(jstDate(),jstIso(decisionAt+240_000),jstIso(decisionAt+60_000),'boatrace-racelist-cutoff-v1',raceId);
 const canonicalJson=(value:any):string=>Array.isArray(value)?`[${value.map(canonicalJson).join(',')}]`:value&&typeof value==='object'?`{${Object.keys(value).sort().map(k=>`${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`:JSON.stringify(value)??'null';
 const sha256Json=(value:unknown)=>createHash('sha256').update(canonicalJson(value),'utf8').digest('hex');
 const sha256Text=(value:string)=>createHash('sha256').update(value,'utf8').digest('hex');
@@ -95,6 +95,10 @@ describe('EdgeLab API',()=>{
   const req=()=>app.request('/api/ingest/races',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body},env());
   expect((await req()).status).toBe(200); expect((await req()).status).toBe(200);
   expect(sqlite.prepare('SELECT COUNT(*) n FROM races WHERE id=?').get(race.id)).toMatchObject({n:1});
+  const unverified=await app.request('/api/ingest/races',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},
+    body:JSON.stringify([{...race,betting_cutoff_at:'2099-01-01T00:01:00+09:00',betting_cutoff_source:'b-file-header-time'}])},env());
+  expect(unverified.status).toBe(400);
+  expect(sqlite.prepare('SELECT betting_cutoff_at,betting_cutoff_source FROM races WHERE id=?').get(race.id)).toMatchObject({betting_cutoff_at:null,betting_cutoff_source:null});
  });
  it('persists collection run logs from their protected reserve when optional D1 budget is exhausted',async()=>{
   const day=new Date().toISOString().slice(0,10);
@@ -401,31 +405,75 @@ describe('EdgeLab API',()=>{
   expect(placed.every(x=>x.candidate_count===2)).toBe(true);
   expect(sqlite.prepare("SELECT SUM(stake) stake FROM bets WHERE mode='auto' AND race_id=?").get(race.id)).toMatchObject({stake:100});
  });
- it('freezes the primary paper decision at T-60 and leaves comparison phases unavailable',async()=>{
+ it('freezes the primary decision against the verified cutoff, not post_time, and labels its actual offset',async()=>{
   const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 1").get() as {id:string};
   const decisionAt=Date.now();setPaperCutoff(race.id,decisionAt);
   sqlite.prepare('UPDATE races SET race_date=? WHERE id=?').run(jstDate(),race.id);
   addBetInputs(race.id,'paper-t60');
   expect(await autoBet(DB,true,decisionAt)).toBe(1);
-  const stored=sqlite.prepare("SELECT phase,cutoff_at,target_at,decided_at,outcome,reason,bet_group_id,snapshot_json FROM paper_decisions WHERE race_id=?").get(race.id) as any;
-  expect(stored).toMatchObject({phase:'primary_t60',cutoff_at:jstIso(decisionAt+60_000),target_at:jstIso(decisionAt),decided_at:jstIso(decisionAt),outcome:'placed',reason:null});
+  const stored=sqlite.prepare("SELECT phase,cutoff_at,cutoff_source,target_at,input_as_of_at,decided_at,outcome,reason,bet_group_id,snapshot_json FROM paper_decisions WHERE race_id=?").get(race.id) as any;
+  expect(stored).toMatchObject({phase:'primary_t60',cutoff_at:jstIso(decisionAt+60_000),cutoff_source:'boatrace-racelist-cutoff-v1',target_at:jstIso(decisionAt),outcome:'placed',reason:null});
   const frozenSnapshot=JSON.parse(stored.snapshot_json);
   expect(frozenSnapshot.phase).toBe('primary_t60');
-  const automatic=sqlite.prepare("SELECT decision_phase,odds_captured_at FROM bets WHERE race_id=? AND mode='auto'").get(race.id) as any;
+  expect(Date.parse(stored.input_as_of_at)).toBe(Date.parse(frozenSnapshot.inputAsOfAt));
+  expect(Date.parse(stored.decided_at)).toBeGreaterThanOrEqual(Date.parse(frozenSnapshot.inputAsOfAt));
+  const actualSecondsBeforeCutoff=(Date.parse(stored.cutoff_at)-Date.parse(stored.decided_at))/1000;
+  expect(actualSecondsBeforeCutoff).toBeGreaterThanOrEqual(50);
+  expect(actualSecondsBeforeCutoff).toBeLessThanOrEqual(70);
+  expect((sqlite.prepare('SELECT post_time FROM races WHERE id=?').get(race.id) as any).post_time).not.toBe(stored.cutoff_at);
+  const automatic=sqlite.prepare("SELECT decision_phase,placed_at,odds_captured_at FROM bets WHERE race_id=? AND mode='auto'").get(race.id) as any;
   expect(automatic.decision_phase).toBe('primary_t60');
+  expect(automatic.placed_at).toBe(stored.decided_at);
   expect(frozenSnapshot.selections[0].oddsCapturedAt).toBe(automatic.odds_captured_at);
   sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('paper-late-odds',?,'win',?,30,?,'test','sample')")
     .run(race.id,String(frozenSnapshot.selections[0].selection),jstIso(decisionAt+5_000));
   expect(await autoBet(DB,true,decisionAt+5_000)).toBe(0);
-  expect(sqlite.prepare('SELECT snapshot_json,decided_at FROM paper_decisions WHERE race_id=?').get(race.id)).toMatchObject({snapshot_json:stored.snapshot_json,decided_at:jstIso(decisionAt)});
+  expect(sqlite.prepare('SELECT snapshot_json,decided_at,input_as_of_at FROM paper_decisions WHERE race_id=?').get(race.id)).toMatchObject({snapshot_json:stored.snapshot_json,decided_at:stored.decided_at,input_as_of_at:stored.input_as_of_at});
   const listed=await app.request('/api/bets?origin=sample',{},env());
   expect((await listed.json() as any[]).find(row=>row.raceId===race.id&&row.mode==='auto')?.decisionPhase).toBe('primary_t60');
   const read=await app.request(`/api/paper/decisions?date=${jstDate()}`,{},env());
   expect(read.status).toBe(200);const body=await read.json() as any;
   expect(body.timing.comparisons).toMatchObject({t30:{phase:'comparison_t30',status:'unavailable'},t10:{phase:'comparison_t10',status:'unavailable'}});
-  expect(body.decisions.find((row:any)=>row.raceId===race.id)).toMatchObject({phase:'primary_t60',outcome:'placed',snapshot:frozenSnapshot});
+  expect(body.timing.primary).toMatchObject({cutoffSource:'boatrace-racelist-cutoff-v1',acceptedSecondsBeforeCutoff:{min:50,max:70}});
+  expect(body.decisions.find((row:any)=>row.raceId===race.id)).toMatchObject({phase:'primary_t60',outcome:'placed',cutoffSource:'boatrace-racelist-cutoff-v1',inputAsOfAt:stored.input_as_of_at,snapshot:frozenSnapshot});
+  expect(body.decisions.find((row:any)=>row.raceId===race.id).actualSecondsBeforeCutoff).toBeGreaterThanOrEqual(50);
+  expect(body.decisions.find((row:any)=>row.raceId===race.id).actualSecondsBeforeCutoff).toBeLessThanOrEqual(70);
   const oldBet=sqlite.prepare("SELECT decision_phase FROM bets WHERE race_id<>? AND data_origin='sample' LIMIT 1").get(race.id) as any;
   expect(oldBet?.decision_phase??null).toBeNull();
+ });
+ it('keeps concurrent primary abstention and placement mutually exclusive',async()=>{
+  const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 1").get() as {id:string};
+  const inputAsOfAt=Date.now();setPaperCutoff(race.id,inputAsOfAt);addBetInputs(race.id,'paper-race-invariant');
+  await Promise.all([
+   autoBetWithReport(DB,true,inputAsOfAt),
+   recordPaperAbstention(DB,race.id,jstIso(inputAsOfAt+60_000),'boatrace-racelist-cutoff-v1',Date.now(),'concurrent_abstention_probe'),
+  ]);
+  const decision=sqlite.prepare("SELECT outcome,bet_group_id FROM paper_decisions WHERE race_id=? AND phase='primary_t60'").get(race.id) as any;
+  const bets=sqlite.prepare("SELECT bet_group_id,decision_phase FROM bets WHERE race_id=? AND mode='auto'").all(race.id) as any[];
+  expect(decision).toBeTruthy();
+  if(decision.outcome==='placed') {
+   expect(bets.length).toBeGreaterThan(0);
+   expect(bets.every(row=>row.decision_phase==='primary_t60'&&row.bet_group_id===decision.bet_group_id)).toBe(true);
+  } else {
+   expect(decision.outcome).toBe('abstained');
+   expect(bets).toHaveLength(0);
+  }
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM paper_decisions d JOIN bets b ON b.race_id=d.race_id AND b.mode='auto' WHERE d.race_id=? AND d.phase='primary_t60' AND d.outcome='abstained'").get(race.id)).toMatchObject({n:0});
+ });
+ it('rechecks commit time after input reads and abstains if the T-60 window elapsed',async()=>{
+  const inputAsOfAt=Date.now()-15_000;
+  const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 1").get() as {id:string};
+  setPaperCutoff(race.id,inputAsOfAt);const selection=addBetInputs(race.id,'paper-late-commit');
+  sqlite.prepare("DELETE FROM odds_snapshots WHERE race_id=? AND bet_type='win' AND selection=? AND id<>'paper-late-commit-odds'").run(race.id,selection);
+  sqlite.prepare("DELETE FROM predictions WHERE race_id=? AND model_id='boat-active' AND number=? AND id<>'paper-late-commit-prediction'").run(race.id,Number(selection));
+  sqlite.prepare("UPDATE odds_snapshots SET captured_at=? WHERE id='paper-late-commit-odds'").run(jstIso(inputAsOfAt-5_000));
+  sqlite.prepare("UPDATE predictions SET predicted_at=? WHERE id='paper-late-commit-prediction'").run(jstIso(inputAsOfAt-10_000));
+  const report=await autoBetWithReport(DB,true,inputAsOfAt);
+  expect(report.bought).toBe(0);
+  const abstention=sqlite.prepare("SELECT outcome,reason,input_as_of_at,decided_at FROM paper_decisions WHERE race_id=? AND phase='primary_t60'").get(race.id) as any;
+  expect(abstention).toMatchObject({outcome:'abstained',reason:'missed_timing',input_as_of_at:jstIso(inputAsOfAt)});
+  expect(Date.parse(abstention.decided_at)).toBeGreaterThan(Date.parse(abstention.input_as_of_at));
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE race_id=? AND mode='auto'").get(race.id)).toMatchObject({n:0});
  });
  it('records T-60 abstentions for stale odds, invalid probabilities, unavailable models, missing cutoffs, and missed timing',async()=>{
   const races=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' ORDER BY id LIMIT 6").all() as {id:string}[];
@@ -440,9 +488,9 @@ describe('EdgeLab API',()=>{
   sqlite.prepare('UPDATE predictions SET probability=NULL WHERE race_id=?').run(races[1].id);
   addBetInputs(races[2].id,'paper-no-model');
   sqlite.prepare('DELETE FROM predictions WHERE race_id=?').run(races[2].id);
-  sqlite.prepare('UPDATE races SET post_time=NULL WHERE id=?').run(races[3].id);
-  sqlite.prepare('UPDATE races SET post_time=? WHERE id=?').run(jstIso(decisionAt+30_000),races[4].id);
-  sqlite.prepare('UPDATE races SET post_time=? WHERE id=?').run(jstIso(decisionAt+10_000),races[5].id);
+  sqlite.prepare('UPDATE races SET betting_cutoff_at=NULL,betting_cutoff_source=NULL WHERE id=?').run(races[3].id);
+  sqlite.prepare('UPDATE races SET betting_cutoff_at=? WHERE id=?').run(jstIso(decisionAt+30_000),races[4].id);
+  sqlite.prepare('UPDATE races SET betting_cutoff_at=? WHERE id=?').run(jstIso(decisionAt+10_000),races[5].id);
   const beforePerformance=await (await app.request('/api/performance/overview?origin=sample',{},env())).json() as any;
   expect(await autoBet(DB,true,decisionAt)).toBe(0);
   const reasons=sqlite.prepare('SELECT race_id,reason,outcome FROM paper_decisions').all() as any[];

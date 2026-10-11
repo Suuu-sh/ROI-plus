@@ -204,6 +204,27 @@ describe('minute odds collection controls', () => {
     expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({ n: 0 });
   });
 
+  it('evaluates the T-60 paper decision before the :05 results early return', async () => {
+    const inputAsOf = Date.now();
+    const cutoff = inputAsOf + 60_000;
+    race('scheduled-t60', cutoff + 4 * 60_000, today);
+    sqlite.prepare("UPDATE races SET betting_cutoff_at=?,betting_cutoff_source='boatrace-racelist-cutoff-v1' WHERE id='scheduled-t60'")
+      .run(stamp(cutoff));
+    for (let number = 1; number <= 6; number++) {
+      sqlite.prepare(`INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin)
+        VALUES(?, 'scheduled-t60','win',?,20,?,'fixture','real')`)
+        .run(`scheduled-t60-odds-${number}`, String(number), stamp(inputAsOf - 30_000));
+    }
+    let minute = Math.floor(Date.now() / 60_000);
+    minute += (5 - minute % 60 + 60) % 60;
+    await worker.scheduled({ cron: '* * * * *', scheduledTime: minute * 60_000 } as ScheduledController,
+      { DB, ENABLE_AUTO_BET: 'true', ENABLE_BOATRACE_RESULTS_SCRAPE: 'true', ENABLE_BOATRACE_ODDS_SCRAPE: 'false' } as never);
+    expect(sqlite.prepare("SELECT outcome,cutoff_source FROM paper_decisions WHERE race_id='scheduled-t60' AND phase='primary_t60'").get())
+      .toMatchObject({ outcome: 'placed', cutoff_source: 'boatrace-racelist-cutoff-v1' });
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE race_id='scheduled-t60' AND mode='auto' AND decision_phase='primary_t60'").get())
+      .toMatchObject({ n: 1 });
+  });
+
   it('runs ten-minute maintenance after a fail-closed odds reservation error', async () => {
     const betId = finishedOpenBet('boundary');
     const actualNow = new Date();
