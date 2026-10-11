@@ -70,16 +70,19 @@ describe('minute odds collection controls', () => {
     expect((await selectOddsTargets(DB, now)).map(x => x.id)).toEqual(['eligible']);
   });
 
-  it('does not fetch, lock, budget, or log without an active safe model prediction',async()=>{
-    race('no-model');
+  it('fetches official cutoff evidence without an active win model or prediction',async()=>{
+    const collectorNow=new Date();
+    race('no-model',collectorNow.getTime()+5*60_000,jstDate(collectorNow));
     sqlite.prepare("UPDATE models SET status='candidate' WHERE id='safe-win'").run();
-    const before=(sqlite.prepare('SELECT total_changes() changes').get() as {changes:number}).changes;
-    const fetch=vi.fn();
-    expect(await collectOdds(DB,now,{fetch})).toMatchObject({status:'skipped',targets:0});
-    expect(fetch).not.toHaveBeenCalled();
-    expect((sqlite.prepare('SELECT total_changes() changes').get() as {changes:number}).changes).toBe(before);
-    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='odds_lock'").get()).toMatchObject({n:0});
-    expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:0});
+    sqlite.prepare("DELETE FROM predictions WHERE race_id='no-model'").run();
+    const labels=['12:04','12:34','13:04','13:34','14:04','14:34','15:04','15:34','16:04','16:34','17:04','17:34'];
+    const schedule=`<table><tbody><tr><th>レース</th>${labels.map((_,i)=>`<td>${i+1}R</td>`).join('')}</tr><tr><th>締切予定時刻</th>${labels.map(time=>`<td>${time}</td>`).join('')}</tr></tbody></table>`;
+    const fetch=vi.fn(async(url:string)=>({ok:true,status:200,text:async()=>collectionPage(url).replace('<p>締切時オッズ',`${schedule}<p>締切時オッズ`)}));
+    const result=await collectOdds(DB,collectorNow,{fetch,sleep:async()=>{}});
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({targets:1,cutoffUpdates:1,cutoffWriteUnavailable:false});
+    expect(sqlite.prepare("SELECT betting_cutoff_source FROM races WHERE id='no-model'").get())
+      .toMatchObject({betting_cutoff_source:'boatrace-racelist-cutoff-v1'});
   });
 
   it('stores a labelled cutoff and observation time from the odds page already fetched', async () => {

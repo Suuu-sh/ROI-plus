@@ -20,7 +20,9 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from edgelab.features.boat import BASE_FEATURE_COLUMNS
+from edgelab.features.boat import (BASE_FEATURE_COLUMNS, PRERACE_V2_FEATURE_COLUMNS,
+                                   PRERACE_V2_SCHEMA, build_boat_prerace_v2_features,
+                                   completed_racer_history)
 from edgelab.models.compare import temporal_split
 from edgelab.normalization.availability import available_by
 
@@ -156,6 +158,9 @@ def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[st
         except (TypeError, ValueError):
             metrics = {}
     meta = artifact.get("metadata") or {}
+    feature_schema = metrics.get("boatFeatureSchemaVersion") or meta.get("boatFeatureSchemaVersion") or "boat-base-v1"
+    allowed_columns = (BASE_FEATURE_COLUMNS if feature_schema == "boat-base-v1"
+                       else PRERACE_V2_FEATURE_COLUMNS if feature_schema == PRERACE_V2_SCHEMA else ())
     if (model_row.get("status") != "active"
             or metrics.get("ticketModelSchemaVersion") != TICKET_SCHEMA
             or metrics.get("ticketPredictionSemantics") != PREDICTION_SEMANTICS
@@ -166,7 +171,9 @@ def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[st
             or meta.get("ticketModelSchemaVersion") != TICKET_SCHEMA
             or meta.get("ticketPredictionSemantics") != PREDICTION_SEMANTICS
             or meta.get("ticketBetType") != "trifecta"
-            or any(column not in BASE_FEATURE_COLUMNS for column in artifact.get("columns", []))
+            or meta.get("boatFeatureSchemaVersion", "boat-base-v1") != feature_schema
+            or not artifact.get("columns")
+            or any(column not in allowed_columns for column in artifact.get("columns", []))
             or not artifact.get("model")):
         raise ValueError("active trifecta model lacks validated matching schema/semantics/artifact evidence")
     cutoff_dt = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
@@ -185,12 +192,19 @@ def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[st
                 and available_by(entry, cutoff)):
             by_race[rid].append(dict(entry))
     records = []
+    history = completed_racer_history(store) if feature_schema == PRERACE_V2_SCHEMA else []
     for race_id, entries in by_race.items():
         if len(entries) != 6 or len({str(e.get("number")) for e in entries}) != 6:
             continue
         date = races[race_id].get("race_date")
-        features = build_boat_features(entries, race_date=date, predicted_at=cutoff)
-        group = [{**{key: value for key, value in entry.items() if key not in BASE_FEATURE_COLUMNS}, **feature}
+        if feature_schema == PRERACE_V2_SCHEMA:
+            features = build_boat_prerace_v2_features(entries, race=races[race_id], predicted_at=cutoff,
+                history=history, observations=store.get("prerace_observations", []))
+            feature_columns = PRERACE_V2_FEATURE_COLUMNS
+        else:
+            features = build_boat_features(entries, race_date=date, predicted_at=cutoff)
+            feature_columns = BASE_FEATURE_COLUMNS
+        group = [{**{key: value for key, value in entry.items() if key not in feature_columns}, **feature}
                  for entry, feature in zip(entries, features)]
         probabilities, deviations = ensemble_ordered_triples(artifact, group)
         for selection, probability in probabilities.items():
@@ -434,7 +448,8 @@ def _replay(store: Mapping[str, Any], test_groups: Sequence[Sequence[Mapping[str
 
 def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], *,
                    model_id: str, artifact_dir: str | Path = "ml/artifacts",
-                   min_train_races: int = 300) -> dict[str, Any]:
+                   min_train_races: int = 300,
+                   feature_schema_version: str = "boat-base-v1") -> dict[str, Any]:
     """Train and chronologically evaluate an immutable candidate artifact."""
     safe_rows = [dict(r) for r in rows if r.get("data_origin") == "real"
                  and r.get("race_id") and r.get("race_date")
@@ -454,7 +469,10 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
     if len(train_groups) < min_train_races or not valid_groups or not test_groups:
         return {"id": model_id, "status": "untrained", "reason": "insufficient_temporal_data",
                 "nTrainRaces": len(train_groups), "nValidRaces": len(valid_groups), "nTestRaces": len(test_groups)}
-    columns = list(BASE_FEATURE_COLUMNS)
+    if feature_schema_version not in {"boat-base-v1", PRERACE_V2_SCHEMA}:
+        raise ValueError("unsupported boat feature schema version")
+    columns = list(PRERACE_V2_FEATURE_COLUMNS if feature_schema_version == PRERACE_V2_SCHEMA
+                   else BASE_FEATURE_COLUMNS)
     model = _fit(train, columns)
     valid_flat = [r for g in valid_groups for r in g]
     temperature = _temperature(valid_flat, model)
@@ -493,7 +511,8 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
             "algorithm": "five-fit race-bootstrap pairwise logistic ranking + Plackett-Luce exact-order distribution",
             "ticketModelSchemaVersion": TICKET_SCHEMA,
             "ticketPredictionSemantics": PREDICTION_SEMANTICS,
-            "ticketBetType": "trifecta", "featureColumns": columns,
+            "ticketBetType": "trifecta", "boatFeatureSchemaVersion": feature_schema_version,
+            "featureColumns": columns,
             "trainFrom": dates(train_groups)[0], "trainTo": dates(train_groups)[-1],
             "validFrom": dates(valid_groups)[0], "validTo": dates(valid_groups)[-1],
             "testFrom": dates(test_groups)[0], "testTo": dates(test_groups)[-1],
@@ -518,11 +537,14 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
                         "promotionReason": "candidate-only: B-file point-in-time availability and positive expected value are not proven",
                         "ticketModelSchemaVersion": TICKET_SCHEMA,
                         "ticketPredictionSemantics": PREDICTION_SEMANTICS,
-                        "ticketBetType": "trifecta"},
+                        "ticketBetType": "trifecta",
+                        "boatFeatureSchemaVersion": feature_schema_version},
             "trainedAt": datetime.now(timezone.utc).isoformat(),
             "nBootstrapModels": len(bootstrap_models),
             "notes": "Candidate-only temporal evaluation; prob_std is between-fit SD (null unless five fits); no automatic promotion or prediction sync.",
-            "availableAtAssumption": "Historical B-file available_at is synthesized at local race-day midnight; actual publication timing is not verified."}
+            "availableAtAssumption": ("Source observations and official cutoff timestamps are required; missing cutoff or source timing excludes the race."
+                if feature_schema_version == PRERACE_V2_SCHEMA else
+                "Historical B-file available_at is synthesized at local race-day midnight; actual publication timing is not verified.")}
     artifact = {"metadata": meta, "model": model, "bootstrap_models": bootstrap_models,
                 "columns": columns, "temperature": temperature}
     with pkl_path.open("wb") as stream:

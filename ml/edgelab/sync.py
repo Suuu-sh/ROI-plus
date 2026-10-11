@@ -21,12 +21,13 @@ ENDPOINTS = {
     "payouts": "payouts",
     "predictions": "predictions",
     "ticket_predictions": "ticket-predictions",
+    "prerace_observations": "prerace-observations",
     "models": "models",
     "collection_runs": "collection-runs",
 }
 # Keep required current-day facts ahead of optional payloads. Parent rows are
 # first, and model lifecycle state must arrive before predictions.
-SEND_ORDER = ("venues", "races", "models", "results", "payouts", "entries",
+SEND_ORDER = ("venues", "races", "prerace_observations", "models", "results", "payouts", "entries",
               "predictions", "ticket_predictions", "odds_snapshots", "collection_runs")
 
 
@@ -148,7 +149,7 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
         # These endpoints perform several sequential D1 lookups per row. Keep
         # their chunks small to bound lookup, batch, and D1 write amplification.
         row_checked_tables = {"races", "results", "payouts", "entries", "odds_snapshots",
-                              "predictions", "ticket_predictions"}
+                              "predictions", "ticket_predictions", "prerace_observations"}
         chunk_size = 10 if table in {"races", "payouts", "entries"} else 50 if table in row_checked_tables else 500
         for start in range(0, len(values), chunk_size):
             payload = json.dumps(values[start:start + chunk_size], ensure_ascii=False).encode("utf-8")

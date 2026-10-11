@@ -4,7 +4,10 @@ import { USER_AGENT } from './boatraceOdds.js';
 import { reserveWriteBudgets, utcDate } from './writeBudget.js';
 
 export const RESULTS_SOURCE = 'boatrace-results-worker-v1';
-const MAX_TARGETS = 4;
+// One hourly pass may progress eight races. Manual runs stay at four so the
+// existing five-minute operator lease still bounds their worst-case fetch time.
+const MAX_TARGETS = 8;
+const MAX_MANUAL_TARGETS = 4;
 const BODY_LIMIT = 512 * 1024;
 const RESULT_FETCH_TIMEOUT_MS = 30_000;
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -110,7 +113,8 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
     if(!Number.isFinite(until))return {...skipped,reason:'manual lock state unavailable'};
     if(until>now.getTime())return {...skipped,reason:'manual run in progress or throttled'};
   } else if(!manual&&prior&&prior.value>=hour)return skipped;
-  const capacity=Math.min(MAX_TARGETS,Math.max(0,Math.floor(opts.maxRequests ?? MAX_TARGETS)),Math.max(0,budget.max-budget.used));
+  const targetLimit=manual?MAX_MANUAL_TARGETS:MAX_TARGETS;
+  const capacity=Math.min(targetLimit,Math.max(0,Math.floor(opts.maxRequests ?? targetLimit)),Math.max(0,budget.max-budget.used));
   if (!capacity) return skipped;
   const targets = await selectResultsTargets(db,now,capacity);
   if (!targets.length) return skipped;
@@ -120,8 +124,8 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
     {units:16+targets.length*55,category:'essential'},
     {units:targets.length*5,category:'collection'},
   ])) return {...skipped,reason:'daily D1 write budget unavailable or exhausted'};
-  // The manual lease bypasses only the hourly marker. A 5-minute lease
-  // covers the bounded 261s fetch path; after completion retain a 60s throttle.
+  // The manual lease bypasses only the hourly marker. Its four-target cap
+  // keeps the existing 5-minute lease above its worst-case fetch path.
   const lease=manual?new Date(now.getTime()+5*60_000).toISOString():hour;
   const lock=manual
     ?await db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value

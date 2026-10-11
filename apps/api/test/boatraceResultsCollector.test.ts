@@ -101,13 +101,16 @@ describe('purchased real boat hourly results',()=>{
     expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:0});expect(sqlite.prepare('SELECT COUNT(*) n FROM payouts').get()).toMatchObject({n:0});
     const log=sqlite.prepare('SELECT status,reason FROM collection_runs').get() as {status:string;reason:string};expect(log.status).toBe('failed');expect(JSON.parse(log.reason).reason).toBe('source-state-changed');
   });
-  it('bounds the four-target pass to fewer than 50 D1 statements including reservations and atomic batches',async()=>{
-    for(let raceNo=1;raceNo<=5;raceNo++)seed(raceNo);
+  it('advances an eight-race bounded hourly batch and resumes the ninth without starving it',async()=>{
+    for(let raceNo=1;raceNo<=9;raceNo++)seed(raceNo);
     let queries=0;const prepare=DB.prepare.bind(DB);
     DB.prepare=(sql:string)=>{queries++;return prepare(sql);};
     const result=await collectResults(DB,now,{fetch:fetchPage,sleep:async()=>{}});
-    expect(result).toMatchObject({targets:4,records:32,verified:4,attempted:4});
-    expect(queries).toBe(33);expect(queries).toBeLessThan(50);
+    expect(result).toMatchObject({targets:8,records:64,verified:8,attempted:8});
+    expect(queries).toBeLessThan(80);
+    const next=await collectResults(DB,new Date(now.getTime()+3600000),{maxRequests:1,fetch:fetchPage,sleep:async()=>{}});
+    expect(next).toMatchObject({targets:1,records:8,verified:1,attempted:1});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(id(9))).toMatchObject({n:6});
   });
   it.each([
     {code:'http-status',httpStatus:403,response:()=>new Response('private upstream body',{status:403})},

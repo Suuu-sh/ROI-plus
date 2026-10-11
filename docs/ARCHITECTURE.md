@@ -8,7 +8,7 @@
 |---|---|---|
 | 対象 | 競馬（JRA）とボートレース | 日次 Actions、公式データ収集、Worker Cron はボート中心。競馬はユーザー提供 CSV の取込・特徴量コードがあるが、JRA 自動収集はない。 |
 | 予測 | 出典のあるデータを用いた AI 予測 | Python / LightGBM が学習・推論を行い、Worker はモデルを実行しない。アプリコードに LLM / GPT API 呼び出しは見当たらない。毎週の自動学習対象は boat。 |
-| 購入 | 仮想運用のみ | `POST /api/bets` と Cron の自動購入は D1 の仮想 bet 記録のみ。投票・決済連携はない。現在の API の bet 操作は単勝 (`win`)。 |
+| 購入 | 仮想運用のみ | `POST /api/bets` と Cron の自動購入は D1 の仮想 bet 記録のみ。投票・決済連携はない。Primary T-60 自動運用は実データの三連単 (`trifecta`) だけを評価する。 |
 | オッズ | 取得許諾・頻度の制約を守る | Worker に公式単勝オッズ収集器がある。毎分トリガーは締切まで15分以内・JST当日の実データを対象にし、直近50秒の取得を除外、最大30レース・各対象1回リトライ・取得間隔3秒以上・1回最大49 fetch 試行。空対象ならDBへ書き込まない。`settings.roi_d1_write_budget_utc` の推定共有予約上限は20,000 unit/UTC日、オッズ専用内数は10,000 unit/日である。日次同期・精算・他 Worker の書込は別であり、これはアカウント全体のD1残量を読み取るものではなく、実際の行書込数とも一致せず、対象カバレッジは保証しない。10分トリガーは精算・自動仮想購入・古いオッズ削除のみを行う。SPEC の単一Cron記述・25分以内・10分鮮度とは差分があり、SPEC は変更していない。`apps/api/wrangler.toml` のフラグ値は設定情報であり、デプロイ済み状態や許諾を意味しない。 |
 | モデル管理 | 評価後に人が昇格・ロールバック | 学習結果は `candidate` として同期される。Worker API に手動昇格・ロールバック操作があり、学習 Action は昇格しない。 |
 
@@ -46,7 +46,7 @@ GitHub Actions / ローカル Python (ml/)
 
 閲覧系の `/api/races`・`/api/races/:id`・`/api/rankings`・`/api/models`・`/api/collection/status` は、`PROXY_TOKEN` が設定された環境で認証を通過した GET のみ Cloudflare Cache API に最大10秒保存する。URL全体（クエリを含む）でキーを分離し、200 JSON以外は保存しない。キャッシュ障害時はD1読み取りへフォールバックする。`/api/bets`・`/api/performance/*`・`/api/health`・ingest/admin と全書込系は対象外で、仮想購入の判断・記録は常にD1の最新状態を使う。Cloudflare Cache API は拠点ごとのキャッシュであり、全地域でのヒットやD1読み取り削減量は保証しない。
 
-`GET /api/races`, `/api/races/:id`, `/api/rankings`, `/api/bets`, `/api/performance/*`, `/api/models`, `/api/collection/status` が読み取り面。`GET /api/ingest/models` は `INGEST_TOKEN` 認証付きのモデルレジストリ読み取りで、Pythonが人手昇格後の状態を確認する。`POST /api/bets` は仮想単勝で、複数選択は `{raceId, betType:'win', requestId?, selections:[{selection, stake}, ...]}`（1回1〜6件）を受け付け、ticket group 全体を1ステートメントで残高ガード付き記録する。`requestId` を指定すると同じ payload の再送は冪等、同じ ID の別 payload は409。旧 `{selection, stake}` 形式も互換用に受け付ける。`GET /api/performance/rank-comparison` は購入時に保存した rank 1 を使い、全券確定・rank 1 を含む複数選択 group を同じレース集合・同じ総賭け金で比較する。順位の根拠は `candidate_rank/count`, `predicted_at_at_bet`, `odds_captured_at`, `bet_group_id` に保存し、後から再推定しない。旧 bet は順位不明として同比較から除外する。`POST /api/models/:id/promote|rollback` はモデル管理、`POST /api/ingest/{venues,races,entries,results,payouts,odds,predictions,models,collection-runs}` は Python 等からの冪等同期。`POST /api/admin/settle` は認証付き精算操作。多くの読み取り API は `origin=sample|real|all` で出所を絞れる。実際の入出力契約は `apps/api/src/index.ts` と `packages/shared/src/types.ts` が根拠。
+`GET /api/races`, `/api/races/:id`, `/api/rankings`, `/api/bets`, `/api/performance/*`, `/api/models`, `/api/collection/status` が読み取り面。`GET /api/ingest/models` は `INGEST_TOKEN` 認証付きのモデルレジストリ読み取りで、Pythonが人手昇格後の状態を確認する。`POST /api/bets` は仮想 bet を受け付け、単勝の複数選択は `{raceId, betType:'win', requestId?, selections:[{selection, stake}, ...]}`（1回1〜6件）、三連単は検証済みの保存済み ticket 候補を受け付ける。ticket group 全体を残高ガード付きで記録する。`requestId` を指定すると同じ payload の再送は冪等、同じ ID の別 payload は409。旧 `{selection, stake}` 形式も互換用に受け付ける。`GET /api/performance/rank-comparison` は購入時に保存した rank 1 を使い、全券確定・rank 1 を含む複数選択 group を同じレース集合・同じ総賭け金で比較する。順位の根拠は `candidate_rank/count`, `predicted_at_at_bet`, `odds_captured_at`, `bet_group_id` に保存し、後から再推定しない。旧 bet は順位不明として同比較から除外する。`POST /api/models/:id/promote|rollback` はモデル管理、`POST /api/ingest/{venues,races,entries,results,payouts,odds,predictions,ticket-predictions,prerace-observations,models,collection-runs}` は Python 等からの冪等同期。`POST /api/admin/settle` は認証付き精算操作。多くの読み取り API は `origin=sample|real|all` で出所を絞れる。実際の入出力契約は `apps/api/src/index.ts` と `packages/shared/src/types.ts` が根拠。
 
 ### 仮想購入履歴の結果待ち
 
@@ -54,7 +54,7 @@ GitHub Actions / ローカル Python (ml/)
 
 ## AI・データフロー
 
-1. `ml/edgelab/collectors/` が公式ボートレース B/K ファイルを取得し、`parsers/` が正規化する。日次処理はローカル JSON store を再利用し、再実行できる自然キーでデータをまとめる。
+1. `ml/edgelab/collectors/` が公式ボートレース B/K ファイルと、日次 Action 内の上限付き beforeinfo 取得を行い、`parsers/` が正規化する。日次処理はローカル JSON store を再利用し、再実行できる自然キーでデータをまとめる。
 2. `features/` は許可した数値特徴量だけを作る。`available_at <= predicted_at` と同日・未来情報の除外を検査する。結果／払戻などを特徴量に混入させないため、特徴量列は allowlist で制限される。
 3. `ml/edgelab/models/train.py` は時系列で train / validation / test を分割して LightGBM を学習し、検証データで温度校正する。レース単位 bootstrap の出力ばらつきが `prob_std`。十分なデータがない場合は暗黙に代替モデルを使わず `untrained` とする。成果物は `ml/artifacts/`。
 4. `ml/edgelab/predict.py` は確率と不確実性を出し、`ml/edgelab/sync.py` が 500 行以下のチャンクで ingest API へ送る。Worker は予測を再計算せず、`packages/shared/src/ev.ts` の規則に沿う評価・候補表示と仮想運用を行う。
@@ -63,15 +63,15 @@ GitHub Actions / ローカル Python (ml/)
 
 初回ベースラインの検証は `python -m edgelab validate-baseline` が既存candidateの保存済みartifactと実データを再学習・再収集なしで評価する別経路。適格条件は時間分離・完全コホート・lane基準とのpaired race/date-cluster区間などで、認証済みモデルregistry snapshotとartifact identityにも結び付ける。適格でも通常の改善昇格とは別の明示的な人手承認が必要で、承認後も初期の仮想運用モデルに過ぎず、クリーンな稼働モデルとの改善、point-in-time情報到着、または正の期待値・利益の証拠ではない。
 
-ボートの新規学習・推論入力は、生成したBファイル由来の事前特徴量に限定し、元の出走行から後日取得の展示・ST・気象を再混入させない。B情報の過去時点での公開時刻は記録されておらず、事前入手可能性は仮定である。旧v1は互換性検査で除外し、推論時には `boatFeatureSchemaVersion` と登録されたpickle SHA256をartifact実体と照合する。Workerの候補表示・自動/手動仮想購入・校正集計も安全なschema markerとSHA256のあるboatモデルの保存済み予測だけを使うため、旧v1予測はこれらに混入しない。既存の購入履歴は別途残り、実績の証明にはならない。`ml/edgelab/learning.py` の採点は、実データ・全艇の予測と結果・締切前時刻がそろうコホートを対象とする。オッズを用いた仮想リプレイと実際の仮想購入履歴の成績は区別する。詳細と不足条件は [LEARNING](LEARNING.md)、既存モデルの監査結果は [EV_AUDIT](EV_AUDIT.md) を参照。
+ボートの旧 `boat-base-v1` 学習・推論入力はBファイル由来の事前特徴量に限定する。新しい候補向け `boat-prerace-v2` は別の feature column allowlist を使い、公式 beforeinfo ページから実際に取得した exhibition / start-exhibition / weather 行と、racer IDで結んだ過去の完了レースだけを使う。各観測はURL・SHA256・取得時刻・利用可能時刻・表示時刻または元の表示ラベルと一緒に別テーブルへ保存する。曖昧な「11R時点」等のweatherラベルは保持するが特徴量には使わない。過去の racer form は完全な6艇結果と、racer ID・結果双方の明示的な available-at 時刻がそろう場合だけ使う。Bファイルの `available_at` はレース日 JST 0時の近似値で、実際の公開時刻は未検証という制約が残る。旧artifactはmarkerがない場合も `boat-base-v1` として扱い、V2列とは照合されない。Workerは保存済み予測を使い、予測deadline内にLLMや学習を実行しない。`ml/edgelab/learning.py` の採点は、実データ・全艇の予測と結果・締切前時刻がそろうコホートを対象とする。オッズを用いた仮想リプレイと実際の仮想購入履歴の成績は区別する。詳細と不足条件は [LEARNING](LEARNING.md)、既存モデルの監査結果は [EV_AUDIT](EV_AUDIT.md) を参照。
 
 Worker の単一 `* * * * *` Cron は、各分で限定された自動**仮想**購入の時刻判断を行い、10分境界では別に精算・古いオッズ削除を行う。判断は毎分のオッズ収集より先に実行し、時刻 :05 の結果収集による早期returnよりも先に実行する。10分境界の判定は実行遅延の影響を避けるためイベントの予定時刻に基づく。オッズ収集は毎回、対象を読み出した後、重複防止ロックの取得より先にUTC日次の推定予約枠を確保する。上限を超える場合は取得せず、予約は日次同期・精算・他 Worker の書込を含まない。通常終了ではロックを解放し、異常終了時の残留ロックは5分で期限切れになる。収集失敗時も10分境界の精算等は継続する。10分処理では1時間より古い単勝・三連単オッズWorkerの品質のみ（保存レコード0件）の収集ログを任意D1予算内で最大10件削除する。品質除外と通信等のエラーが混在するログ、記録を保存したログ、他ソースのログは保持する。予算上限時は取得頻度・15分前のカバーを保証しない。SPEC の10分ごとに全処理を行う記述とは差分があり、SPEC は変更していない。許諾・デプロイ済み設定はコードだけでは確認できない。
 
 BOAT RACE公式出走表の時刻欄は「締切予定時刻」と表示される（例: [公式出走表](https://www.boatrace.jp/owpc/pc/race/racelist?hd=20261011&jcd=09&rno=1)）。既存Bファイルパーサーは `races.post_time` にヘッダー先頭のHH:MMを保存するが、その値は締切証跡ではない。既存の単勝オッズ取得で既に取得した公式 odds ページを再利用し、ページ内に明示された「締切予定時刻」と一致する当該レースのページ識別情報を読めた場合だけ、`betting_cutoff_at`、`betting_cutoff_source='boatrace-racelist-cutoff-v1'`、`betting_cutoff_observed_at` を保存する。観測時刻は取得時刻で、5分ごとに更新し、判断時には10分以内の証跡を必須にする。追加fetchは行わず、ラベル・識別情報・時刻が欠落または曖昧なページは締切を更新しないため、購入は `missing_or_invalid_cutoff` で止まる。既に主判断または自動購入があるレースの締切値は書き換えない。`post_time` は締切欠落の明示的棄権を記録する短い探索窓にだけ使い、締切値として代入しない。
 
-主判断の目標は、その明示された公式締切のT-60秒。Workerの実処理時刻が目標の前後10秒以内（実締切まで50〜70秒）の場合に限り、決定直前に時刻を再確認して記録する。この許容幅にはT-60より最大10秒遅い観測も含むため、目標時刻・入力as-of時刻（`input_as_of_at`）・D1に記録された実際の判断時刻（`decided_at`）・実締切までの秒数を別々に保存し、T-60ちょうどの観測とは表示しない。入力は判断開始時点までに保存された予測・オッズに限定する。時間超過、締切証跡不足、active予測／確率／オッズ不備、期待値条件未達はレースごとの購入なしを記録し、後着オッズで履歴判断を作り直さない。D1書込予算を予約できなかった場合は今回の実行レポートに未記録件数を載せるだけで、永続的なabstentionとは扱わない。購入とprimary決定またはabstentionは同一競合ガード下で行い、両方が同じレースに記録されないようにする。新しい購入ベットは `decision_phase='primary_t60'` とし、旧ベットは `decision_phase=NULL` のままで遡及分類しない。
+主判断の目標は、その明示された公式締切のT-60秒。Workerの実処理時刻が目標の前後10秒以内（実締切まで50〜70秒）の場合に限り、決定直前に時刻を再確認して記録する。この許容幅にはT-60より最大10秒遅い観測も含むため、目標時刻・入力as-of時刻（`input_as_of_at`）・D1に記録された実際の判断時刻（`decided_at`）・実締切までの秒数を別々に保存し、T-60ちょうどの観測とは表示しない。入力は判断開始時点までに保存された予測・オッズに限定する。Primary自動判断は三連単のactive検証済みticket予測だけを選び、win予測から確率を推定・変換しない。Workerの毎分Cronはこの時刻窓を評価するため、目標±10秒に処理が来ないレースは購入せず棄権として記録する。時間超過、締切証跡不足、active予測／確率／オッズ不備、期待値条件未達はレースごとの購入なしを記録し、後着オッズで履歴判断を作り直さない。D1書込予算を予約できなかった場合は今回の実行レポートに未記録件数を載せるだけで、永続的なabstentionとは扱わない。購入とprimary決定またはabstentionは同一競合ガード下で行い、両方が同じレースに記録されないようにする。新しい購入ベットは `decision_phase='primary_t60'` とし、旧ベットは `decision_phase=NULL` のままで遡及分類しない。
 
-T-30 / T-10 の比較観測は秒単位のスケジューラーがないため未収集・評価不可で、擬似時刻や後着オッズを作らない。`GET /api/paper/decisions?date=YYYY-MM-DD` は日付単位の判断履歴、利用した締切ソース、実際のタイミング、および比較観測の利用不可状態を返す。既存 `/board` と `/performance/*` の購入済みベット集計は従来の運用総計であり、T-60のみの成績とは表示しない。migration `0008_paper_decision_timing.sql` と `0009_verified_betting_cutoff.sql` は追加列・追加テーブルのみで、既存データの書き換えをしない。
+T-30 / T-10 の比較観測は秒単位のスケジューラーがないため未収集・評価不可で、擬似時刻や後着オッズを作らない。分単位のB/K日次処理や3秒間隔の結果取得は、その比較観測時刻を提供しない。`GET /api/paper/decisions?date=YYYY-MM-DD` は日付単位の判断履歴、利用した締切ソース、実際のタイミング、および比較観測の利用不可状態を返す。既存 `/board` と `/performance/*` の購入済みベット集計は従来の運用総計であり、T-60のみの成績とは表示しない。移行 `0008_paper_decision_timing.sql`、`0009_verified_betting_cutoff.sql`、`0010_boatrace_prerace_observations.sql` は追加列・追加テーブルのみで、既存データの書き換えをしない。
 
 ### 仮想バンクロールと bet の制御
 
@@ -158,20 +158,20 @@ npm -w apps/web run deploy
 
 - 三連単は着順を学習した独立のランキングモデルから整合した確率分布を作る。単勝確率の積を使わない。時間分離holdout、trainだけで作る艇番順序基準、実際の取得時点のオッズで検証する。
 - 候補は自動昇格しない。券種・artifact・独立検証証跡が一致したactiveモデルのみ仮想購入可能。未取得、未検証、確率集合不完全、標準偏差欠損、公式オッズの出所／組番／時刻不整合なら候補にしない。
-- 単勝と三連単の候補を保守的期待収益率で比較する。自動購入は既存のレース予算と単勝の複数選択を保持し、三連単の保守的ROIが単勝を上回る場合に同じレース予算内で三連単1件を選ぶ。
+- Primary T-60 の自動判断は三連単の保守的ROIだけを見て、単勝予測との比較をしない。最大候補数とレース予算は既存設定で制御し、全購入を同じレース予算内に収める。
 - 結果と券種の払戻が整合しない場合はopenを保持する。同着・欠場・返還を含む三連単は現時点で対象外。取得時オッズと払戻換算オッズは区別する。
 - 公式ページの実データ照合は [TICKET_DATA_AUDIT](TICKET_DATA_AUDIT.md) の1レースのみ。全履歴の公式一致、取得許諾、本番反映、利益は未証明。
 - 本変更のリモートD1 migration、本番Workerデプロイ、新モデル昇格は未実施。既存単勝運用とは区別する。
 - D1 変更は `0004_ticket_predictions_and_odds_evidence.sql`（購入時オッズ時刻は既存の `0007_ranked_multi_bets.sql` を利用） の追加 migration。三連単オッズ収集は `ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE` が明示的に有効なときだけ Cron で動き、未設定／false が既定。単勝と共有する Worker fetch 試行上限49・最低3秒間隔を守る。取得は6艇120組が完全な非確定市場だけ保存し、source URL・取得時刻・本文 SHA-256・品質状態を記録する。これらは出所記録であり、署名や利用許諾の証明ではない。
-- 自動購入は同じレース予算内で単勝の複数選択と三連単の保守的ROIを比較し、券種追加で露出を増やさない。モデル学習時刻は予測時刻より厳密に前であることを要求する。
+- Primary T-60 自動購入は三連単だけで、単勝予測に依存しない。モデル学習時刻は予測時刻より厳密に前であることを要求する。
 
 ## 購入済みボートの毎時結果取得（2026-10-11）
 
 `ENABLE_BOATRACE_RESULTS_SCRAPE` が明示的に `true` の場合だけ、既存毎分 Cron の **毎時05分**を結果ページ取得に割り当てる。実装の未設定／false は無効。本プロジェクトの設定には、ユーザーによる結果ページ取得・本番反映の明示承認後に true を追加した。設定ファイルだけではデプロイ完了・実取得を証明しない。許諾はユーザー申告に基づき、独立した証明ではない。
 
 - 対象は非隔離の実データ・ボートで、締切から5分以上経過し、openの仮想購入（単勝／三連単）があるレースのみ。競馬・サンプル・未購入レース・予測・モデル・学習・履歴全体を取得／再実行しない。正常な全着順と必要な払戻が保存済みなら再取得しない。
-- 公式 `https://www.boatrace.jp/owpc/pc/race/raceresult` を最大4レース／回、通信失敗時のみ1回再試行、最大8 fetch試行、取得間隔3秒以上、1試行30秒、本文512 KiB以内で扱う。最終試行の古い順に選ぶ。対象超過・未公開・予算不足・Cron遅延により、全購入の1時間以内反映は保証しない。
-- 05分の結果専用回ではオッズ取得を実行しない。他59分のオッズと10分境界の精算・自動仮想購入・cleanupは維持する。同じCronの49 fetch budgetを渡し、追加49枠は設けない。JSON bulk insertを使い、正常4対象で予約・ロックを含め33 D1 statement、全対象のbatch失敗後に失敗ログを書く最悪経路でも37以内。これは結果専用回の設計・合成確認であり、他Cronやアカウント全体のquota保証ではない。
+- 公式 `https://www.boatrace.jp/owpc/pc/race/raceresult` を最大8レース／時間回、通信失敗時のみ1回再試行、最大16 fetch試行、取得間隔3秒以上、1試行30秒、本文512 KiB以内で扱う。最終試行の古い順に選び、手動運用のみ既存5分 lease に合わせて4レースに制限する。対象超過・未公開・予算不足・Cron遅延により、全購入の1時間以内反映は保証しない。
+- 05分の結果専用回ではオッズ取得を実行しない。他59分のオッズと10分境界の精算・自動仮想購入・cleanupは維持する。同じCronの49 fetch budgetを渡し、追加49枠は設けない。JSON bulk insertを使い、対象を前回試行の古い順に選ぶ。8レース回の合成確認は80未満のD1 statementを使う。これは結果専用回の設計・合成確認であり、他Cronやアカウント全体のquota保証ではない。
 - `roi_d1_write_budget_utc` に essential `16 + 55 × 対象数` unit と collection `5 × 対象数` unitを、fetch／時間ロックより先に予約する。欠落・破損・枯渇・CAS失敗なら取得しない。未消費分も返金しない。collection専用500 unit／日も共有するため途中停止し得る。自動予算拡張はしない。
 - URLと本文の場コード画像・active開催日・唯一の選択レース・active結果タブを照合する。保存済み6艇の登録番号を必須とし、艇番ごとに一致する全6着順（1〜6の重複なし）と勝者の正の単勝払戻を要求する。三連単は1〜3着の組番一致も要求する。部分結果、欠場・非完走・同着・返還・中止等は拒否しopenを維持する。返還の見出しだけでなく実値を判定する。
 - 着順／払戻／finished状態／成功証跡をD1 batchで原子的に保存する。各statement内でもrace identity・open実購入・隔離除外・6艇の登録番号・既存結果との一致を再確認し、fetch待ち中の状態変更を拒否する。既存結果・確定購入の修正、entry特徴量の変更、払戻の購入時オッズへの流用はしない。
