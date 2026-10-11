@@ -836,6 +836,11 @@ describe('EdgeLab API',()=>{
   expect((await post([observation])).status).toBe(200);
   expect(sqlite.prepare('SELECT kind,entry_number,data_origin FROM boatrace_prerace_observations WHERE race_id=?').get(raceId))
    .toMatchObject({kind:'exhibition',entry_number:1,data_origin:'real'});
+  const weather={...observation,id:`${raceId}:weather:0:${fetchedAt}`,kind:'weather',entry_number:0,
+   values_json:JSON.stringify({wind_direction:'北',wind_direction_class:'is-wind12',wind_speed:2})};
+  expect((await post([weather])).status).toBe(200);
+  const badWind={...weather,id:'bad-wind-class',values_json:JSON.stringify({wind_direction_class:'is-wind13'})};
+  expect((await post([badWind])).status).toBe(400);
   const bad={...observation,id:'wrong-source',source_url:observation.source_url.replace('beforeinfo','raceresult')};
   expect((await post([bad])).status).toBe(400);
   expect(sqlite.prepare('SELECT COUNT(*) n FROM boatrace_prerace_observations WHERE id=?').get('wrong-source')).toMatchObject({n:0});

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
+from itertools import permutations
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,7 +21,7 @@ def _store():
         "entries": [{"race_id": x, "number": 1} for x in ("prev", "today", "older")],
         "results": [{"race_id": x, "number": 1} for x in ("prev", "older")],
         "payouts": [{"race_id": x, "bet_type": "win", "selection": "1"} for x in ("prev", "older")],
-        "predictions": [], "models": [],
+        "predictions": [], "ticket_predictions": [], "prerace_observations": [], "models": [],
         "collection_runs": [{"id": "today-run", "sport": "boat", "target_date": "2026-10-09", "status": "success"}],
     }
 
@@ -40,7 +43,8 @@ def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_back
     monkeypatch.setattr(cli, "collect_boat", lambda start, end, **kwargs: collection_calls.append((start, end, kwargs)) or 0)
     monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: [])
     monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
-    monkeypatch.setattr(cli, "_predict_boat_date", lambda rows, day, cutoff: [{"race_id": "today"}])
+    monkeypatch.setattr(cli, "_predict_boat_trifecta_date", lambda rows, day, cutoff: [{"race_id": "today", "bet_type": "trifecta"}])
+    monkeypatch.setattr(cli, "_predict_boat_date", lambda *args: (_ for _ in ()).throw(AssertionError("daily must not fall back to win")))
     monkeypatch.setattr("edgelab.sync.sync_rows", lambda payload: synced.update(payload) or {"ok": True})
 
     result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
@@ -51,7 +55,9 @@ def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_back
     assert {(row["race_id"], row["number"]) for row in synced["entries"]} == {("today", 1), ("prev", 1)}
     assert {row["race_id"] for row in synced["results"]} == {"prev", "today"}
     assert {row["race_id"] for row in synced["payouts"]} == {"prev", "today"}
-    assert synced["predictions"] == [{"race_id": "today"}]
+    assert synced["ticket_predictions"] == [{"race_id": "today", "bet_type": "trifecta"}]
+    assert "predictions" not in synced
+    assert result["ticket_predictions"] == 1
     assert result["daily_collection_success"] is True
     assert result["forecast_ready"] is True
     assert result["forecast_status"] == "ready"
@@ -66,7 +72,7 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
     monkeypatch.setattr(cli, "collect_boat", lambda *args, **kwargs: 0)
     monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: [])
     monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
-    monkeypatch.setattr(cli, "_predict_boat_date",
+    monkeypatch.setattr(cli, "_predict_boat_trifecta_date",
                         lambda *args: (_ for _ in ()).throw(RuntimeError("no active model in authoritative local registry")))
     monkeypatch.setattr("edgelab.sync.sync_rows", lambda payload: synced.update(payload) or {"ok": True})
 
@@ -77,7 +83,39 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
     assert result["forecast_status"] == "not_ready"
     assert result["forecast_reason"] == "RuntimeError: no active model in authoritative local registry"
     assert {row["race_id"] for row in synced["results"]} == {"prev"}
-    assert synced["predictions"] == []
+    assert synced["ticket_predictions"] == []
+    assert "predictions" not in synced
+
+
+def test_primary_prediction_asof_is_t60_not_the_betting_deadline():
+    assert cli._primary_prediction_as_of("2026-10-10T12:59:00+09:00") == "2026-10-10T12:58:00+09:00"
+    with pytest.raises(ValueError, match="timezone"):
+        cli._primary_prediction_as_of("2026-10-10T12:59:00")
+
+
+def test_daily_trifecta_helper_keeps_only_complete_valid_ticket_groups(monkeypatch, tmp_path):
+    model_id = "boat-trifecta-v2-fixture"
+    model = {"id": model_id, "sport": "boat", "bet_type": "trifecta", "status": "active",
+             "metrics": {"boatFeatureSchemaVersion": "boat-prerace-v2"}}
+    race_id = "boat-20261011-01-01"
+    predictions = [{"id": f"{race_id}:{a}-{b}-{c}", "race_id": race_id,
+                    "model_id": model_id, "bet_type": "trifecta", "predicted_at": "2026-10-10T23:30:00+00:00",
+                    "selection": f"{a}-{b}-{c}", "probability": 1 / 120, "prob_std": 0.0}
+                   for a, b, c in permutations(range(1, 7), 3)]
+    fake_trifecta = SimpleNamespace(active_ticket_predictions=lambda *args, **kwargs: predictions)
+    fake_predict = SimpleNamespace(load_artifact=lambda path: {"fixture": True})
+    monkeypatch.setitem(sys.modules, "edgelab.models.trifecta", fake_trifecta)
+    monkeypatch.setitem(sys.modules, "edgelab.predict", fake_predict)
+    (tmp_path / f"{model_id}.pkl").write_bytes(b"fixture artifact")
+    rows = {"models": [model], "ticket_predictions": []}
+
+    result = cli._predict_boat_trifecta_date(rows, "2026-10-11", "2026-10-10T23:30:00+00:00", tmp_path)
+    assert len(result) == 120
+    assert rows["ticket_predictions"] == result
+
+    predictions[0]["probability"] = 10**1000
+    rejected = cli._predict_boat_trifecta_date(rows, "2026-10-11", "2026-10-10T23:30:00+00:00", tmp_path)
+    assert rejected == []
 
 
 def test_predict_requires_artifact_even_if_model_exists(tmp_path):

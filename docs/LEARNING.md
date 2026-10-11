@@ -17,10 +17,10 @@
 ## 学習・昇格
 
 - 学習行はボートの `real` データに限定。全出走艇の実結果と勝者1艇、利用可能時刻、完了レース状態を要求する。
-- ボートは B ファイルの事前特徴量だけを新規モデルに使う。Kファイルの展示・ST・天候項目は締切前に使える根拠が不足するためマスクする。既存 v1 artifact はこれらの項目が混入した可能性があり、比較基準として信頼しない。新しい候補は日付と実レース集合の fingerprint を含む別ID/artifactに保存する。
+- 週次 `learn` が作る単勝候補はBファイルの事前特徴量だけを使う。Kファイルの展示・ST・天候項目は単勝候補からマスクする。別コマンド `train-trifecta` は V2 schema の三連単候補を作るが、オフライン候補に留まり日次 workflow や週次 `learn` から自動起動しない。V2訓練の予測時点は確認済み `betting_cutoff_at - 60秒` で、同じ時点までに利用可能な展示・ST・気象観測と racer ID が結ばれた完全な過去結果だけを使う。T-30時点の観測は含めない。既存 v1 artifact はこれらの項目が混入した可能性があり、比較基準として信頼しない。新しい候補は日付と実レース集合の fingerprint を含む別ID/artifactに保存する。
 - D1のモデル自然キーはIDだけでなく `(sport, bet_type, version)` にも一意制約がある。候補versionにも日付とfingerprintを含め、artifactと同期行で同じ値を使う。全候補を `v1` のまま送らない。
 - 候補の fit/temperature validation は holdout より時間的に前でなければならない。候補と比較可能なローカル incumbent artifact が同一holdout以前の fit/validation で、かつ安全な特徴列だけを使う場合に限り、同一holdout上の比較を出す。比較不能なら理由を記録する。holdout は週次候補間で再利用されるため、これは運用上の候補比較であり、独立した最終的な性能証明ではない。
-- `daily` / `learn` は認証付き読み取り専用モデルレジストリで active ID を確認する。`learn` の比較対象はレジストリで active と確認でき、適合するローカルartifactがあるモデルだけ。レジストリまたは推論用active artifactを確認できないときdaily予測はfail closedだが、結果の収集・同期・feedbackは継続する。候補作成・比較・Actionsのいずれも昇格しない。昇格・rollback は既存の人手操作を使う。
+- 日次の三連単推論は認証付きレジストリで唯一の active trifecta モデルを確認し、`boat-prerace-v2` marker・三連単意味論・promotion evidence・artifact SHA256 が一致するときだけ `ticket_predictions` を作って同期する。日次実行時刻を予測時刻として保存し、その時点で取得済みの情報だけを使う。実行がT-60より早ければ後着の展示／気象情報は含まれない。確認済み締切がない、active V2 modelがない、artifactが欠ける／不一致、または時点情報が不正な場合は単勝予測へフォールバックせず予測を棄権するが、結果の収集・同期・feedbackは継続する。週次 `learn` は引き続き単勝候補を作り、`train-trifecta` の実行・候補登録・昇格を自動化しない。昇格・rollback は既存の人手操作を使う。
 - 比較できる incumbent がない／Log Loss と Brier がともに改善しない／ECEが悪化する場合でも学習artifactと評価レポートは残すが、D1に候補として同期する場合は `metrics_json.promotionEligible=false` と理由を付け、昇格API/UIで不許可とする。
 - network-free `feedback` は遠隔レジストリのstatusを確認しないため、採点レポートはモデルが現在 active かどうかを主張しない。`learn` の比較では認証済みregistry snapshotのactive状態とローカルartifact両方を必要とする。
 

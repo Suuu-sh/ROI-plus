@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import hashlib
 import json
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from edgelab.cli import _make_training_rows
@@ -15,16 +16,10 @@ JST = ZoneInfo("Asia/Tokyo")
 
 
 def _page(day: str, *, ambiguous_weather: bool = False) -> str:
-    clock = "11R時点" if ambiguous_weather else "12:34現在"
-    exhibits = "".join(f"<tr><td>{lane}</td><td>{6.70 + lane / 100:.2f}</td><td>-0.5</td><td>50.0</td></tr>"
-                       for lane in range(1, 7))
-    starts = "".join(f"<tr><td>{lane}</td><td>{'F.07' if lane == 1 else '.08'}</td></tr>"
-                     for lane in range(1, 7))
-    return f"""<html><body>
-      <table><tr><th>枠</th><th>展示タイム</th><th>チルト</th><th>体重</th></tr>{exhibits}</table>
-      <table><tr><th>コース</th><th>ST</th></tr>{starts}</table>
-      <p>水面気象情報 {clock} 天候 晴れ 気温 20.0℃ 水温 22.0℃ 波高 4cm 風向 東 風速 2m</p>
-    </body></html>"""
+    # Sanitized from the official page's current DOM shape, including <br>
+    # inside "展示タイム", colspan start rows, and an is-windNN icon class.
+    fixture = (Path(__file__).parent / "fixtures" / "boatrace_beforeinfo_actual_fragment.html").read_text(encoding="utf-8")
+    return fixture.replace("12:34現在", "11R時点") if ambiguous_weather else fixture
 
 
 def _observation(race_id: str, kind: str, lane: int, fetched_at: str, values: dict,
@@ -50,11 +45,27 @@ def test_beforeinfo_parser_keeps_real_source_times_and_false_start_marker():
     assert values == {"exhibition_time": 6.71, "tilt": -0.5, "weight": 50.0,
                       "start_exhibition": 0.07, "start_exhibition_false_start": True,
                       "start_exhibition_course": 1.0}
+    starts = {row["entry_number"]: json.loads(row["values_json"]) for row in rows
+              if row["kind"] == "exhibition"}
+    assert [starts[lane]["start_exhibition"] for lane in range(1, 7)] == [0.07, 0.08, 0.04, 0.06, 0.02, 0.07]
+    assert all(starts[lane]["start_exhibition_false_start"] is False for lane in range(2, 7))
     weather = next(row for row in rows if row["kind"] == "weather")
     assert weather["source_observed_at"] == "2026-10-11T12:34+09:00"
     assert weather["source_observation_label"] == "12:34現在"
+    weather_values = json.loads(weather["values_json"])
+    assert weather_values["wind_direction"] == "北"
+    assert weather_values["wind_direction_class"] == "is-wind12"
+    assert weather_values["wind_speed"] == 2.0
     assert weather["fetched_at"] == weather["available_at"] == fetched_at
     assert all(row["source_sha256"] == hashlib.sha256(b"fixture").hexdigest() for row in rows)
+    race = {"id": race_id, "sport": "boat", "venue_id": "01", "race_no": 1,
+            "race_date": day, "data_origin": "real"}
+    entries = [{"race_id": race_id, "number": lane, "data_origin": "real",
+        "available_at": "2026-10-11T11:00:00+09:00", "features_json": "{}"} for lane in range(1, 7)]
+    features = build_boat_prerace_v2_features(entries, race=race, predicted_at="2026-10-11T12:40:00+09:00",
+                                               observations=rows)
+    assert all(row["lane_wind_y"] is not None for row in features)
+    assert features[0]["lane_wind_y"] == -5.0
 
 
 def test_beforeinfo_keeps_non_clock_weather_label_without_inventing_a_time():
@@ -215,11 +226,14 @@ def test_v2_training_uses_only_races_with_real_racelist_cutoff():
     missing = cohort("boat-20261009-01-01", "2026-10-09", None)
     store = {"races": [good[0], missing[0]], "entries": good[1] + missing[1],
              "results": good[2] + missing[2], "payouts": [], "prerace_observations": [
-                _observation(good[0]["id"], "exhibition", 1, "2026-10-10T12:50:00+09:00",
-                             {"exhibition_time": 6.71})]}
+                _observation(good[0]["id"], "exhibition", 1, "2026-10-10T12:57:30+09:00",
+                             {"exhibition_time": 6.71}),
+                # Available at T-30, after the T-60 model input boundary.
+                _observation(good[0]["id"], "exhibition", 1, "2026-10-10T12:58:30+09:00",
+                             {"exhibition_time": 6.99})]}
     rows = _make_training_rows(store, "boat", feature_schema=PRERACE_V2_SCHEMA)
     assert len(rows) == 6
     assert {row["race_id"] for row in rows} == {good[0]["id"]}
-    assert {row["predicted_at"] for row in rows} == {cutoff}
+    assert {row["predicted_at"] for row in rows} == {"2026-10-10T12:58:00+09:00"}
     assert rows[0]["exhibition_time"] == 6.71
     assert len(_make_training_rows(store, "boat")) == 12

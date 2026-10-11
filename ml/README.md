@@ -28,6 +28,9 @@ ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab li
 過去リプレイであり、全券種をまたぐ運用方針の検証ではありません。候補学習はモデル行をローカルへ記録しますが、
 推論・リモート同期はせず、昇格も自動化しません。過去のB公開時刻は
 実測されておらず、保持された実績も将来利益を証明しません。
+V2 training rows use the official betting cutoff minus 60 seconds as their feature as-of boundary;
+T-30 observations are excluded. The standard weekly `learn` command still trains the separate
+boat win candidate and does not invoke `train-trifecta`.
 
 `ticketEventPooledEce` は全レースの120 ticket-event行をまとめた micro ECE です。
 レース内ticketは依存するため校正の参考値に限り、レース単位のtop-ticket ECEと各binの
@@ -49,8 +52,13 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab sync --tables ticket_predictions
 リクエスト間隔は最低3秒とします。同一レースの直近10分以内の取得と確定オッズは
 再取得しません。運営負荷を避け、定期実行は10分間隔を超えて頻繁に行わないでください。
 
-GitHub Actions の `daily.yml` は当日・前日の結果と払戻を優先し、出走表・安全な
-activeモデルの予測を同期して、保存予測の feedback scoring を行います。過去履歴の
+GitHub Actions の `daily.yml` は当日・前日の結果と払戻を優先し、出走表と確認済み
+active `boat-prerace-v2` trifecta model の `ticket_predictions` を同期して、保存予測の
+feedback scoring を行います。日次予測は実際のAction実行時刻を予測時刻として保存し、
+T-60より先の観測を使いません。ActionがT-60より早い場合は、その実行時点で取得済みの
+観測だけを使うため、後着の展示／気象情報は含まれません。締切、V2 active artifact、
+または時点情報が確認できない場合は単勝へフォールバックせず `not_ready` / abstention
+にします。過去履歴の
 D1 backfill は日次のD1同期から完全に分離しています。ローカル正規化キャッシュと Actions
 cache は学習・feedback 用に維持し、cache miss 時の過去データ収集もローカル保存のみで
 続けます。D1の日次書込枠を過去履歴で消費しません。
@@ -62,7 +70,7 @@ feedbackを続行します。`retrain.yml` は週次に
 限り別IDの候補artifactを作成・同一 temporal holdout で評価します。比較不能・
 非改善の候補は `metrics_json.promotionEligible=false` になり、手動昇格も拒否されます。
 どのActionも自動昇格しません。日次は認証済みモデルレジストリからactive IDを
-読み、artifact欠損・旧late-feature列の場合は推論だけを止めて結果収集/同期を続けます。
+読み、三連単ticket semantics・V2 feature schema・artifact digestが合わない場合は推論だけを止めて結果収集/同期を続けます。`train-trifecta` は明示的な候補学習コマンドであり、週次workflowからは起動しません。候補を作ってもD1へ自動同期／昇格しません。
 feedback artifactは各Actionの `learning-feedback-*` / `learning-report-*` として保存されます。
 必要な Actions secrets:
 

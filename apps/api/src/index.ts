@@ -214,7 +214,7 @@ async function ingest(c: any, name: string) {
         try { values = JSON.parse(String(row.values_json)); } catch { values = null; }
         const valueKeys = values && typeof values === 'object' && !Array.isArray(values) ? Object.keys(values) : [];
         const allowedValues = row.kind === 'weather'
-          ? ['weather','wind_speed','wind_direction','air_temperature','water_temperature','wave_height']
+          ? ['weather','wind_speed','wind_direction','wind_direction_class','air_temperature','water_temperature','wave_height']
           : ['exhibition_time','tilt','weight','adjustment_weight','start_exhibition','start_exhibition_course','start_exhibition_false_start','propeller_changed'];
         const observationsValid = race?.sport === 'boat' && race?.data_origin === 'real' && row.data_origin === 'real'
           && ['weather','exhibition'].includes(String(row.kind))
@@ -228,6 +228,8 @@ async function ingest(c: any, name: string) {
           && (sourceObservedAt === null || (Number.isFinite(sourceObservedAt) && sourceObservedAt <= fetchedAt && sourceObservedAt <= Date.now() + 300_000))
           && (row.source_observation_label == null || (typeof row.source_observation_label === 'string' && row.source_observation_label.length <= 32))
           && !!valueKeys.length && valueKeys.every(key => allowedValues.includes(key))
+          && (values.wind_direction_class == null || (row.kind === 'weather' && typeof values.wind_direction_class === 'string'
+            && /^is-wind(?:[1-9]|1[0-2])$/.test(values.wind_direction_class)))
           && valueKeys.every(key => values[key] == null || (typeof values[key] === 'number' ? Number.isFinite(values[key]) : typeof values[key] === 'string' || typeof values[key] === 'boolean'));
         if (!observationsValid) return jsonError(c, 'pre-race observation requires a matching official page, real race, observation timestamp, and typed values');
       }

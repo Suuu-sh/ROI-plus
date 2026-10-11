@@ -145,7 +145,8 @@ def ensemble_ordered_triples(artifact: Mapping[str, Any], group: Sequence[Mappin
 
 def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[str, Any],
                               artifact: Mapping[str, Any], model_id: str, cutoff: str,
-                              artifact_sha256: str) -> list[dict[str, Any]]:
+                              artifact_sha256: str, race_date: str | None = None,
+                              require_verified_cutoff: bool = False) -> list[dict[str, Any]]:
     """Build exact-order records only for an explicitly active, validated model."""
     from datetime import datetime, timedelta
     from edgelab.features.boat import build_boat_features
@@ -177,20 +178,36 @@ def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[st
             or not artifact.get("model")):
         raise ValueError("active trifecta model lacks validated matching schema/semantics/artifact evidence")
     cutoff_dt = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+    if cutoff_dt.tzinfo is None:
+        raise ValueError("prediction cutoff must include a timezone")
     trained_at = meta.get("trainedAt")
     if not trained_at or datetime.fromisoformat(str(trained_at).replace("Z", "+00:00")) >= cutoff_dt:
         raise ValueError("artifact was not trained strictly before prediction cutoff")
     races = {r.get("id"): r for r in store.get("races", [])
              if r.get("sport") == "boat" and r.get("data_origin") == "real"
-             and r.get("status") not in {"finished", "cancelled"}}
+             and r.get("status") not in {"finished", "cancelled"}
+             and (race_date is None or r.get("race_date") == race_date)}
     by_race: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in store.get("entries", []):
         rid = str(entry.get("race_id"))
         race = races.get(rid)
-        if (race and entry.get("data_origin") == "real" and race.get("post_time")
+        if not (race and entry.get("data_origin") == "real" and race.get("post_time")
                 and datetime.fromisoformat(str(race["post_time"]).replace("Z", "+00:00")) > cutoff_dt
                 and available_by(entry, cutoff)):
-            by_race[rid].append(dict(entry))
+            continue
+        if require_verified_cutoff:
+            if race.get("betting_cutoff_source") != "boatrace-racelist-cutoff-v1" or not race.get("betting_cutoff_at"):
+                continue
+            try:
+                target_as_of = datetime.fromisoformat(str(race["betting_cutoff_at"]).replace("Z", "+00:00")) - timedelta(seconds=60)
+            except (TypeError, ValueError):
+                continue
+            if target_as_of.tzinfo is None or target_as_of <= cutoff_dt:
+                # Daily precomputation cannot claim a T-60 forecast after its
+                # feature boundary has passed; the next run may use no future
+                # observations and records its own generated-at cutoff.
+                continue
+        by_race[rid].append(dict(entry))
     records = []
     history = completed_racer_history(store) if feature_schema == PRERACE_V2_SCHEMA else []
     for race_id, entries in by_race.items():

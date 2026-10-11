@@ -28,13 +28,20 @@ class _PageParser(HTMLParser):
         self._cell_kind: str | None = None
         self._cell: list[str] = []
         self.text: list[str] = []
+        self.classes: list[str] = []
         self._ignored = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_map = {key: value or "" for key, value in attrs}
+        self.classes.extend(attrs_map.get("class", "").split())
         if tag in {"script", "style"}:
             self._ignored += 1
         if self._ignored:
+            return
+        if tag == "br":
+            if self._cell_kind is not None:
+                self._cell.append(" ")
+            self.text.append(" ")
             return
         if tag == "table":
             table: list[list[tuple[str, str]]] = []
@@ -125,13 +132,13 @@ def _lane(value: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _tables(html: str) -> tuple[list[list[list[tuple[str, str]]]], str]:
+def _tables(html: str) -> tuple[list[list[list[tuple[str, str]]]], str, list[str]]:
     parser = _PageParser()
     parser.feed(html)
-    return parser.tables, " ".join(parser.text)
+    return parser.tables, " ".join(parser.text), parser.classes
 
 
-def _weather(text: str, day: str) -> tuple[dict[str, Any], str | None, str | None]:
+def _weather(text: str, day: str, classes: list[str] | None = None) -> tuple[dict[str, Any], str | None, str | None]:
     # Exact clock readings become timestamps in the race's local timezone.
     # Labels such as "11R時点" remain labels and never acquire a guessed time.
     exact = re.search(r"(?:水面)?気象情報\s*(\d{1,2}:\d{2})\s*現在", text)
@@ -156,6 +163,19 @@ def _weather(text: str, day: str) -> tuple[dict[str, Any], str | None, str | Non
     direction = re.search(r"風向\s*[:：]?\s*(北東|北西|南東|南西|北|東|南|西)", text)
     if direction:
         values["wind_direction"] = direction.group(1)
+    else:
+        # The official page renders its wind indicator as a directional CSS
+        # class instead of Japanese text. Preserve that source marker and map
+        # its 12 compass positions to the closest direction in our feature set.
+        wind_class = next((name for name in (classes or [])
+                           if re.fullmatch(r"is-wind(?:[1-9]|1[0-2])", name)), None)
+        if wind_class:
+            hour = int(wind_class.removeprefix("is-wind"))
+            direction_by_hour = {12: "北", 1: "北東", 2: "北東", 3: "東",
+                4: "南東", 5: "南東", 6: "南", 7: "南西", 8: "南西",
+                9: "西", 10: "北西", 11: "北西"}
+            values["wind_direction"] = direction_by_hour[hour]
+            values["wind_direction_class"] = wind_class
     weather = re.search(r"天候\s*[:：]?\s*(晴れ?|曇り?|雨|雪)", text)
     if weather:
         values["weather"] = weather.group(1)
@@ -171,12 +191,12 @@ def parse_beforeinfo(html: str, *, race_id: str, source_url: str, source_sha256:
     fetched = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
     if fetched.tzinfo is None:
         raise ValueError("fetched_at must have a timezone")
-    tables, text = _tables(html)
+    tables, text, classes = _tables(html)
     observations: list[dict[str, Any]] = []
     exhibition: dict[int, dict[str, Any]] = {}
     for table in tables:
         for header_row, cells in enumerate(table):
-            headers = [value.replace("\u3000", " ").strip() for _, value in cells]
+            headers = [re.sub(r"\s+", "", value.replace("\u3000", " ")).strip() for _, value in cells]
             lane_idx = _header_index(headers, "枠", "艇")
             exhibit_idx = _header_index(headers, "展示タイム")
             tilt_idx = _header_index(headers, "チルト")
@@ -215,12 +235,24 @@ def parse_beforeinfo(html: str, *, race_id: str, source_url: str, source_sha256:
                 continue
             for row in table[header_row + 1:]:
                 values = [value for _, value in row]
-                if max(course_idx, st_idx) >= len(values):
+                if not values or course_idx >= len(values):
                     continue
                 lane = _lane(values[course_idx])
                 if lane is None:
                     continue
-                raw = values[st_idx].strip()
+                # Some official beforeinfo rows collapse the "並び" and ST
+                # columns into one colspan=3 cell whose spans hold the values.
+                collapsed = st_idx >= len(values)
+                raw = values[st_idx].strip() if not collapsed else " ".join(values[course_idx + 1:])
+                if collapsed:
+                    # The lane number in table1_boatNo and its ST span are adjacent
+                    # in official cell text (for example `2.08`). Drop the boat
+                    # number before parsing the decimal start timing.
+                    raw = re.sub(rf"^\s*{lane}(?=F|\.|\s)", "", raw, count=1, flags=re.IGNORECASE)
+                start_values = re.findall(r"F?\s*(?:\d+\.\d+|\.\d+)", raw, flags=re.IGNORECASE)
+                if not start_values:
+                    continue
+                raw = start_values[-1].strip()
                 number = _number(raw)
                 item = exhibition.setdefault(lane, {})
                 if number is not None:
@@ -241,7 +273,7 @@ def parse_beforeinfo(html: str, *, race_id: str, source_url: str, source_sha256:
             "values_json": json.dumps(values, ensure_ascii=False, separators=(",", ":")),
             "data_origin": "real"})
 
-    weather, observed_at, label = _weather(text, day)
+    weather, observed_at, label = _weather(text, day, classes)
     if weather:
         observations.append({"id": f"{race_id}:weather:0:{fetched.isoformat()}",
             "race_id": race_id, "kind": "weather", "entry_number": 0,

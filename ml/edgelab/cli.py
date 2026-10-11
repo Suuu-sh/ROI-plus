@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import pickle
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -21,6 +22,14 @@ def _now() -> str:
 def _coerce_dt(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def _primary_prediction_as_of(betting_cutoff_at: str) -> str:
+    """Use the primary T-60 input boundary, never the final betting deadline."""
+    parsed = datetime.fromisoformat(betting_cutoff_at.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("official betting cutoff must include a timezone")
+    return (parsed - timedelta(seconds=60)).isoformat(timespec="seconds")
 
 
 def _apply_model_registry(rows: dict[str, Any], registry: list[dict[str, Any]]) -> set[str]:
@@ -142,6 +151,69 @@ def _predict_boat_date(rows: dict[str, list[dict[str, Any]]], day: str, cutoff: 
     return predictions
 
 
+def _predict_boat_trifecta_date(rows: dict[str, list[dict[str, Any]]], day: str, generated_at: str,
+                                artifact_dir: Path = Path("ml/artifacts")) -> list[dict[str, Any]]:
+    """Use exactly one authoritative active v2 trifecta artifact; never fall back to win."""
+    from edgelab.features.boat import PRERACE_V2_SCHEMA
+    from edgelab.models.trifecta import active_ticket_predictions
+    from edgelab.predict import load_artifact
+
+    def model_metrics(model: dict[str, Any]) -> dict[str, Any]:
+        value = model.get("metrics")
+        if isinstance(value, dict):
+            return value
+        try:
+            decoded = json.loads(model.get("metrics_json") or "{}")
+            return decoded if isinstance(decoded, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    active = [model for model in rows.get("models", [])
+              if model.get("sport") == "boat" and model.get("status") == "active"
+              and (model.get("bet_type") or model.get("betType")) == "trifecta"]
+    if len(active) != 1:
+        raise RuntimeError("authoritative registry must contain exactly one active trifecta model")
+    model = active[0]
+    metrics = model_metrics(model)
+    if metrics.get("boatFeatureSchemaVersion") != PRERACE_V2_SCHEMA:
+        raise RuntimeError("active trifecta model is not boat-prerace-v2; daily forecast abstained")
+    model_id = str(model.get("id") or "")
+    if not model_id:
+        raise RuntimeError("active trifecta registry row has no model ID")
+    model_path = artifact_dir / f"{model_id}.pkl"
+    artifact_sha = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    artifact = load_artifact(model_path)
+    predictions = active_ticket_predictions(rows, model_row=model, artifact=artifact,
+        model_id=model_id, cutoff=generated_at, artifact_sha256=artifact_sha,
+        race_date=day, require_verified_cutoff=True)
+    expected = {f"{a}-{b}-{c}" for a in range(1, 7) for b in range(1, 7) for c in range(1, 7)
+                if a != b and a != c and b != c}
+    def finite_unit_interval(value: Any) -> bool:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return False
+        try:
+            number = float(value)
+        except OverflowError:
+            return False
+        return math.isfinite(number) and 0 <= number <= 1
+
+    by_race: dict[str, list[dict[str, Any]]] = {}
+    for prediction in predictions:
+        by_race.setdefault(str(prediction.get("race_id")), []).append(prediction)
+    safe_predictions = []
+    for group in by_race.values():
+        selections = {row.get("selection") for row in group}
+        probabilities = [row.get("probability") for row in group]
+        deviations = [row.get("prob_std") for row in group]
+        if (len(group) == 120 and selections == expected
+                and all(finite_unit_interval(p) for p in probabilities)
+                and all(finite_unit_interval(sd) for sd in deviations)
+                and abs(sum(float(p) for p in probabilities) - 1.0) <= 1e-6):
+            safe_predictions.extend(group)
+    merge_rows(rows, {"ticket_predictions": safe_predictions})
+    return safe_predictions
+
+
 def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     """Collect and synchronize the current/previous-day delta; never backfill D1 history."""
     target = date.fromisoformat(day)
@@ -172,11 +244,12 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     rows["collection_runs"] = other_runs
     prediction_error = None
     try:
-        predictions = _predict_boat_date(rows, day, cutoff)
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        # A missing/legacy active artifact blocks inference only; daily data
-        # collection, sync, and feedback must continue for recovery.
-        predictions = []
+        ticket_predictions = _predict_boat_trifecta_date(rows, day, cutoff)
+    except (FileNotFoundError, OSError, RuntimeError, ValueError, TypeError, KeyError,
+            AttributeError, EOFError, pickle.UnpicklingError, ImportError) as exc:
+        # Missing, legacy, or non-v2 active artifacts block inference only;
+        # daily data collection, sync, and feedback continue for recovery.
+        ticket_predictions = []
         prediction_error = f"{type(exc).__name__}: {exc}"
     save_rows(rows)
     prev_ids = {r.get("id") for r in rows.get("races", []) if r.get("race_date") == previous}
@@ -207,7 +280,7 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         "entries": [r for r in rows.get("entries", [])
                     if r.get("race_id") in today_ids
                     or (r.get("race_id") in prev_ids and has_official_nonfinisher_marker(r))],
-        "predictions": predictions,
+        "ticket_predictions": ticket_predictions,
         # K files can already contain same-day finished races during midday or
         # late-night runs; settle those alongside yesterday's outcomes.
         "results": [r for r in rows.get("results", []) if r.get("race_id") in prev_ids | today_ids],
@@ -224,15 +297,16 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     collection_runs = [run for run in payload["collection_runs"] if run.get("sport") == "boat"]
     collection_ready = all(run.get("status") in {"success", "skipped"} for run in collection_runs)
     forecast_reason = prediction_error
-    if forecast_reason is None and not predictions:
-        forecast_reason = "no eligible upcoming boat races produced predictions at this cutoff"
+    if forecast_reason is None and not ticket_predictions:
+        forecast_reason = "no upcoming real races with verified cutoffs produced v2 trifecta predictions at this cutoff"
     forecast_ready = forecast_reason is None
     return {"date": day, "cutoff": cutoff, "collected_dates": [previous, day],
             "daily_collection_success": collection_ready,
             "forecast_ready": forecast_ready,
             "forecast_status": "ready" if forecast_ready else "not_ready",
             "forecast_reason": forecast_reason,
-            "predictions": len(predictions), "prerace_observations": beforeinfo_result, "sync": synced,
+            "predictions": len(ticket_predictions), "ticket_predictions": len(ticket_predictions),
+            "prerace_observations": beforeinfo_result, "sync": synced,
             "feedback_models": len(learning_report["models"])}
 
 
@@ -261,7 +335,10 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
                 if (race.get("betting_cutoff_source") != "boatrace-racelist-cutoff-v1"
                         or not race.get("betting_cutoff_at")):
                     continue
-                predicted_at = race["betting_cutoff_at"]
+                try:
+                    predicted_at = _primary_prediction_as_of(str(race["betting_cutoff_at"]))
+                except (TypeError, ValueError):
+                    continue
                 features = build_boat_prerace_v2_features(group, race=race, predicted_at=predicted_at,
                     history=history, observations=store.get("prerace_observations", []))
                 from edgelab.features.boat import PRERACE_V2_FEATURE_COLUMNS
@@ -308,7 +385,10 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
         if feature_schema == "boat-prerace-v2":
             cutoff = race.get("betting_cutoff_at")
             if race.get("betting_cutoff_source") == "boatrace-racelist-cutoff-v1" and cutoff:
-                row["predicted_at"] = cutoff
+                try:
+                    row["predicted_at"] = _primary_prediction_as_of(str(cutoff))
+                except (TypeError, ValueError):
+                    continue
                 row["available_at"] = entry.get("available_at")
         elif post_time:
             try:
