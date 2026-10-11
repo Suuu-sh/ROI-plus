@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
-import type { RankingCandidate, TicketCandidate, EntryView, RaceDetail, RaceSummary, Sport } from '@edgelab/shared/src/types'
+import { Link, useParams } from 'react-router-dom'
+import type { Bet, RankingCandidate, TicketCandidate, EntryView, RaceDetail, RaceSummary, Sport } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
 import { useOrigin } from '../lib/origin'
 import { useAsync } from '../lib/useAsync'
@@ -20,16 +20,9 @@ export function SportPage({ sport }: { sport: Sport }) {
   const { raceId } = useParams()
   const { origin } = useOrigin()
   const [date, setDate] = useState(todayJst)
-  const races = useAsync(() => api.races(sport, date, origin), [sport, date, origin])
-  const ranks = useAsync(() => api.rankings(sport, date, origin), [sport, date, origin])
-  const navigate = useNavigate()
-
-  // デスクトップでは先頭レースを自動選択
-  useEffect(() => {
-    if (!raceId && races.data?.length && window.matchMedia('(min-width: 1024px)').matches) {
-      navigate(`/${sport}/${races.data[0].id}`, { replace: true })
-    }
-  }, [raceId, races.data, sport, navigate])
+  const [researchOpen, setResearchOpen] = useState(Boolean(raceId))
+  const bets = useAsync(() => api.bets(origin, sport), [sport, origin])
+  useEffect(() => { if (raceId) setResearchOpen(true) }, [raceId])
 
   const accent = sport === 'horse' ? 'text-horse' : 'text-boat'
 
@@ -40,37 +33,114 @@ export function SportPage({ sport }: { sport: Sport }) {
           <h1 className={`flex items-center gap-2 text-xl font-semibold tracking-tight ${accent}`}>
             <SportIcon sport={sport} className="h-6 w-6" />{t().sport[sport]}
           </h1>
-          <p className="mt-1 text-sm text-muted">{sport === 'horse' ? 'JRA 中央競馬' : '全国24場'}・検証済み券種の的中確率と期待収益率</p>
+          <p className="mt-1 text-sm text-muted">{sport === 'horse' ? 'JRA 中央競馬' : '全国24場'}・仮想購入とレース結果の確認</p>
         </div>
         <div className="flex items-center gap-1.5">
           <button className="btn-ghost h-8 w-8 px-0" onClick={() => setDate((d) => shiftDate(d, -1))} aria-label="前日">‹</button>
-          <input
-            type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)}
-            className="focus-ring num h-8 rounded-lg border border-line bg-surface px-2 text-sm"
-          />
+          <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="focus-ring num h-8 rounded-lg border border-line bg-surface px-2 text-sm" />
           <button className="btn-ghost h-8 w-8 px-0" onClick={() => setDate((d) => shiftDate(d, 1))} aria-label="翌日">›</button>
           {date !== todayJst() && <button className="btn-ghost h-8 text-xs" onClick={() => setDate(todayJst())}>今日</button>}
         </div>
       </div>
 
-      <RankingStrip sport={sport} data={ranks.data} loading={ranks.loading} error={ranks.error} />
+      <PurchasedRaces bets={bets.data} date={date} loading={bets.loading} error={bets.error} onRetry={bets.reload} />
 
-      <div className="grid gap-5 lg:grid-cols-[300px_1fr]">
-        <div className={`min-w-0 ${raceId ? 'hidden lg:block' : ''}`}>
-          <Section title="レース一覧" right={<span className="num text-xs text-muted">{races.data?.length ?? 0}R</span>}>
-            {races.error ? <ErrorState error={races.error} onRetry={races.reload} />
-              : !races.data ? <Loading rows={6} />
-              : races.data.length === 0 ? <Empty>この日のレースはありません。<br /><span className="text-xs">データ未取得の可能性もあります（データ収集画面で確認）。</span></Empty>
-              : <RaceList races={races.data} sport={sport} selected={raceId} />}
-          </Section>
-        </div>
-        <div className={`min-w-0 ${raceId ? '' : 'hidden lg:block'}`}>
-          {raceId ? <RacePanel key={raceId} raceId={raceId} sport={sport} onDate={setDate} onChanged={() => { races.reload(); ranks.reload() }} />
-            : <div className="card"><Empty>レースを選択してください。</Empty></div>}
-        </div>
-      </div>
+      <details className="card group" open={researchOpen || undefined} onToggle={(event) => setResearchOpen(event.currentTarget.open)}>
+        <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold marker:content-none">レースを調べる <span className="ml-2 text-xs font-normal text-muted">期待値ランキング・出走表</span></summary>
+        {researchOpen && <ResearchArea sport={sport} date={date} origin={origin} raceId={raceId} onDate={setDate} onChanged={bets.reload} />}
+      </details>
     </div>
   )
+}
+
+function ResearchArea({ sport, date, origin, raceId, onDate, onChanged }: { sport: Sport; date: string; origin: ReturnType<typeof useOrigin>['origin']; raceId?: string; onDate: (date: string) => void; onChanged: () => void }) {
+  const races = useAsync(() => api.races(sport, date, origin), [sport, date, origin])
+  const ranks = useAsync(() => api.rankings(sport, date, origin), [sport, date, origin])
+  return <div className="space-y-5 border-t border-line p-4">
+    <RankingStrip sport={sport} data={ranks.data} loading={ranks.loading} error={ranks.error} />
+    <div className="grid gap-5 lg:grid-cols-[300px_1fr]">
+      <div className={`min-w-0 ${raceId ? 'hidden lg:block' : ''}`}>
+        <Section title="レース一覧" right={<span className="num text-xs text-muted">{races.data?.length ?? 0}R</span>}>
+          {races.error ? <ErrorState error={races.error} onRetry={races.reload} /> : !races.data ? <Loading rows={6} /> : races.data.length === 0 ? <Empty>この日のレースはありません。<br /><span className="text-xs">データ未取得の可能性もあります（データ収集画面で確認）。</span></Empty> : <RaceList races={races.data} sport={sport} selected={raceId} />}
+        </Section>
+      </div>
+      <div className={`min-w-0 ${raceId ? '' : 'hidden lg:block'}`}>
+        {raceId ? <RacePanel key={raceId} raceId={raceId} sport={sport} onDate={onDate} onChanged={() => { races.reload(); ranks.reload(); onChanged() }} /> : <div className="card"><Empty>レースを選択してください。</Empty></div>}
+      </div>
+    </div>
+  </div>
+}
+
+export function filterBetsByDate(bets: Bet[], date: string) { return bets.filter((bet) => bet.raceDate === date) }
+
+function PurchasedRaces({ bets, date, loading, error, onRetry }: { bets: Bet[] | null; date: string; loading: boolean; error: Error | null; onRetry: () => void }) {
+  const grouped = new Map<string, Bet[]>()
+  for (const bet of filterBetsByDate(bets ?? [], date)) grouped.set(bet.raceId, [...(grouped.get(bet.raceId) ?? []), bet])
+  return <Section title="購入したレース" right={<span className="text-xs text-muted">{date}・仮想購入レビュー</span>}>
+    {error ? <ErrorState error={error} onRetry={onRetry} /> : loading && !bets ? <Loading rows={2} /> : grouped.size === 0 ? <Empty>この日付の仮想購入はありません。日付を切り替えるか、レースを調べるから購入できます。</Empty> :
+      <div className="divide-y divide-line">{[...grouped.values()].map((items) => <PurchasedRace key={items[0].raceId} bets={items} />)}</div>}
+  </Section>
+}
+
+export function PurchasedRace({ bets }: { bets: Bet[] }) {
+  const [reviewEnabled, setReviewEnabled] = useState(false)
+  return <article className="p-4">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex items-center gap-2"><SportIcon sport={bets[0].sport} className="h-4 w-4"/><h3 className="font-semibold">{bets[0].venueName ?? bets[0].raceId} {bets[0].raceNo != null ? `${bets[0].raceNo}R` : ''}</h3><OriginBadge origin={bets[0].dataOrigin}/></div>
+      <Link className="text-xs text-muted hover:text-ink" to={`/${bets[0].sport}/${bets[0].raceId}`}>出走表を見る →</Link>
+    </div>
+    <p className="mt-1 text-xs text-muted">{bets[0].raceDate ?? '日付不明'}・このレースの購入 {bets.length}件</p>
+    <div className="mt-3 space-y-2">{bets.map((bet) => <PurchaseSnapshot key={bet.id} bet={bet} />)}</div>
+    <details className="mt-3 rounded-lg border border-line" onToggle={(event) => { if (event.currentTarget.open) setReviewEnabled(true) }}>
+      <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted">購入後の結果レビューを開く</summary>
+      {reviewEnabled && <RaceOutcome bets={bets} />}
+    </details>
+  </article>
+}
+
+function PurchaseSnapshot({ bet: b }: { bet: Bet }) {
+  const label = b.status === 'open' ? '仮想購入・精算待ち' : b.status === 'void' ? '無効' : b.status === 'won' ? '的中（精算記録）' : '不的中（精算記録）'
+  return <div className="rounded-lg border border-line bg-raised/30 p-3">
+    <div className="flex flex-wrap items-center justify-between gap-2"><div className="font-mono text-sm font-semibold">{betTypeLabel[b.betType]} {b.selection}<span className="ml-2 rounded bg-raised px-1.5 py-0.5 font-sans text-[10px] text-muted">仮想・{b.mode === 'auto' ? '自動' : '手動'}</span></div><span className={`text-xs ${b.status === 'won' ? 'text-pos' : b.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{label}</span></div>
+    <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-4">
+      <span className="text-muted">購入時確率</span><span className="num">{pct(b.predictedProb)}</span>
+      <span className="text-muted">購入時オッズ</span><span className="num">{odds(b.oddsAtBet)}</span>
+      <span className="text-muted">購入時期待収益率</span><span className={`num ${tone(b.expectedRoi)}`}>{signedPct(b.expectedRoi)}</span>
+      <span className="text-muted">購入額 / 払戻 / 損益</span><span className="num">{b.stake.toLocaleString()}円 / {b.payout == null ? '記録なし' : `${b.payout.toLocaleString()}円`} / {b.profit == null ? '記録なし' : `${b.profit > 0 ? '+' : ''}${b.profit.toLocaleString()}円`}</span>
+      <span className="text-muted">購入時候補順位</span><span>{b.candidateRank == null ? '記録なし' : `${b.candidateRank}位 / ${b.candidateCount ?? '—'}件`}</span>
+    </div>
+  </div>
+}
+
+function RaceOutcome({ bets }: { bets: Bet[] }) {
+  const race = useAsync(() => api.race(bets[0].raceId), [bets[0].raceId])
+  const r = race.data
+  const winners = r?.entries.filter((e) => e.finishOrder === 1) ?? []
+  if (race.error) return <p className="border-t border-line p-3 text-xs text-warn">結果記録は利用できません。このエラーから勝敗を推定しません。</p>
+  if (!r) return <div className="border-t border-line p-3"><Loading rows={1}/></div>
+  return <div className="border-t border-line p-3">
+    <p className="text-xs text-muted">{r.raceDate}・{t().status[r.status]}　{r.dataOrigin === 'sample' ? 'サンプル結果（実績評価には含めません）' : '保存済みレース記録'}</p>
+    <div className="mt-2 space-y-2">{bets.map((b) => {
+      const entry = b.betType === 'win' ? r.entries.find((e) => String(e.number) === b.selection) : undefined
+      const payout = r.payouts.find((p) => p.betType === b.betType && p.selection === b.selection)
+      const topThree = [1, 2, 3].map((place) => r.entries.filter((e) => e.finishOrder === place))
+      const finish = topThree.every((place) => place.length === 1)
+        && new Set(topThree.map((place) => place[0].number)).size === 3
+        ? topThree.map((place) => String(place[0].number)) : null
+      const outcome = entry ? `${entry.finishOrder == null ? '選択の着順は未記録' : `選択は${entry.finishOrder}着`}${winners.length ? `。記録上の1着は${winners.map((e) => `${e.number}番`).join('、')}` : '。1着記録なし'}`
+        : b.betType === 'trifecta' && finish ? `記録上の上位着順 ${finish.join('-')}。選択 ${b.selection} と照合${finish.join('-') === b.selection ? '一致' : '不一致'}`
+          : winners.length ? `記録上の1着は${winners.map((e) => `${e.number}番`).join('、')}。選択の完全な着順記録はありません` : '公式着順記録なし'
+      const breakEven = b.oddsAtBet != null && b.oddsAtBet > 0 ? `損益分岐確率は ${(100 / b.oddsAtBet).toFixed(1)}%。` : '購入時オッズがなく損益分岐比較はできません。'
+      const modelChance = b.predictedProb == null ? '購入時確率なし。' : `購入時確率${(b.predictedProb * 100).toFixed(1)}%なら、補数は不的中確率${((1 - b.predictedProb) * 100).toFixed(1)}%です。これはモデルの推定であり個別結果の保証ではありません。`
+      let explanation: string
+      if (b.status === 'void') explanation = `保存状態は無効です。返還や払戻を推測しません${b.payout == null ? '（払戻記録なし）' : `。保存払戻 ${b.payout.toLocaleString()}円`}`
+      else if (b.status === 'won') explanation = `保存された精算状態は的中。${outcome}。払戻 ${b.payout == null ? '記録なし' : `${b.payout.toLocaleString()}円`}${payout ? `（公式記録 ${payout.payout.toLocaleString()}円/100円）` : '（公式払戻記録なし）'}。${breakEven}${modelChance}`
+      else if (b.status === 'lost') explanation = `保存された精算状態は不的中。${outcome}。${breakEven}${modelChance} 個別の不的中から原因は特定できません。`
+      else explanation = `精算状態は未確定。観測記録: ${outcome}。該当払戻記録${payout ? `あり（${payout.payout.toLocaleString()}円/100円）` : 'なし'}。${breakEven}${modelChance}`
+      return <p key={b.id} className="rounded bg-raised/30 p-2 text-xs leading-relaxed"><span className="font-medium">{betTypeLabel[b.betType]} {b.selection}:</span> {explanation}</p>
+    })}</div>
+    <p className="mt-2 text-[11px] leading-relaxed text-muted">購入時記録と結果・払戻の観測事実を照合しています。予測確率は期待値の見積りで、結果の因果説明ではありません。情報がない場合は欠損として扱います。</p>
+  </div>
 }
 
 function RankingStrip({ sport, data, loading, error }: { sport: Sport; data: RankingCandidate[] | null; loading: boolean; error: Error | null }) {
