@@ -154,5 +154,11 @@ export interface CollectionStatus {
   errors: { at: string; source: string; error: string }[];
   qualityExclusions?: { at: string; source: string; count: number; reason: string }[];
   tableCounts: Record<string, number>;
-  freeTier: { d1RowsApprox: number; d1RowLimitNote: string };
+  d1WriteBudget: {
+    date: string; limit: number; essentialLimit: number; optionalLimit: number; oddsLimit: number;
+    reserved: number | null; essentialReserved: number | null; optionalReserved: number | null; oddsReserved: number | null;
+    remaining: number | null; essentialRemaining: number | null; optionalRemaining: number | null;
+    state: 'known' | 'exhausted' | 'missing' | 'invalid';
+  };
+  freeTier: { d1RowsApprox: number; d1RowsNote: string };
 }

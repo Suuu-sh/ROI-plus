@@ -6,7 +6,7 @@ import { candidate, betId, payoutYen, settleValues, validateYenStake } from './s
 import { collectOdds } from './services/collectBoatraceOdds.js';
 import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
-import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, seedUnknownWriteBudget, utcDate, type IngestTable } from './services/writeBudget.js';
+import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, seedUnknownWriteBudget, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
 interface Env { DB: Db; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; PROXY_TOKEN?: string; }
@@ -68,7 +68,8 @@ app.use('*', async (c, next) => {
 const now = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
 const ODDS_MAX_AGE_MS = 10 * 60 * 1000;
 const oddsFreshAfter = () => new Date(Date.now() - ODDS_MAX_AGE_MS + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
-const reserveWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'worker');
+const reserveWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'essential');
+const reserveOptionalWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'optional');
 const validSport = (v: string | null): v is Sport => v === 'horse' || v === 'boat';
 const originFilter = (v: string | null | undefined) => v === 'sample' || v === 'real' ? v : null;
 const jsonError = (c: any, message: string, status = 400) => c.json({ error: message }, status);
@@ -83,6 +84,12 @@ function auth(c: any) { const token = c.env.INGEST_TOKEN; return !!token && c.re
 function parseList(body: unknown): Record<string, unknown>[] | null {
   const rows = Array.isArray(body) ? body : body && typeof body === 'object' && Array.isArray((body as any).items) ? (body as any).items : null;
   return rows && rows.every((x: unknown) => x && typeof x === 'object' && !Array.isArray(x)) ? rows as Record<string, unknown>[] : null;
+}
+const jstRaceDate = (date = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+function raceDateWindow() {
+  const today = jstRaceDate(), yesterday = new Date(`${today}T00:00:00+09:00`);
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  return new Set([today, jstRaceDate(yesterday)]);
 }
 const ingestTables: Record<string,{table:string; required:string[]; conflict:string}> = {
   venues:{table:'venues',required:['id','sport','name'],conflict:'id'},
@@ -122,6 +129,7 @@ async function ingest(c: any, name: string) {
   if (!auth(c)) return jsonError(c, 'unauthorized', 401);
   const config = ingestTables[name], rows = parseList(await c.req.json().catch(()=>null));
   if (!config || !rows || rows.length > 500 || rows.some(r => config.required.some(k => r[k] === undefined))) return jsonError(c, 'invalid payload (maximum 500 rows)');
+  if ((name === 'venues' && rows.length > 50) || (name === 'models' && rows.length > 20)) return jsonError(c, 'small reference/model batches only');
   const table = config.table, allowed = allowedColumns[table], updates = updateColumns[table];
   const db: Db = c.env.DB, statements: Statement[] = [];
   if (['entries','odds_snapshots','results','payouts','predictions','ticket_predictions'].includes(table)) {
@@ -131,8 +139,49 @@ async function ingest(c: any, name: string) {
       if (Number(quarantined?.count??0)>0) return jsonError(c, 'source data for a quarantined race cannot be ingested');
     }
   }
-  const changedByTable: Partial<Record<IngestTable, number>> = {};
-  let sideEffectRows = 0;
+  const currentWindow = raceDateWindow();
+  const rowCategory = new Map<Record<string, unknown>, WriteCategory>();
+  // Historical backfill is disabled at the API boundary. Date classification
+  // comes from the persisted race row where available, never a client priority claim.
+  for (const row of rows) {
+    let raceDate: string | null = null;
+    let raceId: string | null = null;
+    if (table === 'races') {
+      raceId = typeof row.id === 'string' ? row.id : null;
+      const existing = raceId ? await first<any>(db, 'SELECT race_date,data_origin FROM races WHERE id=?', raceId) : null;
+      if (raceId && await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',raceId)) return jsonError(c, 'race is quarantined by a source-repair audit');
+      if (existing && row.race_date !== undefined && row.race_date !== existing.race_date) return jsonError(c, 'race date cannot be changed for an existing race', 409);
+      if (existing && row.data_origin !== existing.data_origin) return jsonError(c, 'ingest data origin must match the persisted race', 409);
+      raceDate = typeof existing?.race_date === 'string' ? existing.race_date : typeof row.race_date === 'string' ? row.race_date : null;
+    } else if (['entries','odds_snapshots','results','payouts','predictions','ticket_predictions'].includes(table)) {
+      raceId = typeof row.race_id === 'string' ? row.race_id : null;
+      const race = raceId ? await first<any>(db, 'SELECT race_date,data_origin FROM races WHERE id=?', raceId) : null;
+      raceDate = typeof race?.race_date === 'string' ? race.race_date : null;
+      if (!raceDate) return jsonError(c, 'ingest race must already exist', 409);
+      if (row.data_origin !== race.data_origin) return jsonError(c, 'ingest data origin must match the persisted race', 409);
+    } else if (table === 'collection_runs') {
+      raceDate = typeof row.target_date === 'string' ? row.target_date : null;
+    }
+    const openBet = raceId && ['races','entries','results','payouts'].includes(table)
+      ? await first<any>(db, `SELECT 1 FROM bets b JOIN races r ON r.id=b.race_id AND r.data_origin=b.data_origin WHERE b.race_id=? AND b.status='open' AND ${nonQuarantinedBet('b')} LIMIT 1`, raceId)
+      : null;
+    const earliestAcceptedDate = [...currentWindow].sort()[0];
+    if (raceDate && raceDate < earliestAcceptedDate && !openBet) {
+      return c.json({ error: 'historical ingest is disabled; only today/yesterday data and open-bet settlement inputs are accepted', code: 'historical_ingest_disabled' }, 409);
+    }
+    const currentRaceData = !!raceDate && currentWindow.has(raceDate);
+    let category: WriteCategory = 'optional';
+    if (openBet) category = 'essential';
+    else if (currentRaceData && ['races','entries','results','payouts'].includes(table)) category = 'essential';
+    else if (currentRaceData && ['predictions','ticket_predictions'].includes(table)) {
+      const modelId = row.model_id;
+      const model = typeof modelId === 'string' ? await first<any>(db, 'SELECT status FROM models WHERE id=?', modelId) : null;
+      if (model?.status === 'active') category = 'essential';
+    }
+    rowCategory.set(row, category);
+  }
+  const changedByCategory: Record<'essential' | 'optional', Partial<Record<IngestTable, number>>> = { essential: {}, optional: {} };
+  const sideEffectsByCategory: Record<'essential' | 'optional', number> = { essential: 0, optional: 0 };
   for (const row of rows) {
     if (table === 'races' && await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',row.id)) return jsonError(c, 'race is quarantined by a source-repair audit');
     const generatedUpdatedAt = table === 'races' && row.updated_at === undefined;
@@ -183,7 +232,8 @@ async function ingest(c: any, name: string) {
     }
     if (changed) {
       const ingestTable = table as IngestTable;
-      changedByTable[ingestTable] = (changedByTable[ingestTable] ?? 0) + 1;
+      const category = rowCategory.get(row) === 'essential' ? 'essential' : 'optional';
+      changedByCategory[category][ingestTable] = (changedByCategory[category][ingestTable] ?? 0) + 1;
     }
     const updateSet = updateCols.map(k=>`${k}=excluded.${k}`);
     if (table === 'races' && cols.includes('status')) updateSet[updateSet.indexOf('status=excluded.status')] = "status=CASE WHEN races.status IN ('finished','cancelled') THEN races.status ELSE excluded.status END";
@@ -199,11 +249,19 @@ async function ingest(c: any, name: string) {
   if (name === 'payouts' || name === 'results') {
     for (const id of new Set(rows.map(r => String(r.race_id)))) {
       const race = await first<any>(db, "SELECT 1 FROM races WHERE id=? AND status NOT IN ('finished','cancelled')", id);
-      if (race) { statements.push(db.prepare("UPDATE races SET status='finished' WHERE id=? AND status NOT IN ('finished','cancelled')").bind(id)); sideEffectRows++; }
+      if (race) { statements.push(db.prepare("UPDATE races SET status='finished' WHERE id=? AND status NOT IN ('finished','cancelled')").bind(id));
+        const category = rowCategory.get(rows.find(r => String(r.race_id) === id)!) === 'essential' ? 'essential' : 'optional';
+        sideEffectsByCategory[category]++; }
     }
   }
-  const changedRows = Object.values(changedByTable).reduce((sum, count) => sum + (count ?? 0), 0) + sideEffectRows;
-  if (changedRows > 0 && !await reserveWriteBudget(db, utcDate(), estimateIngestWriteUnits(changedByTable, sideEffectRows), 'ingest')) {
+  const changedRows = (Object.values(changedByCategory.essential).reduce((sum, count) => sum + (count ?? 0), 0) +
+    Object.values(changedByCategory.optional).reduce((sum, count) => sum + (count ?? 0), 0) + sideEffectsByCategory.essential + sideEffectsByCategory.optional);
+  const reservations = (['essential','optional'] as const).flatMap(category => {
+    const counts = changedByCategory[category], sideEffects = sideEffectsByCategory[category];
+    const rowsInCategory = Object.values(counts).reduce((sum, count) => sum + (count ?? 0), 0) + sideEffects;
+    return rowsInCategory > 0 ? [{ units: estimateIngestWriteUnits(counts, sideEffects), category }] : [];
+  });
+  if (reservations.length && !await reserveWriteBudgets(db, utcDate(), reservations)) {
     const budget = await readWriteBudget(db);
     return c.json({ error: 'daily D1 write budget unavailable or exhausted', code: budget.state === 'missing' || budget.state === 'invalid' ? 'd1_write_budget_unavailable' : 'd1_write_budget_exhausted', budget }, 429);
   }
@@ -333,7 +391,7 @@ async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false, trifectaO
   const cutoff=new Date(Date.now()-30*86400000).toISOString();
   const oldRows=await first<any>(db, `SELECT COUNT(*) count FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at)`, cutoff);
   const cleanupCount=Math.min(10,Number(oldRows?.count??0));
-  if(cleanupCount>0&&await reserveWorkerWrites(db,cleanupCount)) await run(db, `DELETE FROM odds_snapshots WHERE rowid IN (SELECT rowid FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at) LIMIT 10)`, cutoff).catch(()=>{});
+  if(cleanupCount>0&&await reserveOptionalWorkerWrites(db,cleanupCount)) await run(db, `DELETE FROM odds_snapshots WHERE rowid IN (SELECT rowid FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at) LIMIT 10)`, cutoff).catch(()=>{});
   return {settled,bought};
 }
 app.get('/health', async c=>c.json({ok:true,service:'edgelab-api',d1WriteBudget:await readWriteBudget(c.env.DB)}));
@@ -736,7 +794,7 @@ app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,
  });
  const errors=classified.filter(r=>(r.status==='failed'||r.status==='partial') && (r.error||!r.quality.length)).slice(0,50).map(r=>({at:r.started_at,source:r.source,error:r.error??r.reason??r.status}));
  const qualityExclusions=classified.filter(r=>r.quality.length).slice(0,50).map(r=>({at:r.started_at,source:r.source,count:r.quality.length,reason:r.quality.join(' | ')}));
- return c.json({sources,errors,qualityExclusions,tableCounts,freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowLimitNote:'D1 無料枠: 保存容量 5GB、日次読取 500万行、日次書込 10万行。件数はテーブル行数の合計で概算。'}});
+ return c.json({sources,errors,qualityExclusions,tableCounts,d1WriteBudget:await readWriteBudget(db),freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowsNote:'合計は保存中のテーブル行数の概算で、Cloudflareアカウント全体のquota使用量ではありません。'}});
 });
 for(const route of Object.keys(ingestTables)) app.post(`/ingest/${route}` as any,c=>ingest(c,route));
 app.get('/ingest/models',async c=>{

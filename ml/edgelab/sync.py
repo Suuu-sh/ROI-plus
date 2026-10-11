@@ -22,7 +22,10 @@ ENDPOINTS = {
     "models": "models",
     "collection_runs": "collection-runs",
 }
-SEND_ORDER = ("venues", "races", "results", "payouts", "entries", "odds_snapshots", "models", "predictions", "ticket_predictions", "collection_runs")
+# Keep required current-day facts ahead of optional payloads. Parent rows are
+# first, and model lifecycle state must arrive before predictions.
+SEND_ORDER = ("venues", "races", "models", "results", "payouts", "entries",
+              "predictions", "ticket_predictions", "odds_snapshots", "collection_runs")
 
 
 class WriteBudgetRefused(RuntimeError):

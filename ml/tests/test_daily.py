@@ -19,11 +19,11 @@ def _store():
         "results": [{"race_id": x, "number": 1} for x in ("prev", "older")],
         "payouts": [{"race_id": x, "bet_type": "win", "selection": "1"} for x in ("prev", "older")],
         "predictions": [], "models": [],
-        "collection_runs": [{"id": "today-run", "sport": "boat", "target_date": "2026-10-09"}],
+        "collection_runs": [{"id": "today-run", "sport": "boat", "target_date": "2026-10-09", "status": "success"}],
     }
 
 
-def test_daily_sync_is_limited_to_today_and_previous_day_and_backfill_error_is_soft(monkeypatch):
+def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_backfill(monkeypatch):
     store = _store()
     # Midday/night K data may already have today's results and payout available.
     store["results"].append({"race_id": "today", "number": 1, "finish_order": 1, "data_origin": "real"})
@@ -38,7 +38,6 @@ def test_daily_sync_is_limited_to_today_and_previous_day_and_backfill_error_is_s
     monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
     monkeypatch.setattr(cli, "_predict_boat_date", lambda rows, day, cutoff: [{"race_id": "today"}])
     monkeypatch.setattr("edgelab.sync.sync_rows", lambda payload: synced.update(payload) or {"ok": True})
-    monkeypatch.setattr("edgelab.backfill_sync.run", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("wrangler unavailable")))
 
     result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
 
@@ -49,8 +48,32 @@ def test_daily_sync_is_limited_to_today_and_previous_day_and_backfill_error_is_s
     assert {row["race_id"] for row in synced["results"]} == {"prev", "today"}
     assert {row["race_id"] for row in synced["payouts"]} == {"prev", "today"}
     assert synced["predictions"] == [{"race_id": "today"}]
-    assert result["backfill"]["skipped"] is True
-    assert "wrangler unavailable" in result["backfill"]["reason"]
+    assert result["daily_collection_success"] is True
+    assert result["forecast_ready"] is True
+    assert result["forecast_status"] == "ready"
+    assert result["forecast_reason"] is None
+
+
+def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monkeypatch):
+    store = _store()
+    synced = {}
+    monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(store))
+    monkeypatch.setattr(cli, "save_rows", lambda value: None)
+    monkeypatch.setattr(cli, "collect_boat", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: [])
+    monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
+    monkeypatch.setattr(cli, "_predict_boat_date",
+                        lambda *args: (_ for _ in ()).throw(RuntimeError("no active model in authoritative local registry")))
+    monkeypatch.setattr("edgelab.sync.sync_rows", lambda payload: synced.update(payload) or {"ok": True})
+
+    result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
+
+    assert result["daily_collection_success"] is True
+    assert result["forecast_ready"] is False
+    assert result["forecast_status"] == "not_ready"
+    assert result["forecast_reason"] == "RuntimeError: no active model in authoritative local registry"
+    assert {row["race_id"] for row in synced["results"]} == {"prev"}
+    assert synced["predictions"] == []
 
 
 def test_predict_requires_artifact_even_if_model_exists(tmp_path):
