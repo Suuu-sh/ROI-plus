@@ -501,6 +501,10 @@ describe('EdgeLab API',()=>{
   makeRace('boat-20990102-01-05','finished',null,'2099-01-02');
   makeRace('boat-20990103-01-06','finished',null,'2099-01-03');
   makeRace('boat-20990103-01-07','cancelled',null,'2099-01-03');
+  const elapsedPostTime=jstIso(Date.now()-60_000);
+  makeRace('boat-20990104-01-08','closed',elapsedPostTime,'2099-01-04');
+  makeRace('boat-20990105-01-09','scheduled',elapsedPostTime,'2099-01-05');
+  makeRace('boat-20990106-01-10','scheduled','not-a-timestamp','2099-01-06');
   sqlite.prepare("UPDATE entries SET features_json='{\"finish_code\":\"失格\"}' WHERE race_id='boat-20990103-01-06' AND number=1").run();
   sqlite.prepare("INSERT INTO results(race_id,finish_order,number,data_origin) VALUES('boat-20990101-01-03',1,1,'real'),('boat-20990101-01-03',2,2,'real'),('boat-20990101-01-04',1,1,'real'),('boat-20990101-01-04',2,2,'real')").run();
   sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,popularity,data_origin) VALUES('boat-20990101-01-04','win','1',230,1,'real')").run();
@@ -525,6 +529,9 @@ describe('EdgeLab API',()=>{
   expect(byId['boat-20990102-01-05-bet'].resultWaitReason).toBe('officialresultmissing');
   expect(byId['boat-20990103-01-06-bet'].resultWaitReason).toBe('disqualified');
   expect(byId['boat-20990103-01-07-bet'].resultWaitReason).toBe('cancelled');
+  expect(byId['boat-20990104-01-08-bet'].resultWaitReason).toBe('officialresultmissing');
+  expect(byId['boat-20990105-01-09-bet'].resultWaitReason).toBe('officialresultmissing');
+  expect(byId['boat-20990106-01-10-bet'].resultWaitReason).toBe('unknown');
   expect(byId['sample-wait-bet'].resultWaitReason).toBe('sampledata');
  });
 });
