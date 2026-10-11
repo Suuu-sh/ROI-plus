@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { ModelInfo, Overview, Sport } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
@@ -13,12 +14,12 @@ import { Empty, ErrorState, Kpi, Loading, Section, SportIcon } from '../componen
 export function OverviewPage() {
   const { origin } = useOrigin()
   const all = useAsync(() => Promise.all([
-    api.overview(origin), api.overview(origin, 'horse'), api.overview(origin, 'boat'), api.models(), api.bets(origin),
+    api.overview(origin), api.bets(origin),
   ]), [origin])
 
   if (all.error) return <div className="card"><ErrorState error={all.error} onRetry={all.reload} /></div>
   if (!all.data) return <div className="card"><Loading rows={5} /></div>
-  const [ov, horse, boat, models, bets] = all.data
+  const [ov, bets] = all.data
 
   return (
     <div className="space-y-5">
@@ -42,13 +43,28 @@ export function OverviewPage() {
         </div>
       </Section>
 
-      <SportComparison horse={horse} boat={boat} models={models} origin={origin} />
+      <LazySportComparison origin={origin} />
 
       <Section title="最近の仮想購入" right={<Link to="/performance" className="text-xs text-accent hover:underline">成績の詳細 →</Link>}>
         <BetsTable bets={bets} limit={8} />
       </Section>
     </div>
   )
+}
+
+function LazySportComparison({ origin }: { origin: OriginFilter }) {
+  const [open, setOpen] = useState(false)
+  return <details className="card" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary className="cursor-pointer px-4 py-3 text-sm font-semibold">競馬 vs ボートレースを比較</summary>
+    {open && <SportComparisonData origin={origin} />}
+  </details>
+}
+
+function SportComparisonData({ origin }: { origin: OriginFilter }) {
+  const q = useAsync(() => Promise.all([api.overview(origin, 'horse'), api.overview(origin, 'boat'), api.models()]), [origin])
+  if (q.error) return <ErrorState error={q.error} onRetry={q.reload} />
+  if (!q.data) return <Loading rows={2} />
+  return <SportComparison horse={q.data[0]} boat={q.data[1]} models={q.data[2]} origin={origin} />
 }
 
 function SportComparison({ horse, boat, models, origin }: { horse: Overview; boat: Overview; models: ModelInfo[]; origin: OriginFilter }) {

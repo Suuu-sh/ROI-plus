@@ -11,7 +11,21 @@ export class ApiError extends Error {
   constructor(status: number, message: string) { super(message); this.status = status }
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+const pendingReads = new Map<string, Promise<unknown>>()
+
+// Share concurrent reads (including StrictMode effects), never cache settled purchase data.
+function req<T>(path: string, init?: RequestInit): Promise<T> {
+  if (init?.method && init.method !== 'GET') return fetchJson<T>(path, init)
+  const existing = pendingReads.get(path)
+  if (existing) return existing as Promise<T>
+  const request = fetchJson<T>(path, init).finally(() => {
+    if (pendingReads.get(path) === request) pendingReads.delete(path)
+  })
+  pendingReads.set(path, request)
+  return request
+}
+
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}/api${path}`, {
     ...init,
     redirect: 'manual',
