@@ -1,4 +1,5 @@
 import json
+from io import BytesIO
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -81,7 +82,7 @@ def test_sync_prioritizes_parent_rows_then_results_and_payouts_before_entries(mo
 
 
 @pytest.mark.parametrize("table", [
-    "results", "entries", "odds_snapshots", "predictions", "ticket_predictions",
+    "results", "odds_snapshots", "predictions", "ticket_predictions",
 ])
 def test_race_related_ingests_chunk_at_50_rows(monkeypatch, table):
     payload_sizes = []
@@ -99,7 +100,7 @@ def test_race_related_ingests_chunk_at_50_rows(monkeypatch, table):
     assert len(result[table]) == 3
 
 
-@pytest.mark.parametrize("table", ["races", "payouts"])
+@pytest.mark.parametrize("table", ["races", "payouts", "entries"])
 def test_sequential_lookup_ingests_use_smaller_chunks(monkeypatch, table):
     payload_sizes = []
 
@@ -161,13 +162,14 @@ def test_ingest_does_not_retry_non_timeout_or_repeat_timeout(monkeypatch):
     assert len(requests) == 2
 
 
-def test_ingest_retries_one_transient_worker_503_but_keeps_429_fail_closed(monkeypatch):
+@pytest.mark.parametrize("status", [500, 503])
+def test_ingest_retries_one_transient_worker_5xx_but_keeps_429_fail_closed(monkeypatch, status):
     requests = []
 
     def unavailable_then_accept(req, **_kwargs):
         requests.append(req.data)
         if len(requests) == 1:
-            raise HTTPError(req.full_url, 503, "Service Unavailable", {}, None)
+            raise HTTPError(req.full_url, status, "Worker Error", {}, None)
         return _Response({"upserted": 1, "changed": 0})
 
     monkeypatch.setattr(sync, "urlopen", unavailable_then_accept)
@@ -182,13 +184,24 @@ def test_ingest_retries_one_transient_worker_503_but_keeps_429_fail_closed(monke
 
     def repeated_unavailable(req, **_kwargs):
         requests.append(req.data)
-        raise HTTPError(req.full_url, 503, "Service Unavailable", {}, None)
+        raise HTTPError(req.full_url, status, "Worker Error", {}, None)
 
     monkeypatch.setattr(sync, "urlopen", repeated_unavailable)
-    with pytest.raises(RuntimeError, match="HTTP 503"):
+    with pytest.raises(RuntimeError, match=f"HTTP {status}"):
         sync.sync_rows({"payouts": [{"id": "payout"}]},
                        base_url="https://example.test", token="t")
     assert len(requests) == 2
+
+
+def test_ingest_error_diagnostic_includes_only_whitelisted_api_code(monkeypatch):
+    def refused(req, **_kwargs):
+        body = json.dumps({"code": "d1_write_budget_exhausted", "error": "private detail must not escape"}).encode()
+        raise HTTPError(req.full_url, 409, "Conflict", {}, BytesIO(body))
+
+    monkeypatch.setattr(sync, "urlopen", refused)
+    with pytest.raises(RuntimeError, match=r"HTTP 409 \(code: d1_write_budget_exhausted\)") as exc:
+        sync.sync_rows({"entries": [{"id": "entry"}]}, base_url="https://example.test", token="t")
+    assert "private detail" not in str(exc.value)
 
 
 @pytest.mark.parametrize("table", ["venues", "models", "collection_runs"])
