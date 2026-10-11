@@ -44,25 +44,49 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = MAX_TARG
     new Date(now.getTime()-5*60_000).toISOString(), Math.min(MAX_TARGETS, Math.max(0, Math.floor(maximum))));
 }
 
+type FetchFailureCode = 'http-status' | 'http-redirect-rejected' | 'body-missing' | 'body-too-large' | 'body-read-failed' | 'utf8-rejected' | 'hash-failed' | 'fetch-timeout' | 'fetch-rejected';
+type FetchFailure = { code:FetchFailureCode; httpStatus?:number };
+class ResultFetchFailure extends Error {
+  constructor(readonly diagnostic:FetchFailure) { super(diagnostic.code); }
+}
+const failure = (code:FetchFailureCode,httpStatus?:number) => new ResultFetchFailure({code,...(httpStatus===undefined?{}:{httpStatus})});
+function safeFetchFailure(error:unknown):FetchFailure {
+  if(error instanceof ResultFetchFailure)return error.diagnostic;
+  const name=error && typeof error==='object' && 'name' in error?error.name:undefined;
+  return {code:name==='TimeoutError'||name==='AbortError'?'fetch-timeout':'fetch-rejected'};
+}
 async function readBody(response: Response): Promise<{ html: string; sha256: string }> {
-  if (!response.ok || !response.body) throw new Error('official result unavailable');
+  // workerd supports manual/follow only, not redirect:error. Manual makes
+  // HTTP redirects visible and rejects them without another network request.
+  if(response.status>=300&&response.status<400)throw failure('http-redirect-rejected',response.status);
+  if(!response.ok)throw failure('http-status',response.status);
+  if(!response.body)throw failure('body-missing',response.status);
   const declared = Number(response.headers.get('content-length'));
-  if (declared > BODY_LIMIT) throw new Error('official result body too large');
-  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
-  let size = 0;
+  if(declared>BODY_LIMIT)throw failure('body-too-large',response.status);
+  const chunks:Uint8Array[]=[];
+  let size=0;
   try {
-    while (true) {
-      const part = await reader.read();
-      if (part.done) break;
-      size += part.value.length;
-      if (size > BODY_LIMIT) throw new Error('official result body too large');
-      chunks.push(part.value);
-    }
-  } finally { await reader.cancel().catch(()=>undefined); }
-  const bytes = new Uint8Array(size); let offset=0;
-  for (const chunk of chunks) { bytes.set(chunk,offset);offset+=chunk.length; }
-  const hash = await crypto.subtle.digest('SHA-256', bytes);
-  return {html:new TextDecoder('utf-8',{fatal:true}).decode(bytes),sha256:Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,'0')).join('')};
+    const reader=response.body.getReader();
+    try {
+      while(true) {
+        const part=await reader.read();
+        if(part.done)break;
+        size+=part.value.length;
+        if(size>BODY_LIMIT)throw failure('body-too-large',response.status);
+        chunks.push(part.value);
+      }
+    } finally { await reader.cancel().catch(()=>undefined); }
+  } catch(error) {
+    if(error instanceof ResultFetchFailure)throw error;
+    throw failure('body-read-failed',response.status);
+  }
+  const bytes=new Uint8Array(size);let offset=0;
+  for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+  let html:string;
+  try {html=new TextDecoder('utf-8',{fatal:true}).decode(bytes);} catch {throw failure('utf8-rejected',response.status);}
+  let hash:ArrayBuffer;
+  try {hash=await crypto.subtle.digest('SHA-256',bytes);} catch {throw failure('hash-failed',response.status);}
+  return {html,sha256:Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,'0')).join('')};
 }
 
 export async function collectResults(db: Db, now: Date, opts: CollectResultsOptions = {}) {
@@ -86,10 +110,12 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
   if (!lock.meta?.changes) return skipped;
   const fetcher=opts.fetch ?? ((input,init)=>fetch(input,init)),sleep=opts.sleep ?? pause;
   let attempted=0,records=0,failed=0,verified=0;
+  const fetchFailures:Array<FetchFailure & {count:number}>=[];
   for (const [index,race] of targets.entries()) {
     if (budget.used>=budget.max) break;
     const url=resultUrl(race),startedAt=new Date(now.getTime()+index).toISOString();
     let sha256:string|null=null,reason='official-result-unavailable';
+    let fetchFailure:FetchFailure|undefined;
     try {
       if (!/^boat-\d{8}-\d{2}-\d{2}$/.test(race.id)
           ||race.id!==`boat-${race.race_date.replaceAll('-','')}-${race.venue_id}-${String(race.race_no).padStart(2,'0')}`) throw new Error('persisted race identity mismatch');
@@ -109,11 +135,16 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         if(budget.used>0)await sleep(3000);
         budget.used++;attempted++;
         try {
-          const response=await fetcher(url,{headers:{'User-Agent':USER_AGENT,'Accept':'text/html'},redirect:'error',signal:AbortSignal.timeout(8000)});
+          const response=await fetcher(url,{headers:{'User-Agent':USER_AGENT,'Accept':'text/html'},redirect:'manual',signal:AbortSignal.timeout(8000)});
           body=await readBody(response);break;
-        } catch { /* one bounded network retry; parse failures are not retried */ }
+        } catch(error) {
+          fetchFailure=safeFetchFailure(error);
+          const prior=fetchFailures.find(x=>x.code===fetchFailure!.code&&x.httpStatus===fetchFailure!.httpStatus);
+          if(prior)prior.count++;else fetchFailures.push({...fetchFailure,count:1});
+          // One bounded fetch/read retry; parser failures are not retried.
+        }
       }
-      if(!body)throw new Error('official result unavailable');
+      if(!body){reason=fetchFailure?.code ?? 'official-result-unavailable';throw new Error('official result unavailable');}
       sha256=body.sha256;
       reason='official-page-identity-or-outcome-rejected';
       const parsed=parseBoatraceResults(body.html,{url,raceDate:race.race_date,venueCode:race.venue_id,raceNo:race.race_no,entries});
@@ -145,10 +176,10 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       failed++;
       // Safe static reason only: never log response body, runtime secrets, or
       // arbitrary upstream errors. Latest evidence only, one row per race.
-      await db.batch([logStatement(db,race,startedAt,'failed',0,{raceId:race.id,url,sha256,quality:'unavailable-or-unsupported',fetchedAt:new Date().toISOString(),reason})]);
+      await db.batch([logStatement(db,race,startedAt,'failed',0,{raceId:race.id,url,sha256,quality:'unavailable-or-unsupported',fetchedAt:new Date().toISOString(),reason,...(fetchFailure?{fetchFailure}:{})})]);
     }
   }
-  return {status:records?(failed?'partial' as const:'success' as const):'failed' as const,records,verified,targets:targets.length,attempted,failed};
+  return {status:records?(failed?'partial' as const:'success' as const):'failed' as const,records,verified,targets:targets.length,attempted,failed,fetchFailures};
 }
 function logStatement(db:Db,race:RaceTarget,startedAt:string,status:string,records:number,evidence:Record<string,unknown>,guardData?:string) {
   return db.prepare(`INSERT INTO collection_runs(id,source,sport,target_date,started_at,finished_at,status,records,error,reason)

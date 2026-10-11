@@ -171,7 +171,7 @@ npm -w apps/web run deploy
 - 着順／払戻／finished状態／成功証跡をD1 batchで原子的に保存する。各statement内でもrace identity・open実購入・隔離除外・6艇の登録番号・既存結果との一致を再確認し、fetch待ち中の状態変更を拒否する。既存結果・確定購入の修正、entry特徴量の変更、払戻の購入時オッズへの流用はしない。
 - `collection_runs` の source `boatrace-results-worker-v1`、固定ID `boat-result:<raceId>` で1レース1行の最新試行だけを保持する。reason JSONにrace ID、公式URL、取得時刻、本文SHA-256、品質状態、安全な固定失敗理由を保存し、本文・任意例外文は保存しない。これは出所記録であり署名ではない。購入一覧は固定race IDが一致する結果取得だけを表示する。
 
-成功結果は次の既存10分精算（通常は毎時10分）で照合する。安全なCronログ `boat-hourly-results` は状態・対象数・検証済みレース数・保存レコード数・fetch試行数・固定予算理由だけを記録し、本文や任意例外文は出さない。夜間B/K日次同期は維持し、学習用データ取得へ拡張しない。SPEC §2/§5のB/K採用・Worker結果照合のみという記述とは追加取得元・頻度の差分があり、SPECは変更していない。
+成功結果は次の既存10分精算（通常は毎時10分）で照合する。安全なCronログ `boat-hourly-results` は状態・対象数・検証済みレース数・保存レコード数・fetch試行数・固定予算理由、およびfetch失敗時の固定分類・HTTP status・件数だけを記録し、本文・応答ヘッダー・任意例外文は出さない。Workerのfetchは `redirect: manual` とし、3xxは追跡せず拒否する（workerdは `redirect: error` を受け付けない）。夜間B/K日次同期は維持し、学習用データ取得へ拡張しない。SPEC §2/§5のB/K採用・Worker結果照合のみという記述とは追加取得元・頻度の差分があり、SPECは変更していない。
 
 根拠: `apps/api/src/services/boatraceResults.ts`, `collectBoatraceResults.ts`, `apps/api/src/index.ts`。現行Cloudflareの [D1 per-invocation limits](https://developers.cloudflare.com/d1/platform/limits/) と [D1 batch](https://developers.cloudflare.com/d1/worker-api/d1-database/) を確認し、オッズ／精算の同時実行を結果専用回から分離した。
 

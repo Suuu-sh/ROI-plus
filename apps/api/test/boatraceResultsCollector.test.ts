@@ -109,6 +109,29 @@ describe('purchased real boat hourly results',()=>{
     expect(result).toMatchObject({targets:4,records:32,verified:4,attempted:4});
     expect(queries).toBe(33);expect(queries).toBeLessThan(50);
   });
+  it.each([
+    {code:'http-status',httpStatus:403,response:()=>new Response('private upstream body',{status:403})},
+    {code:'http-redirect-rejected',httpStatus:302,response:()=>new Response(null,{status:302,headers:{location:'https://evil.example/private'}})},
+    {code:'body-missing',httpStatus:204,response:()=>new Response(null,{status:204})},
+    {code:'body-too-large',httpStatus:200,response:()=>new Response('x',{headers:{'content-length':String(512*1024+1)}})},
+    {code:'utf8-rejected',httpStatus:200,response:()=>new Response(new Uint8Array([255]))},
+    {code:'body-read-failed',httpStatus:200,response:()=>new Response(new ReadableStream({start(controller){controller.error(new Error('private upstream error'));}}))},
+  ])('safe fetch diagnostics: $code do not follow redirects or leak upstream data',async scenario=>{
+    seed();const fetcher=vi.fn(async(_input:string,init?:RequestInit)=>{expect(init?.redirect).toBe('manual');return scenario.response();});
+    const result=await collectResults(DB,now,{fetch:fetcher,sleep:async()=>{}});
+    expect(result).toMatchObject({status:'failed',verified:0,attempted:2,fetchFailures:[{code:scenario.code,httpStatus:scenario.httpStatus,count:2}]});
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    const log=sqlite.prepare('SELECT reason FROM collection_runs').get() as {reason:string};
+    expect(JSON.parse(log.reason).fetchFailure).toEqual({code:scenario.code,httpStatus:scenario.httpStatus});
+    expect(JSON.stringify(result)+log.reason).not.toMatch(/private upstream|evil\.example|private upstream error/);
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:0});
+  });
+  it.each(['TimeoutError','TypeError'])('safe fetch diagnostics: rejected %s reveals only a fixed class',async name=>{
+    seed();const fetcher=vi.fn(async()=>{const error=new Error('sensitive arbitrary message');error.name=name;throw error;});
+    const result=await collectResults(DB,now,{fetch:fetcher,sleep:async()=>{}});
+    expect(result).toMatchObject({attempted:2,verified:0,fetchFailures:[{code:name==='TimeoutError'?'fetch-timeout':'fetch-rejected',count:2}]});
+    expect(JSON.stringify(result)).not.toContain('sensitive arbitrary message');
+  });
   it('keeps the flag off by default and only collects at hourly boundaries',async()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);const fetcher=vi.fn(fetchPage);vi.stubGlobal('fetch',fetcher);
     await worker.scheduled({cron:'* * * * *',scheduledTime:now.getTime()+60000} as ScheduledController,{DB,ENABLE_BOATRACE_RESULTS_SCRAPE:'true'});

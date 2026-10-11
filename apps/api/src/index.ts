@@ -956,7 +956,7 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
   if (env.ENABLE_BOATRACE_RESULTS_SCRAPE === 'true' && Math.floor(event.scheduledTime/60_000)%60===5) {
     try {
       const result=await collectResults(env.DB,new Date(),{requestBudget});
-      console.info(JSON.stringify({event:'boat-hourly-results',status:result.status,targets:result.targets,verified:result.verified,records:result.records,attempted:result.attempted,reason:'reason' in result?result.reason:null}));
+      console.info(JSON.stringify({event:'boat-hourly-results',status:result.status,targets:result.targets,verified:result.verified,records:result.records,attempted:result.attempted,reason:'reason' in result?result.reason:null,fetchFailures:'fetchFailures' in result?result.fetchFailures:[]}));
     } catch {
       console.info(JSON.stringify({event:'boat-hourly-results',status:'failed',reason:'hourly-pass-failed'}));
     }
