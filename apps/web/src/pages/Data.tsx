@@ -62,7 +62,7 @@ export function DataPage() {
                       <div>{dateTime(s.lastRunAt)}</div>
                       <div className="text-faint">成功記録 {dateTime(s.lastSuccessAt)}</div>
                     </td>
-                    <td className={`num px-2 py-2.5 text-right ${s.enabled && s.successRate != null && s.successRate < 0.9 ? 'text-warn' : ''}`}>{s.enabled ? pct(s.successRate, 0) : <span className="text-faint">—</span>}<div className="text-[10px] text-faint">{s.runs} 記録 · 品質除外 {s.qualityExclusions ?? 0} レース試行</div></td>
+                    <td className={`num px-2 py-2.5 text-right ${s.enabled && s.successRate != null && s.successRate < 0.9 ? 'text-warn' : ''}`}>{s.enabled ? pct(s.successRate, 0) : <span className="text-faint">—</span>}<div className="text-[10px] text-faint">{s.runs} 記録 · 品質除外（保存記録全体）{s.qualityExclusions ?? 0} レース試行</div></td>
                     <td className="num px-2 py-2.5 text-right">{s.records.toLocaleString()}</td>
                     <td className={`num px-4 py-2.5 text-xs ${s.enabled && (s.freshnessMinutes == null || s.freshnessMinutes > 60 * 48) ? 'text-warn' : ''}`}>{s.enabled ? freshness(s.freshnessMinutes) : <span className="text-faint">取得停止中</span>}</td>
                   </tr>
@@ -74,8 +74,8 @@ export function DataPage() {
         <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">表示時刻・記録成功率は保存された収集記録に基づきます。毎分の起動や未保存の試行をすべて表すものではありません。</p>
       </Section>
 
-      <Section title="品質チェックによる除外（直近）">
-        <p className="px-4 py-2 text-xs text-muted">{exclusions.reduce((n, row) => n + row.count, 0)} レース試行。通信失敗ではありません。基準外のオッズは保存せず、判定・購入に使いません。成功率から品質のみの除外試行を除きます。</p>
+      <Section title="品質チェックによる除外（直近1時間）">
+        <p className="px-4 py-2 text-xs text-muted">{exclusions.reduce((n, row) => n + row.count, 0)} レース試行。通信失敗ではありません。基準外のオッズは保存せず、判定・購入に使いません。成功率から品質のみの除外試行を除きます。1時間より古い品質のみの収集ログは定期的に削除します。</p>
         {exclusions.length === 0 ? <Empty>品質除外はありません。</Empty> : <ul className="divide-y divide-line">{exclusions.map((row, i) => (
           <li key={i} className="px-4 py-2.5 text-sm">
             <div className="flex justify-between text-xs text-muted"><span className="font-mono">{row.source} · {row.count} レース試行</span><span className="num">{dateTime(row.at)}</span></div>
