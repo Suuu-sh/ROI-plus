@@ -67,6 +67,15 @@ describe('EdgeLab API',()=>{
   expect((await req()).status).toBe(200); expect((await req()).status).toBe(200);
   expect(sqlite.prepare('SELECT COUNT(*) n FROM races WHERE id=?').get(race.id)).toMatchObject({n:1});
  });
+ it('persists collection run logs from their protected reserve when optional D1 budget is exhausted',async()=>{
+  const day=new Date().toISOString().slice(0,10);
+  sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:day,reserved:4_000,oddsReserved:0,essentialReserved:0,optionalReserved:4_000}));
+  const row={id:'collection-log-budget-test',source:'daily-sync',sport:'boat',target_date:day,started_at:`${day}T00:00:00Z`,status:'success',records:1};
+  const response=await app.request('/api/ingest/collection-runs',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify([row])},env());
+  expect(response.status).toBe(200); expect(await response.json()).toMatchObject({changed:1});
+  expect(sqlite.prepare('SELECT id,status FROM collection_runs WHERE id=?').get(row.id)).toMatchObject({id:row.id,status:'success'});
+  expect(await readWriteBudget(DB,day)).toMatchObject({reserved:4_013,essentialReserved:13,optionalReserved:4_000});
+ });
  it('does not spend D1 budget for no-op natural-key replays or synthetic timestamp/ID changes',async()=>{
   const raceId='boat-20990101-88-01', post=(endpoint:string,rows:unknown[])=>app.request(`/api/ingest/${endpoint}`,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify(rows)},env());
   const race={id:raceId,sport:'boat',venue_id:'b01',race_date:'2099-01-01',race_no:1,status:'scheduled',data_origin:'real',updated_at:'2099-01-01T00:00:00Z'};

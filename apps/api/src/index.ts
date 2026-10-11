@@ -179,7 +179,8 @@ async function ingest(c: any, name: string) {
     }
     const currentRaceData = !!raceDate && currentWindow.has(raceDate);
     let category: WriteCategory = 'optional';
-    if (openBet) category = 'essential';
+    if (table === 'collection_runs') category = 'collection';
+    else if (openBet) category = 'essential';
     else if (currentRaceData && ['races','entries','results','payouts'].includes(table)) category = 'essential';
     else if (currentRaceData && ['predictions','ticket_predictions'].includes(table)) {
       const modelId = row.model_id;
@@ -188,8 +189,8 @@ async function ingest(c: any, name: string) {
     }
     rowCategory.set(row, category);
   }
-  const changedByCategory: Record<'essential' | 'optional', Partial<Record<IngestTable, number>>> = { essential: {}, optional: {} };
-  const sideEffectsByCategory: Record<'essential' | 'optional', number> = { essential: 0, optional: 0 };
+  const changedByCategory: Record<'essential' | 'optional' | 'collection', Partial<Record<IngestTable, number>>> = { essential: {}, optional: {}, collection: {} };
+  const sideEffectsByCategory: Record<'essential' | 'optional' | 'collection', number> = { essential: 0, optional: 0, collection: 0 };
   for (const row of rows) {
     if (table === 'races' && await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',row.id)) return jsonError(c, 'race is quarantined by a source-repair audit');
     const generatedUpdatedAt = table === 'races' && row.updated_at === undefined;
@@ -240,7 +241,8 @@ async function ingest(c: any, name: string) {
     }
     if (changed) {
       const ingestTable = table as IngestTable;
-      const category = rowCategory.get(row) === 'essential' ? 'essential' : 'optional';
+      const rowPriority = rowCategory.get(row);
+      const category = rowPriority === 'essential' || rowPriority === 'collection' ? rowPriority : 'optional';
       changedByCategory[category][ingestTable] = (changedByCategory[category][ingestTable] ?? 0) + 1;
     }
     const updateSet = updateCols.map(k=>`${k}=excluded.${k}`);
@@ -263,8 +265,9 @@ async function ingest(c: any, name: string) {
     }
   }
   const changedRows = (Object.values(changedByCategory.essential).reduce((sum, count) => sum + (count ?? 0), 0) +
+    Object.values(changedByCategory.collection).reduce((sum, count) => sum + (count ?? 0), 0) +
     Object.values(changedByCategory.optional).reduce((sum, count) => sum + (count ?? 0), 0) + sideEffectsByCategory.essential + sideEffectsByCategory.optional);
-  const reservations = (['essential','optional'] as const).flatMap(category => {
+  const reservations = (['essential','collection','optional'] as const).flatMap(category => {
     const counts = changedByCategory[category], sideEffects = sideEffectsByCategory[category];
     const rowsInCategory = Object.values(counts).reduce((sum, count) => sum + (count ?? 0), 0) + sideEffects;
     return rowsInCategory > 0 ? [{ units: estimateIngestWriteUnits(counts, sideEffects), category }] : [];
