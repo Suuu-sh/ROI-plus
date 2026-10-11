@@ -143,7 +143,7 @@ def _predict_boat_date(rows: dict[str, list[dict[str, Any]]], day: str, cutoff: 
 
 
 def run_daily(day: str, cutoff: str) -> dict[str, Any]:
-    """Collect and synchronize only the two-day daily delta, then best-effort backfill."""
+    """Collect and synchronize the current/previous-day delta; never backfill D1 history."""
     target = date.fromisoformat(day)
     previous = (target - timedelta(days=1)).isoformat()
     # K files can be published or amended while a meeting is in progress. Force
@@ -195,19 +195,21 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     }
     from edgelab.sync import sync_rows
     synced = sync_rows(payload)
-    backfill: dict[str, Any]
-    try:
-        from edgelab.backfill_sync import run as backfill_run
-        backfill = backfill_run(since="2026-07-01", until=(target - timedelta(days=1)).isoformat(),
-                                budget=int(__import__("os").environ.get("BACKFILL_BUDGET", "20000")),
-                                database="roi-plus")
-    except Exception as exc:
-        backfill = {"skipped": True, "reason": f"{type(exc).__name__}: {exc}"}
     from edgelab.learning import score_feedback
     learning_report = score_feedback(rows)
+    collection_runs = [run for run in payload["collection_runs"] if run.get("sport") == "boat"]
+    collection_ready = all(run.get("status") in {"success", "skipped"} for run in collection_runs)
+    forecast_reason = prediction_error
+    if forecast_reason is None and not predictions:
+        forecast_reason = "no eligible upcoming boat races produced predictions at this cutoff"
+    forecast_ready = forecast_reason is None
     return {"date": day, "cutoff": cutoff, "collected_dates": [previous, day],
-            "predictions": len(predictions), "sync": synced, "backfill": backfill,
-            "feedback_models": len(learning_report["models"]), "prediction_error": prediction_error}
+            "daily_collection_success": collection_ready,
+            "forecast_ready": forecast_ready,
+            "forecast_status": "ready" if forecast_ready else "not_ready",
+            "forecast_reason": forecast_reason,
+            "predictions": len(predictions), "sync": synced,
+            "feedback_models": len(learning_report["models"])}
 
 
 def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str) -> list[dict[str, Any]]:
@@ -569,10 +571,10 @@ def _parser() -> argparse.ArgumentParser:
     backfill = sub.add_parser("backfill", help="collect a date range of boat data")
     backfill.add_argument("--from", dest="date_from", required=True)
     backfill.add_argument("--to", dest="date_to", required=True)
-    bf = sub.add_parser("backfill-sync", help="send historical race days to D1 within the daily write budget")
+    bf = sub.add_parser("backfill-sync", help="preview historical D1 backfill (remote writes disabled)")
     bf.add_argument("--since", required=True)
     bf.add_argument("--until")
-    bf.add_argument("--budget", type=int, default=20_000, help="max estimated D1 rows for historical backfill (hard-capped at 20k)")
+    bf.add_argument("--budget", type=int, default=20_000, help="dry-run estimate cap (hard-capped at 20k)")
     bf.add_argument("--database", default="roi-plus")
     bf.add_argument("--dry-run", action="store_true")
     rebuild = sub.add_parser("rebuild", help="rebuild normalized rows from local raw Boatrace LZH files")

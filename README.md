@@ -105,7 +105,7 @@ ml/.venv/bin/python -m pytest ml/tests -q
 
 既存の Cloudflare Workers 構成・開発／テスト／デプロイ手順、Actions のスケジュールと必要な Secret 名は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) を参照してください。記載のデプロイやリモート D1 操作は本番変更になるため、明示的な依頼なしに実行しないでください。秘密値やローカルの保管場所はリポジトリに記載しません。
 
-API Worker の日次 D1 書込は推定 20,000 unit、うちオッズ収集 10,000 unit の上限で保護します。認証付き `GET /api/ingest/write-budget` で状態を確認してください。予算が欠落・破損している場合は fail-closed となり、初回 seed には人手による操作が必要です（詳細は [アーキテクチャ](docs/ARCHITECTURE.md#d1-日次書込予算)）。この Worker 内の上限であり、他アプリを含む Cloudflare アカウント全体の quota 残量は保証しません。
+API Worker の日次 D1 書込予約は推定 20,000 unit 以内（essential 16,000、optional 合計4,000、オッズはoptional内数4,000）に分け、当日・前日の予測/結果と精算を優先します。昨日より古い履歴 backfill は、open bet の精算に必要な入力を除き API が拒否します。認証付き `GET /api/ingest/write-budget` で状態を確認してください。予算が欠落・破損している場合は fail-closed となり、初回 seed には人手による操作が必要です（詳細は [アーキテクチャ](docs/ARCHITECTURE.md#d1-日次書込予算)）。この Worker 内の推定予約であり、他アプリを含む Cloudflare アカウント全体の quota 残量や実際の行書込数は保証しません。
 
 ## データソースと制約
 

@@ -1,5 +1,4 @@
 import json
-from datetime import datetime, timezone
 
 from edgelab import backfill_sync as bs
 
@@ -31,25 +30,27 @@ def test_stops_at_budget_and_skips_done_days(tmp_path, monkeypatch):
     assert result["next_day"] == "2026-07-03"
 
 
-def test_unknown_budget_fails_closed_without_sync(tmp_path, monkeypatch):
+def test_remote_historical_sync_is_disabled_without_budget_read_or_write(tmp_path, monkeypatch):
     monkeypatch.setattr(bs, "load_rows", _store)
-    monkeypatch.setattr(bs, "fetch_write_budget", lambda: {"state": "missing", "remaining": None})
-    monkeypatch.setattr(bs, "sync_rows", lambda rows: (_ for _ in ()).throw(AssertionError("must not write")))
+    monkeypatch.setattr(bs, "fetch_write_budget", lambda: (_ for _ in ()).throw(AssertionError("must not read")), raising=False)
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"done": []}))
     result = bs.run(since="2026-07-01", until=None, budget=20_000, database="x", state_path=tmp_path / "state.json")
     assert result["skipped"] is True
     assert result["sent_days"] == []
+    assert result["reason"] == "remote historical D1 backfill is disabled; only --dry-run is available"
+    assert json.loads(state.read_text()) == {"done": []}
 
 
-def test_known_budget_is_capped_and_uses_authoritative_remaining(tmp_path, monkeypatch):
+def test_dry_run_estimates_with_local_cap_without_remote_sync(tmp_path, monkeypatch):
     monkeypatch.setattr(bs, "load_rows", _store)
-    today = datetime.now(timezone.utc).date().isoformat()
-    monkeypatch.setattr(bs, "fetch_write_budget", lambda: {
-        "date": today, "limit": 50_000, "reserved": 1_000, "remaining": 4_000, "state": "known"})
-    calls = []
-    monkeypatch.setattr(bs, "sync_rows", lambda rows: calls.append(rows) or {"ok": True})
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"done": []}))
     one_day = int(8 * bs.WRITE_AMPLIFICATION)
-    result = bs.run(since="2026-07-01", until=None, budget=99_999, database="x", state_path=tmp_path / "state.json")
-    assert result["backfill_budget"] == 4_000
+    result = bs.run(since="2026-07-01", until=None, budget=99_999, database="x",
+                    state_path=state, dry_run=True)
+    assert result["backfill_budget"] == bs.MAX_BACKFILL_BUDGET
     assert result["sent_days"] == ["2026-07-01", "2026-07-02", "2026-07-03"]
     assert result["estimated_rows_written"] == one_day * 3
-    assert len(calls) == 3
+    assert result["remote_sync_performed"] is False
+    assert json.loads(state.read_text()) == {"done": []}

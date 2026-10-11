@@ -10,6 +10,7 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab train-trifecta
 PYTHONPATH=ml ml/.venv/bin/python -m edgelab predict --sport boat --date 2026-09-02 --cutoff 2026-09-02T08:00:00+09:00
 EDGELAB_API_URL=https://example.invalid INGEST_TOKEN=... PYTHONPATH=ml ml/.venv/bin/python -m edgelab sync
 PYTHONPATH=ml ml/.venv/bin/python -m edgelab backfill --from 2026-01-01 --to 2026-09-01
+PYTHONPATH=ml ml/.venv/bin/python -m edgelab backfill-sync --since 2026-01-01 --until 2026-09-01 --dry-run
 ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab live --date 2026-10-09 --window-min 25
 ```
 
@@ -48,8 +49,15 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab sync --tables ticket_predictions
 リクエスト間隔は最低3秒とします。同一レースの直近10分以内の取得と確定オッズは
 再取得しません。運営負荷を避け、定期実行は10分間隔を超えて頻繁に行わないでください。
 
-GitHub Actions の `daily.yml` は日次収集・推論・差分同期・可能な場合の履歴
-backfill と保存予測の feedback scoring を行います。`retrain.yml` は週次に
+GitHub Actions の `daily.yml` は当日・前日の結果と払戻を優先し、出走表・安全な
+activeモデルの予測を同期して、保存予測の feedback scoring を行います。過去履歴の
+D1 backfill は日次のD1同期から完全に分離しています。ローカル正規化キャッシュと Actions
+cache は学習・feedback 用に維持し、cache miss 時の過去データ収集もローカル保存のみで
+続けます。D1の日次書込枠を過去履歴で消費しません。
+日次結果は `daily_collection_success` と `forecast_status` (`ready` / `not_ready`) を
+別々に報告し、モデルや artifact が利用できない場合・対象レースがない場合は
+具体的な `forecast_reason` を記録しつつ結果同期と
+feedbackを続行します。`retrain.yml` は週次に
 `python -m edgelab learn` を実行し、新しい完了実データが30レース以上ある場合に
 限り別IDの候補artifactを作成・同一 temporal holdout で評価します。比較不能・
 非改善の候補は `metrics_json.promotionEligible=false` になり、手動昇格も拒否されます。
@@ -77,12 +85,12 @@ train/validation/test 期間で評価し、candidate 状態だけを登録しま
 しません。手動昇格後に daily でartifactを復旧する場合は、`validated_model_run_id` と
 その run の正確な `validated_model_artifact_name` を指定してください。
 
-初回は Actions cache が空です。まず `ml/state/backfill_state.json` の `done` に
-リポジトリへ投入済みの backfill 範囲（例: `2026-07-01` から前日までの日付）を
-記録してコミットしてください。初回 daily 実行はこのファイルを
-`ml/data/backfill_state.json` にコピーし、その後は cache で継続します。学習済み
-モデルは `ml/artifacts/` の cache が空だと daily が明確なエラーで停止します。
-初回は workflow_dispatch で `retrain.yml` を実行して cache を作成してください。
+`backfill` はローカル履歴を収集するコマンドです。`backfill-sync` は既定でリモート
+D1書込を拒否し、`--dry-run` の推定だけを実行します。過去履歴のリモート同期は
+日次ワークフローからも外しており、将来の明示的な運用判断なしに実行しません。
+Actions cache が空の場合は履歴をローカル収集しますが、D1へ自動送信することはありません。
+学習済みモデルは `ml/artifacts/` の cache が空だと推論だけが not-ready になります。
+必要なら `workflow_dispatch` で `retrain.yml` を実行して cache を作成してください。
 
 ### ローカル Worker へ同期
 
@@ -100,7 +108,7 @@ Worker は `http://127.0.0.1:8787` で起動します。`apps/api/.dev.vars.exam
 EDGELAB_API_URL=http://127.0.0.1:8787 INGEST_TOKEN='<.dev.vars と同じ値>' PYTHONPATH=ml ml/.venv/bin/python -m edgelab sync
 ```
 
-同期は venues → races → entries → results → payouts → odds → models → predictions → collection-runs の順で行い、各 POST は最大 500 行です。
+同期は venues → races → models → results → payouts → entries → predictions → ticket-predictions → odds → collection-runs の順で行い、親行とモデル状態の後に結果・払戻を先行します。各 POST は最大 500 行です（race依存テーブルは最大50行）。
 
 パーサー・リーク防止・分割・学習・比較の確認:
 

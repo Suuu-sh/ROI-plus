@@ -20,11 +20,20 @@ beforeEach(() => {
   for (const f of readdirSync(resolve(root, 'db/migrations')).filter(f => f.endsWith('.sql')).sort()) sqlite.exec(readFileSync(resolve(root, 'db/migrations', f), 'utf8'));
   sqlite.prepare("INSERT INTO settings(key,value) VALUES('roi_d1_write_budget_utc',?)").run(JSON.stringify({ date: new Date().toISOString().slice(0, 10), reserved: 0, oddsReserved: 0 }));
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('24','boat','Fixture')").run();
+  sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status,metrics_json,trained_at) VALUES('safe-win','boat','win','v2','fixture','active',?,?)")
+    .run(JSON.stringify({boatVenueSchemaVersion:'boat-venue-v2',correctedTrainingDataSha256:'a'.repeat(64),boatArtifactSha256:'b'.repeat(64)}),stamp(now.getTime()-120_000));
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); sqlite.close(); });
 function race(id: string, post: number, origin = 'real', status = 'scheduled', no = 1) {
   sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at)
     VALUES(?,'boat','24',?,?,?, ?,?,?)`).run(id, today, no, stamp(post), status, origin, stamp(now.getTime()));
+  if(origin==='real'){
+    const predictedAt=stamp(now.getTime()-60_000);
+    for(let number=1;number<=6;number++){
+      sqlite.prepare("INSERT INTO entries(id,race_id,number,name,available_at,data_origin) VALUES(?,?,?,? ,?,'real')").run(`${id}-entry-${number}`,id,number,`Lane ${number}`,predictedAt);
+      sqlite.prepare("INSERT INTO predictions(id,race_id,model_id,number,probability,prob_std,predicted_at,data_origin) VALUES(?,?, 'safe-win',?, ?,0.01,?,'real')").run(`${id}-prediction-${number}`,id,number,1/6,predictedAt);
+    }
+  }
 }
 
 function collectionPage(html: string, url: string) {
@@ -100,6 +109,12 @@ describe('Boatrace win odds collection', () => {
     const nextMinute = await collectOdds(DB, new Date(now.getTime() + 60_000), { fetch, sleep });
     expect(nextMinute).toMatchObject({ status: 'success', targets: 1 });
     expect(fetch).toHaveBeenCalledTimes(2);
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='minute-race'").get()).toMatchObject({n:6});
+    const runsAfterSecond=Number((sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE source='boatrace-odds-worker'").get() as {n:number}).n);
+    await collectOdds(DB,new Date(now.getTime()+120_000),{fetch,sleep});
+    expect(fetch).toHaveBeenCalledTimes(3); // eligible minute cadence remains
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='minute-race'").get()).toMatchObject({n:6});
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE source='boatrace-odds-worker'").get()).toMatchObject({n:runsAfterSecond});
   });
 
   it('does nothing when the Worker flag is disabled', async () => {

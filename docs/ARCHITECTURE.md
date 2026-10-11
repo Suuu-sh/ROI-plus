@@ -36,11 +36,11 @@ GitHub Actions / ローカル Python (ml/)
 
 ### D1 日次書込予算
 
-- API Worker は、`settings.roi_d1_write_budget_utc` の UTC 日別カウンターで、この Worker が行う D1 書込を推定 20,000 unit/日以下に抑える。Cloudflare アカウント全体や他アプリの D1 quota を計測・予約する仕組みではなく、他サービスに残る実 quota は保証しない。移行・管理画面など Worker 外の D1 書込もカウンター対象外。
-- オッズ収集には共有上限の内数として 10,000 unit/日を設ける。残りを ingest、精算、仮想購入、古いオッズ削除、モデル昇格・rollback 用に確保する。レコードとテーブル索引数をもとに保守的に見積もり、予約は再試行・途中失敗でも返却しない。
-- `/api/ingest/*` は自然キーの既存行を索引検索し、NULL 安全な比較で変更がない場合は SQL を発行しない。上流の合成 `id`、同一内容の再送、race のみ変化した `updated_at` は更新根拠にしない。入力は最大500行/リクエスト。最大でも予約量が上限に達する場合は、HTTP 429 と `d1_write_budget_exhausted` を返す。カウンター欠落・破損・CAS 競合も fail-closed（欠落/破損は `d1_write_budget_unavailable`）とし、quota 増額や自動初期化はしない。
-- オッズ収集、精算、auto/manual bet、古いオッズの削除、モデル昇格・rollback も同じ予約を通る。settlement はオッズ収集エラーと独立して動くが、共有予算が不明または尽きた場合は書込みを止める。
-- 認証付き `GET /api/ingest/write-budget` で当日 UTC 日付・上限・予約済み・残量・状態を参照できる。未登録の初期化は人手の運用操作とし、旧利用量が不明な日は当日の全上限（20,000、うち odds 10,000）を予約する `POST /api/ingest/write-budget/seed` を使う。その UTC 日が終われば次の日付への CAS 予約でカウンターが切り替わる。ローカル DB ではテスト fixture が予算を明示的に seed する。
+- API Worker は `settings.roi_d1_write_budget_utc` の UTC 日別カウンターで、この Worker の推定予約を合計20,000 unit/日以下に抑える。うち16,000 unitを当日・前日予測/結果、open betの精算入力、精算、仮想購入、手動モデル操作など essential 用に保護し、オッズ・cleanup・collection log・候補モデルなど optional work は合計4,000 unit/日までに制限する。オッズは optional 内数として最大4,000 unit/日。Cloudflare アカウント全体や他アプリの D1 quota を計測・予約する仕組みではなく、実際の行書込数とも一致せず、残り実 quota は保証しない。移行・管理画面など Worker 外の書込も対象外。
+- 予約はレコードと索引数から保守的に見積もり、CASは単一のD1 `UPDATE ... WHERE value=?` で原子的に行う。再試行・途中失敗・CAS競合の予約は返却しない。既存形式の当日カウンターはリセットせず、category値がない場合は `min(4,000, reserved)` を optional に保守計上する（従来の19,946予約なら残り54のまま、optionalは停止）。カウンター欠落・破損は fail-closed、quota 増額や自動 seed はしない。
+- `/api/ingest/*` は自然キーの既存行を索引検索し、NULL 安全な比較で変更がない場合は SQL を発行しない。上流の合成 `id`、同一内容の再送、race のみ変化した `updated_at` は更新根拠にしない。入力は最大500行/リクエスト。任意のクライアント分類は受け付けず、race日付はDB上の値（新規raceのみソースpayload値）で分類する。昨日より古い履歴 ingest/backfill は、open betに必要なrace metadata/entries/results/payoutsを除き409 `historical_ingest_disabled` で拒否する。将来レースは受付可能だがoptional枠を使う。当日・前日の有効active-model予測はessential、候補予測・オッズ・collection logなどはoptional枠を使う。必要予約は複数枠を単一CASで確保し、できない場合は HTTP 429 と `d1_write_budget_exhausted` を返す。
+- オッズ収集、精算、auto/manual bet、古いオッズ削除、モデル昇格・rollback も同じ予約を通る。精算等 essential は保護枠を使い、オッズと古いオッズ削除はoptional枠のみ使う。settlement はオッズ収集エラーと独立して動くが、共有・essential予算が不明または尽きた場合は書込みを止める。
+- 認証付き `GET /api/ingest/write-budget` で当日 UTC 日付・20k共有上限・16k/4k枠・予約済み・残量・状態を参照できる。ヘルスとcollection statusにも状態を含める。未登録の初期化は人手の運用操作とし、当日の全上限を予約する `POST /api/ingest/write-budget/seed` を使う。その UTC 日が終われば次の日付へのCAS予約でカウンターが切り替わる。ローカルDBではテストfixtureが予算を明示的にseedする。
 
 ### API の主な面
 
