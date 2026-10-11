@@ -15,6 +15,13 @@ type Ctx = { Bindings: Env };
 const SAFE_BOAT_SCHEMA = 'boat-venue-v2';
 const TICKET_MODEL_SCHEMA = 'ticket-selection-v1';
 const TICKET_PROBABILITY_SEMANTICS = 'exact-selection-probability-v1';
+const PRIMARY_PAPER_PHASE = 'primary_t60' as const;
+const PRIMARY_PAPER_OFFSET_MS = 60_000;
+const PRIMARY_PAPER_TOLERANCE_MS = 10_000;
+const PAPER_COMPARISON_PHASES = {
+  t30: { phase: 'comparison_t30', status: 'unavailable', reason: 'minute-level collection and ten-minute decisions cannot observe second offsets' },
+  t10: { phase: 'comparison_t10', status: 'unavailable', reason: 'minute-level collection and ten-minute decisions cannot observe second offsets' },
+} as const;
 // A full field is represented by either an official numeric finish or an
 // explicit non-finisher code parsed from the official K result file.
 const terminalFinishCodeSql = `(json_valid(e.features_json) AND (
@@ -74,9 +81,10 @@ app.use('*', async (c, next) => {
 });
 // Persist timestamps with a consistent JST offset; selection queries use
 // julianday() so comparisons remain correct when imported ISO offsets differ.
-const now = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
+const isoJstAt = (timestamp: number) => new Date(timestamp + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
+const now = () => isoJstAt(Date.now());
 const ODDS_MAX_AGE_MS = 10 * 60 * 1000;
-const oddsFreshAfter = () => new Date(Date.now() - ODDS_MAX_AGE_MS + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
+const oddsFreshAfter = (timestamp = Date.now()) => isoJstAt(timestamp - ODDS_MAX_AGE_MS);
 const reserveWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'essential');
 const reserveOptionalWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'optional');
 const validSport = (v: string | null): v is Sport => v === 'horse' || v === 'boat';
@@ -349,51 +357,178 @@ async function settleOpen(db: Db) {
   }
   return settled;
 }
-async function autoBet(db: Db, enabled: boolean) {
-  if (!enabled) return 0;
-  if ((await setting(db, 'auto_bet_paused', 'false')) === 'true') return 0;
+function primaryPaperTiming(cutoffAt: string | null | undefined, decisionAt: number) {
+  const cutoffMs = cutoffAt ? Date.parse(cutoffAt) : Number.NaN;
+  if (!Number.isFinite(cutoffMs)) return { eligible: false, reason: 'missing_or_invalid_cutoff', cutoffMs: null, targetMs: null };
+  const targetMs = cutoffMs - PRIMARY_PAPER_OFFSET_MS;
+  const delta = decisionAt - targetMs;
+  if (Math.abs(delta) <= PRIMARY_PAPER_TOLERANCE_MS) return { eligible: true, reason: null, cutoffMs, targetMs };
+  return { eligible: false, reason: delta > PRIMARY_PAPER_TOLERANCE_MS ? 'missed_timing' : 'not_due', cutoffMs, targetMs };
+}
+function validProbability(value: unknown): boolean {
+  return value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 1;
+}
+function validUncertainty(value: unknown): boolean {
+  return value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) >= 0;
+}
+function paperAbstentionReason(rows: any[]): string {
+  if (!rows.length) return 'active_model_prediction_unavailable';
+  if (rows.some(row => !validProbability(row.probability))) return 'invalid_probability';
+  if (rows.some(row => !validUncertainty(row.prob_std))) return 'invalid_prediction_uncertainty';
+  if (!rows.some(row => Number.isFinite(Number(row.odds)) && Number(row.odds) > 0 && Number.isFinite(Date.parse(row.odds_captured_at)))) return 'odds_missing_or_stale';
+  return 'no_qualifying_edge';
+}
+async function recordPaperAbstention(db: Db, raceId: string, cutoffAt: string | null, decisionAt: number, reason: string, writeReserved = false) {
+  if (!writeReserved && !await reserveWorkerWrites(db, 1)) return 'budget_unavailable' as const;
+  const cutoffMs = cutoffAt ? Date.parse(cutoffAt) : Number.NaN;
+  const targetAt = Number.isFinite(cutoffMs) ? isoJstAt(cutoffMs - PRIMARY_PAPER_OFFSET_MS) : null;
+  const result = await run(db, `INSERT INTO paper_decisions(race_id,phase,cutoff_at,target_at,decided_at,outcome,reason)
+    VALUES(?,? ,?,?,?,'abstained',?) ON CONFLICT(race_id,phase) DO NOTHING`, raceId, PRIMARY_PAPER_PHASE,
+    cutoffAt ?? null, targetAt, isoJstAt(decisionAt), reason);
+  return Number(result.meta?.changes ?? 0) > 0 ? 'recorded' as const : 'duplicate' as const;
+}
+type AutoBetTimingReport = {
+  phase: typeof PRIMARY_PAPER_PHASE;
+  targetOffsetSeconds: number;
+  toleranceSeconds: number;
+  evaluatedRaceCount: number;
+  purchasedRaceCount: number;
+  boughtBetCount: number;
+  abstainedByReason: Record<string, number>;
+  unrecordedAbstentionCount: number;
+  comparisons: typeof PAPER_COMPARISON_PHASES;
+};
+async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now()) {
+  const report: AutoBetTimingReport = { phase: PRIMARY_PAPER_PHASE, targetOffsetSeconds: 60, toleranceSeconds: 10,
+    evaluatedRaceCount: 0, purchasedRaceCount: 0, boughtBetCount: 0, abstainedByReason: {}, unrecordedAbstentionCount: 0,
+    comparisons: PAPER_COMPARISON_PHASES };
+  if (!enabled || (await setting(db, 'auto_bet_paused', 'false')) === 'true' || !Number.isFinite(decisionAt)) {
+    return { bought: 0, report };
+  }
+  const decisionAtIso = isoJstAt(decisionAt), freshAfter = oddsFreshAfter(decisionAt), raceDate = jstRaceDate(new Date(decisionAt));
+  const nextRaceDate = jstRaceDate(new Date(decisionAt + 24 * 60 * 60_000));
+  const noteAbstention = async (raceId: string, cutoffAt: string | null, reason: string, writeReserved = false) => {
+    report.abstainedByReason[reason] = (report.abstainedByReason[reason] ?? 0) + 1;
+    if (await recordPaperAbstention(db, raceId, cutoffAt, decisionAt, reason, writeReserved) !== 'recorded') report.unrecordedAbstentionCount++;
+  };
+  // Missing/invalid cutoffs have no T-60 target; freeze an explicit abstention
+  // for today's scheduled races rather than guessing from a later start time.
+  const missingCutoffs = await all<any>(db, `SELECT r.id FROM races r WHERE r.race_date=? AND r.status='scheduled'
+    AND (r.post_time IS NULL OR julianday(r.post_time) IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')
+    AND NOT EXISTS(SELECT 1 FROM paper_decisions d WHERE d.race_id=r.id AND d.phase='primary_t60')
+    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) ORDER BY r.id LIMIT 20`, raceDate);
+  for (const race of missingCutoffs) await noteAbstention(race.id, null, 'missing_or_invalid_cutoff');
+
+  // Search only the current/just-missed ten-minute paper window. A later cron
+  // may write a missed-timing abstention, but it can never place a late bet.
+  const recentRaces = await all<any>(db, `SELECT r.*,v.name venue_name FROM races r JOIN venues v ON v.id=r.venue_id WHERE r.race_date IN (?,?)
+    AND r.post_time IS NOT NULL AND julianday(r.post_time)>=julianday(?) AND julianday(r.post_time)<=julianday(?)
+    AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')
+    AND NOT EXISTS(SELECT 1 FROM paper_decisions d WHERE d.race_id=r.id AND d.phase='primary_t60')
+    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
+    ORDER BY julianday(r.post_time),r.id LIMIT 100`, raceDate,nextRaceDate,isoJstAt(decisionAt - 9 * 60_000),isoJstAt(decisionAt + PRIMARY_PAPER_OFFSET_MS + PRIMARY_PAPER_TOLERANCE_MS));
+  const dueRaces: any[] = [];
+  for (const race of recentRaces) {
+    const result = primaryPaperTiming(race.post_time, decisionAt);
+    if (result.eligible && race.status === 'scheduled') dueRaces.push(race);
+    else if (result.eligible) await noteAbstention(race.id, race.post_time, 'race_not_scheduled');
+    else if (result.reason === 'missed_timing') await noteAbstention(race.id, race.post_time, 'missed_timing');
+  }
+  report.evaluatedRaceCount = dueRaces.length;
+  if (!dueRaces.length) return { bought: 0, report };
+
   const cfg = Number(await setting(db, 'unit_stake', '100')), minRoi = Number(await setting(db, 'min_expected_roi', '0.05')), maxStd = Number(await setting(db, 'max_prob_std', '0.05'));
   const maxPicks = Math.min(6, Math.max(1, Math.floor(Number(await setting(db, 'auto_bet_max_picks', '1')) || 1)));
   const raceBudget=Number(await setting(db,'auto_bet_race_budget',String(cfg)));
-  if (!Number.isSafeInteger(cfg) || cfg <= 0 || !Number.isSafeInteger(raceBudget) || raceBudget <= 0 || raceBudget > 2_147_483_647) return 0;
-  const candidates = await all<any>(db, `SELECT r.id race_id,r.sport,r.data_origin,e.number, p.probability,p.prob_std,p.model_id,p.predicted_at,m.status model_status,
+  if (!Number.isSafeInteger(cfg) || cfg <= 0 || !Number.isSafeInteger(raceBudget) || raceBudget <= 0 || raceBudget > 2_147_483_647) {
+    for (const race of dueRaces) await noteAbstention(race.id, race.post_time, 'invalid_paper_budget');
+    return { bought: 0, report };
+  }
+  const candidates = await all<any>(db, `SELECT r.id race_id,r.sport,r.data_origin,e.number,p.probability,p.prob_std,p.model_id,p.predicted_at,m.status model_status,
     (SELECT o.odds FROM odds_snapshots o WHERE o.race_id=r.id AND o.data_origin=r.data_origin AND o.bet_type='win' AND o.selection=CAST(e.number AS TEXT) AND julianday(o.captured_at)<=julianday(?) AND julianday(o.captured_at)>=julianday(?) AND julianday(o.captured_at)<=julianday(r.post_time) ORDER BY julianday(o.captured_at) DESC LIMIT 1) odds,
     (SELECT o.captured_at FROM odds_snapshots o WHERE o.race_id=r.id AND o.data_origin=r.data_origin AND o.bet_type='win' AND o.selection=CAST(e.number AS TEXT) AND julianday(o.captured_at)<=julianday(?) AND julianday(o.captured_at)>=julianday(?) AND julianday(o.captured_at)<=julianday(r.post_time) ORDER BY julianday(o.captured_at) DESC LIMIT 1) odds_captured_at
-    FROM races r JOIN entries e ON e.race_id=r.id JOIN predictions p ON p.race_id=r.id AND p.number=e.number
+    FROM races r JOIN entries e ON e.race_id=r.id AND e.data_origin=r.data_origin JOIN predictions p ON p.race_id=r.id AND p.number=e.number AND p.data_origin=r.data_origin
     JOIN models m ON m.id=p.model_id AND m.status='active' AND m.sport=r.sport AND m.bet_type='win'
       AND (r.sport<>'boat' OR CASE WHEN json_valid(m.metrics_json) THEN (json_type(m.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END)
-    WHERE r.status='scheduled' AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) AND e.data_origin=r.data_origin AND p.data_origin=r.data_origin AND p.predicted_at=(SELECT p2.predicted_at FROM predictions p2 WHERE p2.race_id=r.id AND p2.model_id=m.id AND p2.number=e.number AND p2.data_origin=r.data_origin ORDER BY julianday(p2.predicted_at) DESC LIMIT 1)
-    AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?)
+    WHERE r.race_date IN (?,?) AND r.status='scheduled' AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
+    AND p.predicted_at=(SELECT p2.predicted_at FROM predictions p2 WHERE p2.race_id=r.id AND p2.model_id=m.id AND p2.number=e.number AND p2.data_origin=r.data_origin AND julianday(p2.predicted_at)<=julianday(?) AND julianday(p2.predicted_at)<=julianday(r.post_time) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1)
+    AND julianday(r.post_time)>=julianday(?) AND julianday(r.post_time)<=julianday(?)
     AND julianday(p.predicted_at)<=julianday(?) AND julianday(p.predicted_at)<=julianday(r.post_time)
-    AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')`, now(), oddsFreshAfter(), now(), oddsFreshAfter(), now(), now());
+    AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')
+    AND NOT EXISTS(SELECT 1 FROM paper_decisions d WHERE d.race_id=r.id AND d.phase='primary_t60')`,
+    decisionAtIso, freshAfter, decisionAtIso, freshAfter, raceDate,nextRaceDate,decisionAtIso,
+    isoJstAt(decisionAt + PRIMARY_PAPER_OFFSET_MS - PRIMARY_PAPER_TOLERANCE_MS),
+    isoJstAt(decisionAt + PRIMARY_PAPER_OFFSET_MS + PRIMARY_PAPER_TOLERANCE_MS), decisionAtIso);
   const grouped = new Map<string, any[]>();
   for (const row of candidates) { const list=grouped.get(row.race_id)??[]; list.push(row); grouped.set(row.race_id,list); }
-  const ticketRaces=await all<any>(db,`SELECT r.*,v.name venue_name FROM races r JOIN venues v ON v.id=r.venue_id WHERE r.sport='boat' AND r.data_origin='real' AND r.status='scheduled' AND julianday(r.post_time)>julianday(?) AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto') AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,now());
-  for(const race of ticketRaces){for(const t of await ticketCandidatesForRace(db,race,maxStd)){if(!t.buyEligible||t.expectedRoi<minRoi)continue;const list=grouped.get(race.id)??[];list.push({race_id:race.id,sport:race.sport,data_origin:race.data_origin,bet_type:t.betType,selection:t.selection,probability:t.probability,prob_std:t.probStd,model_id:t.modelId,model_status:'active',odds:t.odds,odds_captured_at:t.oddsCapturedAt});grouped.set(race.id,list);}}
+  for (const race of dueRaces) {
+    for (const t of await ticketCandidatesForRace(db, race, maxStd, decisionAt)) {
+      if (!t.buyEligible || t.expectedRoi < minRoi) continue;
+      const list=grouped.get(race.id)??[];
+      list.push({race_id:race.id,sport:race.sport,data_origin:race.data_origin,bet_type:t.betType,selection:t.selection,probability:t.probability,prob_std:t.probStd,model_id:t.modelId,model_status:'active',odds:t.odds,odds_captured_at:t.oddsCapturedAt,predicted_at:t.predictedAt});
+      grouped.set(race.id,list);
+    }
+  }
   let n=0;
-  for (const rows of grouped.values()) {
-    const bestTicket=rows.filter(row=>row.bet_type==='trifecta').sort((a,b)=>(candidate(b.probability,b.odds,b.prob_std,'active',maxStd).conservativeRoi??-Infinity)-(candidate(a.probability,a.odds,a.prob_std,'active',maxStd).conservativeRoi??-Infinity))[0];
-    const bestWinConservative=Math.max(-Infinity,...rows.filter(row=>!row.bet_type).map(row=>candidate(row.probability,row.odds,row.prob_std,row.model_status,maxStd).conservativeRoi??-Infinity));
-    const ticketWins=bestTicket&&(candidate(bestTicket.probability,bestTicket.odds,bestTicket.prob_std,'active',maxStd).conservativeRoi??-Infinity)>bestWinConservative;
-    const ranked=(ticketWins?[bestTicket]:rows.filter(row=>!row.bet_type)).map(row=>({...row, edgeData:candidate(row.probability,row.odds,row.prob_std,row.model_status,maxStd)}))
-      .filter(row=>row.odds!==null && row.odds!==undefined && row.edgeData.expectedRoi!==null)
+  for (const race of dueRaces) {
+    const rows=grouped.get(race.id)??[];
+    const bestTicket=rows.filter(row=>row.bet_type==='trifecta' && validProbability(row.probability) && validUncertainty(row.prob_std) && Number.isFinite(Number(row.odds)) && Number(row.odds)>0)
+      .sort((a,b)=>(candidate(Number(b.probability),Number(b.odds),Number(b.prob_std),'active',maxStd).conservativeRoi??-Infinity)-(candidate(Number(a.probability),Number(a.odds),Number(a.prob_std),'active',maxStd).conservativeRoi??-Infinity))[0];
+    const bestWinConservative=Math.max(-Infinity,...rows.filter(row=>!row.bet_type && validProbability(row.probability) && validUncertainty(row.prob_std) && Number.isFinite(Number(row.odds)) && Number(row.odds)>0)
+      .map(row=>candidate(Number(row.probability),Number(row.odds),Number(row.prob_std),row.model_status,maxStd).conservativeRoi??-Infinity));
+    const ticketWins=bestTicket&&(candidate(Number(bestTicket.probability),Number(bestTicket.odds),Number(bestTicket.prob_std),'active',maxStd).conservativeRoi??-Infinity)>bestWinConservative;
+    const ranked=(ticketWins?[bestTicket]:rows.filter(row=>!row.bet_type)).map(row=>({...row,edgeData:candidate(Number(row.probability),Number(row.odds),Number(row.prob_std),row.model_status,maxStd)}))
+      .filter(row=>validProbability(row.probability) && validUncertainty(row.prob_std) && Number.isFinite(Number(row.odds)) && Number(row.odds)>0
+        && Number.isFinite(Date.parse(row.predicted_at)) && Date.parse(row.predicted_at)<=decisionAt
+        && Number.isFinite(Date.parse(row.odds_captured_at)) && Date.parse(row.odds_captured_at)<=decisionAt
+        && row.edgeData.expectedRoi!==null && Number.isFinite(row.edgeData.expectedRoi))
       .sort((a,b)=>b.edgeData.expectedRoi-a.edgeData.expectedRoi || Number(a.number)-Number(b.number));
     const selected=ranked.map((row,index)=>({...row,candidateRank:index+1,candidateCount:ranked.length}))
       .filter(row=>row.edgeData.expectedRoi>=minRoi && ['HIGH_EDGE','POSITIVE_EDGE'].includes(row.edgeData.edge)).slice(0,Math.min(maxPicks,6,raceBudget));
-    if (!selected.length) continue;
-    const groupId=betId(), placedAt=now(), totalStake=raceBudget,baseStake=Math.floor(raceBudget/selected.length),remainder=raceBudget%selected.length;
+    if (!selected.length) {
+      await noteAbstention(race.id, race.post_time, paperAbstentionReason(rows));
+      continue;
+    }
+    const groupId=betId(), placedAt=decisionAtIso, totalStake=raceBudget,baseStake=Math.floor(raceBudget/selected.length),remainder=raceBudget%selected.length;
     const payload=selected.map((row,index)=>({id:betId(),race_id:row.race_id,sport:row.sport,bet_type:row.bet_type??'win',selection:row.selection??String(row.number),stake:baseStake+(index<remainder?1:0),
-      predicted_prob:row.probability,odds_at_bet:row.odds,expected_roi:row.edgeData.expectedRoi,edge_label:row.edgeData.edge,
+      predicted_prob:Number(row.probability),odds_at_bet:Number(row.odds),expected_roi:row.edgeData.expectedRoi,edge_label:row.edgeData.edge,
       model_id:row.model_id,placed_at:placedAt,data_origin:row.data_origin,candidate_rank:row.candidateRank,
-      candidate_count:row.candidateCount,odds_captured_at:row.odds_captured_at,predicted_at_at_bet:row.predicted_at}));
-    if (!await reserveWorkerWrites(db, payload.length * 2)) break;
-    const inserted=await run(db,`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin,bet_group_id,candidate_rank,candidate_count,odds_captured_at,predicted_at_at_bet)
-      SELECT json_extract(value,'$.id'),json_extract(value,'$.race_id'),json_extract(value,'$.sport'),json_extract(value,'$.bet_type'),json_extract(value,'$.selection'),json_extract(value,'$.stake'),'auto',json_extract(value,'$.predicted_prob'),json_extract(value,'$.odds_at_bet'),json_extract(value,'$.expected_roi'),json_extract(value,'$.edge_label'),json_extract(value,'$.model_id'),json_extract(value,'$.placed_at'),'open',json_extract(value,'$.data_origin'),?,json_extract(value,'$.candidate_rank'),json_extract(value,'$.candidate_count'),json_extract(value,'$.odds_captured_at'),json_extract(value,'$.predicted_at_at_bet')
+      candidate_count:row.candidateCount,odds_captured_at:row.odds_captured_at,predicted_at_at_bet:row.predicted_at,decision_phase:PRIMARY_PAPER_PHASE}));
+    if (!await reserveWorkerWrites(db, payload.length * 2 + 1)) {
+      report.abstainedByReason.d1_write_budget_unavailable = (report.abstainedByReason.d1_write_budget_unavailable ?? 0) + 1;
+      report.unrecordedAbstentionCount++;
+      continue;
+    }
+    const betInsert=db.prepare(`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin,bet_group_id,candidate_rank,candidate_count,odds_captured_at,predicted_at_at_bet,decision_phase)
+      SELECT json_extract(value,'$.id'),json_extract(value,'$.race_id'),json_extract(value,'$.sport'),json_extract(value,'$.bet_type'),json_extract(value,'$.selection'),json_extract(value,'$.stake'),'auto',json_extract(value,'$.predicted_prob'),json_extract(value,'$.odds_at_bet'),json_extract(value,'$.expected_roi'),json_extract(value,'$.edge_label'),json_extract(value,'$.model_id'),json_extract(value,'$.placed_at'),'open',json_extract(value,'$.data_origin'),?,json_extract(value,'$.candidate_rank'),json_extract(value,'$.candidate_count'),json_extract(value,'$.odds_captured_at'),json_extract(value,'$.predicted_at_at_bet'),json_extract(value,'$.decision_phase')
       FROM json_each(?) WHERE ${availableBankrollSql}>=? AND NOT EXISTS(SELECT 1 FROM bets WHERE race_id=? AND mode='auto')
-      ON CONFLICT(race_id,bet_type,selection) WHERE mode='auto' DO NOTHING`,groupId,JSON.stringify(payload),totalStake,rows[0].race_id);
-    n+=Number(inserted.meta?.changes??0);
+      ON CONFLICT(race_id,bet_type,selection) WHERE mode='auto' DO NOTHING`).bind(groupId,JSON.stringify(payload),totalStake,race.id);
+    const snapshotJson=JSON.stringify({phase:PRIMARY_PAPER_PHASE,cutoffAt:race.post_time,targetAt:isoJstAt(Date.parse(race.post_time)-PRIMARY_PAPER_OFFSET_MS),decidedAt:decisionAtIso,
+      selections:selected.map(row=>({betType:row.bet_type??'win',selection:row.selection??String(row.number),probability:Number(row.probability),probStd:Number(row.prob_std),odds:Number(row.odds),oddsCapturedAt:row.odds_captured_at,predictedAt:row.predicted_at,modelId:row.model_id}))});
+    const decisionInsert=db.prepare(`INSERT INTO paper_decisions(race_id,phase,cutoff_at,target_at,decided_at,outcome,reason,bet_group_id,snapshot_json)
+      SELECT ?,? ,?,?,?,'placed',NULL,?,? WHERE EXISTS(SELECT 1 FROM bets WHERE bet_group_id=? AND mode='auto' AND decision_phase='primary_t60')
+      ON CONFLICT(race_id,phase) DO NOTHING`).bind(race.id,PRIMARY_PAPER_PHASE,race.post_time,isoJstAt(Date.parse(race.post_time)-PRIMARY_PAPER_OFFSET_MS),decisionAtIso,groupId,snapshotJson,groupId);
+    let insertedCount=0;
+    if (db.batch) {
+      const results=await db.batch([betInsert,decisionInsert]) as any[];
+      insertedCount=Number(results?.[0]?.meta?.changes??0);
+    } else {
+      const inserted=await betInsert.run(); insertedCount=Number(inserted.meta?.changes??0);
+      if(insertedCount>0)await decisionInsert.run();
+    }
+    if (insertedCount>0) { n+=insertedCount; report.purchasedRaceCount++; }
+    else {
+      const frozen=await first<any>(db,'SELECT outcome FROM paper_decisions WHERE race_id=? AND phase=?',race.id,PRIMARY_PAPER_PHASE);
+      const existingAuto=await first<any>(db,"SELECT id FROM bets WHERE race_id=? AND mode='auto'",race.id);
+      if(!frozen&&!existingAuto)await noteAbstention(race.id,race.post_time,'insufficient_bankroll',true);
+    }
   }
-  return n;
+  report.boughtBetCount=n;
+  return { bought: n, report };
+}
+async function autoBet(db: Db, enabled: boolean, decisionAt = Date.now()) {
+  return (await autoBetWithReport(db, enabled, decisionAt)).bought;
 }
 async function collectScheduledOdds(db: Db, oddsEnabled: boolean, trifectaOddsEnabled: boolean, requestBudget={used:0,max:49}) {
   if (trifectaOddsEnabled) {
@@ -406,14 +541,17 @@ async function collectScheduledOdds(db: Db, oddsEnabled: boolean, trifectaOddsEn
   if (oddsEnabled) await collectOdds(db, new Date(),{requestBudget});
 }
 async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false, trifectaOddsEnabled = false) {
+  // Evaluate against observations already available at decision time. A
+  // collection pass in this invocation must not make a late snapshot eligible.
+  const paper=await autoBetWithReport(db,autoEnabled);
   await collectScheduledOdds(db, oddsEnabled, trifectaOddsEnabled);
-  const settled=await settleOpen(db), bought=await autoBet(db,autoEnabled);
+  const settled=await settleOpen(db);
   const cutoff=new Date(Date.now()-30*86400000).toISOString();
   const oldRows=await first<any>(db, `SELECT COUNT(*) count FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at)`, cutoff);
   const cleanupCount=Math.min(10,Number(oldRows?.count??0));
   if(cleanupCount>0&&await reserveOptionalWorkerWrites(db,cleanupCount)) await run(db, `DELETE FROM odds_snapshots WHERE rowid IN (SELECT rowid FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at) LIMIT 10)`, cutoff).catch(()=>{});
   await cleanupOldQualityRuns(db);
-  return {settled,bought};
+  return {settled,bought:paper.bought,paperTiming:paper.report};
 }
 
 // Quality-only collector telemetry is short-lived. Preserve mixed runs and
@@ -733,12 +871,13 @@ function officialTrifectaUrl(sourceUrl: unknown, race: any): boolean {
       && u.searchParams.get('hd') === String(race.race_date).replaceAll('-', '');
   } catch { return false; }
 }
-async function ticketCandidatesForRace(db: Db, race: any, maxStd: number): Promise<TicketCandidate[]> {
+async function ticketCandidatesForRace(db: Db, race: any, maxStd: number, decisionAt = Date.now()): Promise<TicketCandidate[]> {
   // Initial support is exact-order trifecta only. Other ticket types stay absent
   // until a compatible model and audited odds source are registered.
   if (await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',race.id)) return [];
   if (race.sport !== 'boat' || race.data_origin !== 'real' || race.status !== 'scheduled'
-      || !race.post_time || Date.parse(race.post_time) <= Date.now()) return [];
+      || !race.post_time || !Number.isFinite(Date.parse(race.post_time)) || Date.parse(race.post_time) <= decisionAt) return [];
+  const decisionAtIso=isoJstAt(decisionAt), freshAfter=oddsFreshAfter(decisionAt);
   const runners = await all<any>(db, 'SELECT number FROM entries WHERE race_id=? AND data_origin=? ORDER BY number', race.id, race.data_origin);
   const numbers = runners.map((x: any) => Number(x.number));
   if (numbers.length !== 6 || new Set(numbers).size !== 6 || numbers.some((n: number) => !Number.isInteger(n) || n < 1 || n > 6)) return [];
@@ -746,7 +885,7 @@ async function ticketCandidatesForRace(db: Db, race: any, maxStd: number): Promi
   const output: TicketCandidate[] = [];
   for (const model of models) {
     if (!validatedTicketModel(model, 'trifecta')) continue;
-    const latest = await first<any>(db, `SELECT MAX(predicted_at) predicted_at FROM ticket_predictions WHERE race_id=? AND model_id=? AND bet_type='trifecta' AND data_origin='real' AND julianday(predicted_at)<=julianday(?) AND julianday(predicted_at)<=julianday(?)`, race.id, model.id, now(), race.post_time);
+    const latest = await first<any>(db, `SELECT MAX(predicted_at) predicted_at FROM ticket_predictions WHERE race_id=? AND model_id=? AND bet_type='trifecta' AND data_origin='real' AND julianday(predicted_at)<=julianday(?) AND julianday(predicted_at)<=julianday(?)`, race.id, model.id, decisionAtIso, race.post_time);
     if (!latest?.predicted_at) continue;
     const predictions = await all<any>(db, `SELECT * FROM ticket_predictions WHERE race_id=? AND model_id=? AND bet_type='trifecta' AND data_origin='real' AND predicted_at=?`, race.id, model.id, latest.predicted_at);
     let metrics: any; try { metrics = JSON.parse(model.metrics_json || '{}'); } catch { continue; }
@@ -754,7 +893,7 @@ async function ticketCandidatesForRace(db: Db, race: any, maxStd: number): Promi
     if (predictions.some((p: any) => p.feature_schema_version !== TICKET_MODEL_SCHEMA || p.artifact_sha256 !== metrics.ticketArtifactSha256 || p.prob_std === null || p.prob_std === undefined)) continue;
     if (predictions.some((p: any) => p.probability === null || p.probability === undefined || !Number.isFinite(p.probability))) continue;
     if (!isCompleteTicketDistribution('trifecta', numbers, predictions.map((p: any) => p.selection), predictions.map((p: any) => Number(p.probability)))) continue;
-    const latestOdds = await first<any>(db, `SELECT captured_at,source_url,source_sha256 FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND source_sha256 IS NOT NULL AND julianday(captured_at)>=julianday(?) AND julianday(captured_at)<=julianday(?) AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1`, race.id, oddsFreshAfter(), now(), race.post_time);
+    const latestOdds = await first<any>(db, `SELECT captured_at,source_url,source_sha256 FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND source_sha256 IS NOT NULL AND julianday(captured_at)>=julianday(?) AND julianday(captured_at)<=julianday(?) AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1`, race.id, freshAfter, decisionAtIso, race.post_time);
     if (!latestOdds || !SHA256.test(latestOdds.source_sha256) || !officialTrifectaUrl(latestOdds.source_url, race)) continue;
     const oddsRows = await all<any>(db, `SELECT selection,odds FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND captured_at=? AND source_url=? AND source_sha256=?`, race.id, latestOdds.captured_at, latestOdds.source_url, latestOdds.source_sha256);
     if (oddsRows.some((o: any) => o.odds === null || !Number.isFinite(o.odds) || o.odds <= 0)
@@ -771,7 +910,7 @@ async function ticketCandidatesForRace(db: Db, race: any, maxStd: number): Promi
         modelId: model.id, modelVersion: model.version, modelArtifactSha256: metrics.ticketArtifactSha256,
         predictedAt: latest.predicted_at, oddsSource: 'boatrace-trifecta-official-v1', oddsSourceUrl: latestOdds.source_url,
         oddsSourceSha256: latestOdds.source_sha256,
-        dataFreshnessMinutes: Math.max(0, (Date.now() - Date.parse(latestOdds.captured_at)) / 60000),
+        dataFreshnessMinutes: Math.max(0, (decisionAt - Date.parse(latestOdds.captured_at)) / 60000),
         dataOrigin: 'real', buyEligible: score.edge === 'HIGH_EDGE' || score.edge === 'POSITIVE_EDGE' });
     }
   }
@@ -793,11 +932,19 @@ function resultWaitReason(b:any){
  if(b.paid_winner_count!==b.winner_count)return 'payoutmissing';
  return 'settlementpending';
 }
-function mapBet(b:any){return {id:b.id,raceId:b.race_id,sport:b.sport,betType:b.bet_type,selection:b.selection,stake:b.stake,mode:b.mode,predictedProb:b.predicted_prob,oddsAtBet:b.odds_at_bet,expectedRoi:b.expected_roi,edgeLabel:b.edge_label,modelId:b.model_id,placedAt:b.placed_at,status:b.status,payout:b.payout??null,profit:b.profit??null,finalOdds:b.final_odds??null,settledAt:b.settled_at??null,dataOrigin:b.data_origin,groupId:b.bet_group_id??null,candidateRank:b.candidate_rank??null,candidateCount:b.candidate_count??null,oddsCapturedAt:b.odds_captured_at??null,predictedAtAtBet:b.predicted_at_at_bet??null,resultWaitReason:b.race_status==null?undefined:resultWaitReason(b),resultCollectionSource:b.result_collection_source??null,resultCollectionStatus:b.result_collection_status??null,resultCollectionLastAttemptAt:b.result_collection_last_attempt_at??null,resultCollectionLastSuccessAt:b.result_collection_last_success_at??null};}
+function mapBet(b:any){return {id:b.id,raceId:b.race_id,sport:b.sport,betType:b.bet_type,selection:b.selection,stake:b.stake,mode:b.mode,predictedProb:b.predicted_prob,oddsAtBet:b.odds_at_bet,expectedRoi:b.expected_roi,edgeLabel:b.edge_label,modelId:b.model_id,placedAt:b.placed_at,status:b.status,payout:b.payout??null,profit:b.profit??null,finalOdds:b.final_odds??null,settledAt:b.settled_at??null,dataOrigin:b.data_origin,groupId:b.bet_group_id??null,candidateRank:b.candidate_rank??null,candidateCount:b.candidate_count??null,oddsCapturedAt:b.odds_captured_at??null,predictedAtAtBet:b.predicted_at_at_bet??null,decisionPhase:b.decision_phase??null,resultWaitReason:b.race_status==null?undefined:resultWaitReason(b),resultCollectionSource:b.result_collection_source??null,resultCollectionStatus:b.result_collection_status??null,resultCollectionLastAttemptAt:b.result_collection_last_attempt_at??null,resultCollectionLastSuccessAt:b.result_collection_last_success_at??null};}
 async function quarantineSummary(db: Db, sport: string | null, origin: string | null) {
  return await first<any>(db, `SELECT COUNT(*) count,COALESCE(SUM(b.stake),0) stake,COALESCE(SUM(b.payout),0) payout,COALESCE(SUM(b.profit),0) profit FROM bets b WHERE EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=b.id) AND (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?)`, sport, sport, origin, origin) ?? {count:0,stake:0,payout:0,profit:0};
 }
 app.get('/bets/quarantine-summary',async c=>{const sport=c.req.query('sport'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');return c.json(await quarantineSummary(c.env.DB,sport||null,origin));});
+app.get('/paper/decisions',async c=>{
+ const date=c.req.query('date')??jstRaceDate();
+ if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return jsonError(c,'date must be YYYY-MM-DD');
+ const rows=await all<any>(c.env.DB,`SELECT d.race_id,d.phase,d.cutoff_at,d.target_at,d.decided_at,d.outcome,d.reason,d.bet_group_id,d.snapshot_json
+   FROM paper_decisions d JOIN races r ON r.id=d.race_id WHERE r.race_date=? ORDER BY julianday(d.decided_at),d.race_id,d.phase LIMIT 500`,date);
+ return c.json({date,timing:{primary:{phase:PRIMARY_PAPER_PHASE,cutoffSource:'races.post_time',targetOffsetSeconds:60,toleranceSeconds:10},comparisons:PAPER_COMPARISON_PHASES},
+   decisions:rows.map(row=>{let snapshot=null;try{snapshot=row.snapshot_json?JSON.parse(row.snapshot_json):null;}catch{}return {raceId:row.race_id,phase:row.phase,cutoffAt:row.cutoff_at??null,targetAt:row.target_at??null,decidedAt:row.decided_at,outcome:row.outcome,reason:row.reason??null,betGroupId:row.bet_group_id??null,snapshot};})});
+});
 app.get('/bets',async c=>{const sport=c.req.query('sport'),status=c.req.query('status'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');const rows=await all<any>(c.env.DB,`SELECT b.*,v.name venue_name,r.race_no,r.status race_status,r.post_time,r.race_date,
  (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin) entry_count,
  (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin AND ${terminalFinishCodeSql}) terminal_entry_count,
@@ -1030,11 +1177,17 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
     }
     return;
   }
+  const paperBoundary = Math.floor(event.scheduledTime / 60_000) % 10 === 0;
+  if (paperBoundary) {
+    // Decide from odds already stored before this minute. Running the bounded
+    // auto-paper check first keeps collector latency out of the T-60 window.
+    const result=await cron(env.DB, env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true');
+    console.info(JSON.stringify({event:'paper-decision-timing',...result.paperTiming}));
+  }
   if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true' || env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE === 'true') {
     // A collection quota/write failure must not block ten-minute settlement.
     await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true', env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true',requestBudget).catch(() => undefined);
   }
-  if (Math.floor(event.scheduledTime / 60_000) % 10 !== 0) return;
-  await cron(env.DB, env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true');
+  return;
 } };
-export { app, cron, settleOpen, autoBet };
+export { app, cron, settleOpen, autoBet, autoBetWithReport, primaryPaperTiming };

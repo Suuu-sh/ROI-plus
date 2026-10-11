@@ -13,6 +13,7 @@ let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
 const env=(extra:Record<string,unknown>={})=>({DB,INGEST_TOKEN:'test-token',ENABLE_AUTO_BET:'true',...extra});
 const jstIso=(ms=Date.now())=>new Date(ms+9*60*60*1000).toISOString().replace('Z','+09:00');
 const jstDate=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const setPaperCutoff=(raceId:string,decisionAt:number)=>sqlite.prepare('UPDATE races SET race_date=?,post_time=? WHERE id=?').run(jstDate(),jstIso(decisionAt+60_000),raceId);
 const canonicalJson=(value:any):string=>Array.isArray(value)?`[${value.map(canonicalJson).join(',')}]`:value&&typeof value==='object'?`{${Object.keys(value).sort().map(k=>`${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`:JSON.stringify(value)??'null';
 const sha256Json=(value:unknown)=>createHash('sha256').update(canonicalJson(value),'utf8').digest('hex');
 const sha256Text=(value:string)=>createHash('sha256').update(value,'utf8').digest('hex');
@@ -370,10 +371,11 @@ describe('EdgeLab API',()=>{
   const races=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 2").all() as {id:string}[];
   expect(races).toHaveLength(2);
   for(const [i,race] of races.entries())addBetInputs(race.id,`auto-cap-${i}`);
+  const decisionAt=Date.now();for(const race of races)setPaperCutoff(race.id,decisionAt);
   sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES('existing-open',?,'boat','win','99',100,'manual','INSUFFICIENT_DATA',?,'open','sample')").run(races[0].id,jstIso());
 
-  expect(await autoBet(DB,true)).toBe(1);
-  expect(await autoBet(DB,true)).toBe(0);
+  expect(await autoBet(DB,true,decisionAt)).toBe(1);
+  expect(await autoBet(DB,true,decisionAt)).toBe(0);
   expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE mode='auto' AND status='open'").get()).toMatchObject({n:1});
   expect(sqlite.prepare("SELECT SUM(stake) stake FROM bets WHERE status='open'").get()).toMatchObject({stake:200});
   const auto=sqlite.prepare("SELECT id,race_id,selection,odds_captured_at FROM bets WHERE mode='auto'").get() as any;
@@ -386,17 +388,80 @@ describe('EdgeLab API',()=>{
   const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 1").get() as {id:string};
   const entries=sqlite.prepare('SELECT number FROM entries WHERE race_id=? ORDER BY number LIMIT 2').all(race.id) as {number:number}[];
   addBetInputs(race.id,'auto-multi');
+  const decisionAt=Date.now();setPaperCutoff(race.id,decisionAt);
   const second=entries[1];
   sqlite.prepare("INSERT INTO predictions(id,race_id,model_id,number,probability,prob_std,predicted_at,data_origin) VALUES('auto-multi-p2',?,'boat-active',?,0.5,0.01,?,'sample')").run(race.id,second.number,jstIso(Date.now()-10000));
   sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('auto-multi-o2',?,'win',?,4,?,'test','sample')").run(race.id,String(second.number),jstIso(Date.now()-5000));
   sqlite.prepare("UPDATE settings SET value='2' WHERE key='auto_bet_max_picks'").run();
   sqlite.prepare("UPDATE settings SET value='100' WHERE key='auto_bet_race_budget'").run();
-  expect(await Promise.all([autoBet(DB,true),autoBet(DB,true)])).toEqual(expect.arrayContaining([0,2]));
+  expect(await Promise.all([autoBet(DB,true,decisionAt),autoBet(DB,true,decisionAt)])).toEqual(expect.arrayContaining([0,2]));
   const placed=sqlite.prepare("SELECT bet_group_id,candidate_rank,candidate_count,stake FROM bets WHERE mode='auto' AND race_id=? ORDER BY candidate_rank").all(race.id) as any[];
   expect(placed).toHaveLength(2);expect(placed.map(x=>x.stake)).toEqual([50,50]);
   expect(placed.map(x=>x.candidate_rank)).toEqual([1,2]);expect(placed[0].bet_group_id).toBe(placed[1].bet_group_id);
   expect(placed.every(x=>x.candidate_count===2)).toBe(true);
   expect(sqlite.prepare("SELECT SUM(stake) stake FROM bets WHERE mode='auto' AND race_id=?").get(race.id)).toMatchObject({stake:100});
+ });
+ it('freezes the primary paper decision at T-60 and leaves comparison phases unavailable',async()=>{
+  const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 1").get() as {id:string};
+  const decisionAt=Date.now();setPaperCutoff(race.id,decisionAt);
+  sqlite.prepare('UPDATE races SET race_date=? WHERE id=?').run(jstDate(),race.id);
+  addBetInputs(race.id,'paper-t60');
+  expect(await autoBet(DB,true,decisionAt)).toBe(1);
+  const stored=sqlite.prepare("SELECT phase,cutoff_at,target_at,decided_at,outcome,reason,bet_group_id,snapshot_json FROM paper_decisions WHERE race_id=?").get(race.id) as any;
+  expect(stored).toMatchObject({phase:'primary_t60',cutoff_at:jstIso(decisionAt+60_000),target_at:jstIso(decisionAt),decided_at:jstIso(decisionAt),outcome:'placed',reason:null});
+  const frozenSnapshot=JSON.parse(stored.snapshot_json);
+  expect(frozenSnapshot.phase).toBe('primary_t60');
+  const automatic=sqlite.prepare("SELECT decision_phase,odds_captured_at FROM bets WHERE race_id=? AND mode='auto'").get(race.id) as any;
+  expect(automatic.decision_phase).toBe('primary_t60');
+  expect(frozenSnapshot.selections[0].oddsCapturedAt).toBe(automatic.odds_captured_at);
+  sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('paper-late-odds',?,'win',?,30,?,'test','sample')")
+    .run(race.id,String(frozenSnapshot.selections[0].selection),jstIso(decisionAt+5_000));
+  expect(await autoBet(DB,true,decisionAt+5_000)).toBe(0);
+  expect(sqlite.prepare('SELECT snapshot_json,decided_at FROM paper_decisions WHERE race_id=?').get(race.id)).toMatchObject({snapshot_json:stored.snapshot_json,decided_at:jstIso(decisionAt)});
+  const listed=await app.request('/api/bets?origin=sample',{},env());
+  expect((await listed.json() as any[]).find(row=>row.raceId===race.id&&row.mode==='auto')?.decisionPhase).toBe('primary_t60');
+  const read=await app.request(`/api/paper/decisions?date=${jstDate()}`,{},env());
+  expect(read.status).toBe(200);const body=await read.json() as any;
+  expect(body.timing.comparisons).toMatchObject({t30:{phase:'comparison_t30',status:'unavailable'},t10:{phase:'comparison_t10',status:'unavailable'}});
+  expect(body.decisions.find((row:any)=>row.raceId===race.id)).toMatchObject({phase:'primary_t60',outcome:'placed',snapshot:frozenSnapshot});
+  const oldBet=sqlite.prepare("SELECT decision_phase FROM bets WHERE race_id<>? AND data_origin='sample' LIMIT 1").get(race.id) as any;
+  expect(oldBet?.decision_phase??null).toBeNull();
+ });
+ it('records T-60 abstentions for stale odds, invalid probabilities, unavailable models, missing cutoffs, and missed timing',async()=>{
+  const races=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' ORDER BY id LIMIT 6").all() as {id:string}[];
+  expect(races.length).toBe(6);
+  const decisionAt=Date.now();
+  for(const race of races)setPaperCutoff(race.id,decisionAt);
+  sqlite.prepare(`UPDATE races SET race_date=? WHERE id IN (${races.map(()=>'?').join(',')})`).run(jstDate(),...races.map(r=>r.id));
+  const staleSelection=addBetInputs(races[0].id,'paper-stale');
+  const staleOdds=sqlite.prepare("SELECT id FROM odds_snapshots WHERE race_id=? AND bet_type='win'").get(races[0].id) as {id:string};
+  sqlite.prepare('UPDATE odds_snapshots SET captured_at=? WHERE id=?').run(jstIso(decisionAt-11*60_000),staleOdds.id);
+  addBetInputs(races[1].id,'paper-invalid-prob');
+  sqlite.prepare('UPDATE predictions SET probability=NULL WHERE race_id=?').run(races[1].id);
+  addBetInputs(races[2].id,'paper-no-model');
+  sqlite.prepare('DELETE FROM predictions WHERE race_id=?').run(races[2].id);
+  sqlite.prepare('UPDATE races SET post_time=NULL WHERE id=?').run(races[3].id);
+  sqlite.prepare('UPDATE races SET post_time=? WHERE id=?').run(jstIso(decisionAt+30_000),races[4].id);
+  sqlite.prepare('UPDATE races SET post_time=? WHERE id=?').run(jstIso(decisionAt+10_000),races[5].id);
+  const beforePerformance=await (await app.request('/api/performance/overview?origin=sample',{},env())).json() as any;
+  expect(await autoBet(DB,true,decisionAt)).toBe(0);
+  const reasons=sqlite.prepare('SELECT race_id,reason,outcome FROM paper_decisions').all() as any[];
+  expect(reasons).toEqual(expect.arrayContaining([
+   expect.objectContaining({race_id:races[0].id,reason:'odds_missing_or_stale',outcome:'abstained'}),
+   expect.objectContaining({race_id:races[1].id,reason:'invalid_probability',outcome:'abstained'}),
+   expect.objectContaining({race_id:races[2].id,reason:'active_model_prediction_unavailable',outcome:'abstained'}),
+   expect.objectContaining({race_id:races[3].id,reason:'missing_or_invalid_cutoff',outcome:'abstained'}),
+   expect.objectContaining({race_id:races[4].id,reason:'missed_timing',outcome:'abstained'}),
+   expect.objectContaining({race_id:races[5].id,reason:'missed_timing',outcome:'abstained'}),
+  ]));
+  sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('paper-stale-late',?,'win',?,20,?,'test','sample')")
+    .run(races[0].id,staleSelection,jstIso(decisionAt+1_000));
+  expect(await autoBet(DB,true,decisionAt+1_000)).toBe(0);
+  expect(sqlite.prepare(`SELECT COUNT(*) n FROM bets WHERE mode='auto' AND race_id IN (${races.map(()=>'?').join(',')})`).get(...races.map(r=>r.id))).toMatchObject({n:0});
+  expect(sqlite.prepare("SELECT reason FROM paper_decisions WHERE race_id=?").get(races[0].id)).toMatchObject({reason:'odds_missing_or_stale'});
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM paper_decisions WHERE phase IN ('comparison_t30','comparison_t10')").get()).toMatchObject({n:0});
+  const afterPerformance=await (await app.request('/api/performance/overview?origin=sample',{},env())).json() as any;
+  expect(afterPerformance.betCount).toBe(beforePerformance.betCount);
  });
  it('manual placement rejects a stake that would exceed bankroll after open stakes',async()=>{
   sqlite.exec('DELETE FROM bets');
@@ -487,9 +552,10 @@ describe('EdgeLab API',()=>{
  it('auto-bets only once per race and promote/rollback exchange active model',async()=>{
   const race=sqlite.prepare("SELECT r.id FROM races r WHERE r.data_origin='sample' AND r.status='scheduled' AND r.sport='boat' LIMIT 1").get() as any;
   const first=sqlite.prepare('SELECT number FROM entries WHERE race_id=? LIMIT 1').get(race.id) as any;
+  const decisionAt=Date.now();setPaperCutoff(race.id,decisionAt);
   sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('auto-odds',?,'win',?,10,?,'sample','sample')").run(race.id,String(first.number),jstIso(Date.now()-5000));
   sqlite.prepare("INSERT INTO predictions(id,race_id,model_id,number,probability,prob_std,predicted_at,data_origin) VALUES('auto-p',?,'boat-active',?,0.5,0.01,?,'sample')").run(race.id,first.number,jstIso(Date.now()-10000));
-  expect(await autoBet(DB,true)).toBeGreaterThan(0);expect(await autoBet(DB,true)).toBe(0);
+  expect(await autoBet(DB,true,decisionAt)).toBeGreaterThan(0);expect(await autoBet(DB,true,decisionAt)).toBe(0);
   expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE race_id=? AND mode='auto'").get(race.id)).toMatchObject({n:1});
   const model=sqlite.prepare("SELECT id FROM models WHERE sport='horse' AND status='candidate' LIMIT 1").get() as any;
   expect((await app.request(`/api/models/${model.id}/promote`,{method:'POST'},env())).status).toBe(200);
@@ -527,6 +593,8 @@ describe('EdgeLab API',()=>{
  });
  it('stores and returns the captured odds time for manual and auto trifecta bets',async()=>{
   const {raceId,selections}=addValidatedTrifectaFixture();
+  const decisionAt=Date.now();setPaperCutoff(raceId,decisionAt);
+  sqlite.prepare("UPDATE odds_snapshots SET source_url=REPLACE(source_url,'20990101',?) WHERE race_id=? AND bet_type='trifecta'").run(jstDate().replaceAll('-',''),raceId);
   const oddsCapturedAt=(sqlite.prepare("SELECT captured_at FROM odds_snapshots WHERE race_id=? AND bet_type='trifecta' LIMIT 1").get(raceId) as any).captured_at;
   const placed=await app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId,betType:'trifecta',selection:selections[0],stake:100})},env());
   expect(placed.status).toBe(201);
@@ -537,7 +605,7 @@ describe('EdgeLab API',()=>{
   const winCapturedAt=jstIso(Date.now()-4000);
   sqlite.prepare("INSERT INTO predictions(id,race_id,model_id,number,probability,prob_std,predicted_at,data_origin) VALUES('cross-win-p',?,'boat-active',1,0.5,0.05,?,'real')").run(raceId,jstIso(Date.now()-9000));
   sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('cross-win-o',?,'win','1',3,?,'verified-win-fixture','real')").run(raceId,winCapturedAt);
-  expect(await autoBet(DB,true)).toBe(1);
+  expect(await autoBet(DB,true,decisionAt)).toBe(1);
   const automatic=sqlite.prepare("SELECT id,bet_type,odds_captured_at FROM bets WHERE race_id=? AND mode='auto'").get(raceId) as any;
   expect(automatic.bet_type).toBe('trifecta'); // conservative ROI beats the concurrent win candidate
   expect(automatic.odds_captured_at).toBe(oddsCapturedAt);
