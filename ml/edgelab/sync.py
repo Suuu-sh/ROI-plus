@@ -34,6 +34,21 @@ class WriteBudgetRefused(RuntimeError):
     """The API refused a write because shared UTC-day budget is unavailable."""
 
 
+_SAFE_INGEST_ERROR_CODES = {
+    "d1_write_budget_unavailable", "d1_write_budget_exhausted", "historical_ingest_disabled",
+}
+
+
+def _safe_ingest_error_code(exc: HTTPError) -> str | None:
+    """Return only known, non-sensitive API error codes from a bounded body."""
+    try:
+        payload = json.loads(exc.read(4096).decode("utf-8", "replace"))
+    except (OSError, ValueError):
+        return None
+    code = payload.get("code") if isinstance(payload, dict) else None
+    return code if isinstance(code, str) and code in _SAFE_INGEST_ERROR_CODES else None
+
+
 def fetch_write_budget(*, base_url: str | None = None, token: str | None = None) -> dict[str, Any]:
     """Read the API's authoritative ROI+ daily write budget.
 
@@ -130,12 +145,11 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
         if not values:
             continue
         responses = []
-        # The race and payout endpoints perform several sequential D1 lookups
-        # per row. Keep these particularly expensive tables smaller than the
-        # other race data.
+        # These endpoints perform several sequential D1 lookups per row. Keep
+        # their chunks small to bound lookup, batch, and D1 write amplification.
         row_checked_tables = {"races", "results", "payouts", "entries", "odds_snapshots",
                               "predictions", "ticket_predictions"}
-        chunk_size = 10 if table in {"races", "payouts"} else 50 if table in row_checked_tables else 500
+        chunk_size = 10 if table in {"races", "payouts", "entries"} else 50 if table in row_checked_tables else 500
         for start in range(0, len(values), chunk_size):
             payload = json.dumps(values[start:start + chunk_size], ensure_ascii=False).encode("utf-8")
             req = Request(f"{base_url}/api/ingest/{ENDPOINTS[table]}", data=payload,
@@ -161,17 +175,19 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
                                           "changed": changed, "noop": changed == 0})
                     break
                 except HTTPError as exc:
+                    safe_code = _safe_ingest_error_code(exc)
                     if exc.code == 429:
                         # Never retry blindly: the reservation status may have
                         # changed and a partial prior sync must remain visible.
                         raise WriteBudgetRefused(
                             f"ingest {table} refused: daily D1 write budget unavailable or exhausted (HTTP 429)") from exc
-                    if attempt == 0 and exc.code in {502, 503, 504}:
+                    if attempt == 0 and exc.code in {500, 502, 503, 504}:
                         # Natural-key upserts make a replay safe if the Worker
                         # committed before an upstream service error was returned.
                         time.sleep(2)
                         continue
-                    raise RuntimeError(f"ingest {table} failed: HTTP {exc.code}") from exc
+                    suffix = f" (code: {safe_code})" if safe_code else ""
+                    raise RuntimeError(f"ingest {table} failed: HTTP {exc.code}{suffix}") from exc
                 except (URLError, TimeoutError) as exc:
                     reason = exc.reason if isinstance(exc, URLError) else exc
                     transient_timeout = isinstance(reason, (TimeoutError, socket.timeout))
