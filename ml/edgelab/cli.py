@@ -694,7 +694,14 @@ def _parser() -> argparse.ArgumentParser:
     trifecta.add_argument("--model-id", help="immutable candidate model ID")
     trifecta.add_argument("--artifact-dir", default="ml/artifacts")
     trifecta.add_argument("--min-train-races", type=int, default=300)
+    trifecta.add_argument("--replay-max-picks", type=int, choices=range(1, 7), default=1,
+                          help="runtime-like cap for the offline replay (default matches the runtime default)")
+    trifecta.add_argument("--replay-race-budget", type=int, default=100,
+                          help="integer-yen replay stake budget per race")
     trifecta.add_argument("--output", default="ml/data/learning/trifecta-report.json")
+    archives = sub.add_parser("import-prerace-archives", help="verify and import one date of prerace archives into the local offline store")
+    archives.add_argument("--date", required=True, help="race date in YYYY-MM-DD")
+    archives.add_argument("--store", default=str(DEFAULT_STORE), help="local JSON row store")
     predict_ticket = sub.add_parser("predict-trifecta", help="generate local exact-order forecasts from an explicitly active validated artifact")
     predict_ticket.add_argument("--cutoff", required=True, help="ISO prediction cutoff")
     predict_ticket.add_argument("--artifact-dir", default="ml/artifacts")
@@ -775,6 +782,18 @@ def main(argv: list[str] | None = None) -> int:
                                                                   if o.get("race_id") in today_ids]})
         print(json.dumps(result, ensure_ascii=False))
         return 0
+    if args.command == "import-prerace-archives":
+        from edgelab.importers.boatrace_capture_archive import import_capture_archives
+        from edgelab.sync import fetch_prerace_capture_archives
+        pages = fetch_prerace_capture_archives(args.date)
+        rows = load_rows(args.store)
+        result = import_capture_archives(rows, pages, args.date)
+        if result.get("importedArchives"):
+            save_rows(rows, args.store)
+        result["localStoreUpdated"] = bool(result.get("importedArchives"))
+        result["remoteSyncPerformed"] = False
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0 if result.get("excludedArchives", 0) == 0 else 2
     if args.command == "preview-boat-day":
         print(json.dumps(preview_boat_day(args.date, args.raw, args.output), ensure_ascii=False))
         return 0
@@ -792,7 +811,9 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("candidate model ID already exists locally; model IDs are immutable")
         result = train_trifecta(training_rows, rows, model_id=model_id,
                                 artifact_dir=args.artifact_dir, min_train_races=args.min_train_races,
-                                feature_schema_version=PRERACE_V2_SCHEMA)
+                                feature_schema_version=PRERACE_V2_SCHEMA,
+                                replay_max_picks=args.replay_max_picks,
+                                replay_race_budget=args.replay_race_budget)
         if result.get("status") == "candidate":
             metrics = dict(result.get("metrics") or {})
             metrics["ticketArtifactSha256"] = result["ticketArtifactSha256"]

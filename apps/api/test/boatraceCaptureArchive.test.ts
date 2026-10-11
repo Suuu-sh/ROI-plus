@@ -1,4 +1,5 @@
 import Sqlite from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -140,7 +141,10 @@ describe('data-only prerace capture archive',()=>{
     const response=await app.request(path,{headers:{authorization:'Bearer test-token'}},{DB,INGEST_TOKEN:'test-token'});
     expect(response.status).toBe(200);
     const pageOne=await response.json() as any;
-    expect(pageOne).toMatchObject({date:'2026-10-11',limit:1,archives:[{raceId:first,archive:{schema:'boat-prerace-capture-v1'}}]});
+    expect(pageOne).toMatchObject({schema:'boat-prerace-capture-export-v1',date:'2026-10-11',limit:1,archives:[{raceId:first}]});
+    const wrapper=pageOne.archives[0];
+    expect(wrapper.archiveSha256).toBe(createHash('sha256').update(wrapper.archiveJson,'utf8').digest('hex'));
+    expect(JSON.parse(wrapper.archiveJson)).toMatchObject({schema:'boat-prerace-capture-v1'});
     expect(pageOne.nextCursor).toMatch(new RegExp(`^${first}:capture:\\d{13}$`));
     const pageTwo=await app.request(`${path}&cursor=${encodeURIComponent(pageOne.nextCursor)}`,{headers:{authorization:'Bearer test-token'}},{DB,INGEST_TOKEN:'test-token'});
     expect(await pageTwo.json()).toMatchObject({archives:[{raceId:second}],nextCursor:null});

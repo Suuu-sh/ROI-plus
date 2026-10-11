@@ -13,6 +13,7 @@ import json
 import math
 import pickle
 import random
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,7 @@ from edgelab.normalization.availability import available_by
 
 TICKET_SCHEMA = "ticket-selection-v1"
 PREDICTION_SEMANTICS = "exact-selection-probability-v1"
+REPLAY_SELECTION_POLICY = "trifecta-runtime-ev-multipick-v1"
 
 
 def _group_races(rows: Sequence[Mapping[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -336,8 +338,9 @@ def _temperature(valid: Sequence[Mapping[str, Any]], model: Mapping[str, Any]) -
 def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
                    post_time: str) -> dict[str, float]:
     """Use one coherent official, non-final, complete 120-ticket market."""
-    from datetime import datetime
-    cutoff = datetime.fromisoformat(predicted_at.replace("Z", "+00:00"))
+    from datetime import datetime, timedelta
+    as_of = datetime.fromisoformat(predicted_at.replace("Z", "+00:00"))
+    fresh_after = as_of - timedelta(minutes=10)
     deadline = datetime.fromisoformat(post_time.replace("Z", "+00:00"))
     race = next((r for r in store.get("races", []) if str(r.get("id")) == race_id), None)
     if not race:
@@ -353,7 +356,7 @@ def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
                     f"rno={race_no}&jcd={venue}&hd={race_date}")
     expected = {f"{a}-{b}-{c}" for a, b, c in itertools.permutations(range(1, 7), 3)}
     cohorts: dict[tuple[str, str, str], dict[str, tuple[datetime, float]]] = defaultdict(dict)
-    for row in store.get("odds_snapshots", []):
+    for row in [*store.get("odds_snapshots", []), *store.get("prerace_capture_odds", [])]:
         if (row.get("data_origin") != "real" or row.get("race_id") != race_id
                 or row.get("bet_type") != "trifecta" or not row.get("captured_at")
                 or row.get("source") != "boatrace-trifecta-official-v1"
@@ -368,9 +371,10 @@ def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
             odds = float(row.get("odds"))
         except (TypeError, ValueError):
             continue
-        if captured.tzinfo is None or cutoff.tzinfo is None or deadline.tzinfo is None:
+        if captured.tzinfo is None or as_of.tzinfo is None or deadline.tzinfo is None:
             continue
-        if captured > cutoff or captured >= deadline or not math.isfinite(odds) or odds <= 0:
+        if (captured < fresh_after or captured > as_of or captured >= deadline
+                or not math.isfinite(odds) or odds <= 0):
             continue
         selection = str(row.get("selection") or "")
         if selection not in expected:
@@ -385,21 +389,44 @@ def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
     return {selection: value[1] for selection, value in latest.items()}
 
 
-def _select_conservative_ticket(probabilities: Mapping[str, float], deviations: Mapping[str, float],
-                                odds: Mapping[str, float], *, max_std: float = 0.05,
-                                min_conservative_roi: float = 0.05):
-    """Mirror the current one-ticket-per-race virtual choice rule."""
+def _select_runtime_like_tickets(probabilities: Mapping[str, float], deviations: Mapping[str, float],
+                                 odds: Mapping[str, float], *, max_std: float = 0.05,
+                                 min_expected_roi: float = 0.05,
+                                 min_conservative_roi: float = 0.05,
+                                 max_picks: int = 6, race_budget: int = 100):
+    """Mirror the runtime's EV rank, conservative-edge gate, cap, and stake split."""
+    if (not isinstance(max_picks, int) or isinstance(max_picks, bool) or not 1 <= max_picks <= 6
+            or not isinstance(race_budget, int) or isinstance(race_budget, bool)
+            or not 1 <= race_budget <= 2_147_483_647
+            or not _finite(max_std) or float(max_std) < 0
+            or not _finite(min_expected_roi) or not _finite(min_conservative_roi)):
+        raise ValueError("invalid replay policy configuration")
     candidates = []
     for selection, probability in probabilities.items():
         std, price = deviations.get(selection), odds.get(selection)
-        if std is None or not _finite(std) or price is None or not _finite(price):
+        if (not re.fullmatch(r"[1-6]-[1-6]-[1-6]", str(selection))
+                or len(set(str(selection).split("-"))) != 3
+                or not _finite(probability) or not 0 <= float(probability) <= 1
+                or std is None or not _finite(std) or float(std) < 0
+                or price is None or not _finite(price) or float(price) <= 0):
             continue
-        if std > max_std:
+        if float(std) > float(max_std):
             continue
+        expected_roi = float(probability) * float(price) - 1
         conservative_roi = (float(probability) - float(std)) * float(price) - 1
-        if conservative_roi >= min_conservative_roi:
-            candidates.append((selection, float(probability), float(std), float(price), conservative_roi))
-    return max(candidates, key=lambda item: (item[4], item[1], item[0])) if candidates else None
+        # Runtime ranks by expected ROI, then applies its conservative edge label.
+        if expected_roi >= min_expected_roi and conservative_roi >= min_conservative_roi:
+            candidates.append({"selection": str(selection), "probability": float(probability),
+                               "probStd": float(std), "odds": float(price),
+                               "expectedRoi": expected_roi, "conservativeRoi": conservative_roi})
+    ranked = sorted(candidates, key=lambda item: (-item["expectedRoi"], item["selection"]))
+    selected = ranked[:min(max_picks, 6, race_budget)]
+    if not selected:
+        return []
+    base_stake, remainder = divmod(race_budget, len(selected))
+    for index, item in enumerate(selected):
+        item["stake"] = base_stake + (1 if index < remainder else 0)
+    return selected
 
 
 def _consistent_payout(rows: Sequence[Mapping[str, Any]], race_id: str, actual: str):
@@ -421,8 +448,13 @@ def _consistent_payout(rows: Sequence[Mapping[str, Any]], race_id: str, actual: 
 
 
 def _replay(store: Mapping[str, Any], test_groups: Sequence[Sequence[Mapping[str, Any]]],
-            artifact: Mapping[str, Any]) -> dict[str, Any]:
-    selected, skipped = [], defaultdict(int)
+            artifact: Mapping[str, Any], *, max_picks: int = 1, race_budget: int = 100,
+            min_expected_roi: float = 0.05, max_std: float = 0.05,
+            min_conservative_roi: float = 0.05) -> dict[str, Any]:
+    _select_runtime_like_tickets({}, {}, {}, max_std=max_std,
+        min_expected_roi=min_expected_roi, min_conservative_roi=min_conservative_roi,
+        max_picks=max_picks, race_budget=race_budget)
+    selected, skipped, selected_ticket_rois = [], defaultdict(int), []
     for group in test_groups:
         race_id = str(group[0].get("race_id"))
         race = next((r for r in store.get("races", []) if r.get("id") == race_id), {})
@@ -440,28 +472,38 @@ def _replay(store: Mapping[str, Any], test_groups: Sequence[Sequence[Mapping[str
                for selection in odds):
             skipped["missing_ensemble_probability_std"] += 1
             continue
-        selected_ticket = _select_conservative_ticket(probs, deviations, odds)
-        if not selected_ticket:
-            skipped["no_positive_expected_value_tickets"] += 1
-            continue
         actual = _actual_selection(group)
         payout = _consistent_payout(store.get("payouts", []), race_id, actual)
         if payout is None:
             skipped["missing_or_inconsistent_trifecta_payout_vs_finish_order"] += 1
             continue
-        selection, _, _, _, conservative_roi = selected_ticket
-        stake = 100
-        returned = payout if selection == actual else 0.0
-        selected.append({"race_id": race_id, "tickets": 1, "selection": selection, "stake": stake,
-                         "payout": returned, "conservativeExpectedRoi": conservative_roi})
+        picked = _select_runtime_like_tickets(probs, deviations, odds, max_std=max_std,
+            min_expected_roi=min_expected_roi, min_conservative_roi=min_conservative_roi,
+            max_picks=max_picks, race_budget=race_budget)
+        returned = sum(math.floor(ticket["stake"] * payout / 100)
+                       for ticket in picked if ticket["selection"] == actual)
+        stake = sum(ticket["stake"] for ticket in picked)
+        selected_ticket_rois.extend(ticket["conservativeRoi"] for ticket in picked)
+        selected.append({"race_id": race_id, "tickets": len(picked),
+                         "selections": [ticket["selection"] for ticket in picked],
+                         "stake": stake, "payout": returned,
+                         "conservativeExpectedRois": [ticket["conservativeRoi"] for ticket in picked],
+                         "selectionPolicyVersion": REPLAY_SELECTION_POLICY})
     stake = sum(r["stake"] for r in selected)
     payout = sum(r["payout"] for r in selected)
     return {"status": "evaluated" if selected else "insufficient_odds_or_payout_data",
             "races": len(selected), "stake": stake, "payout": payout,
             "roi": payout / stake - 1 if stake else None,
-            "meanSelectedConservativeExpectedRoi": (sum(r["conservativeExpectedRoi"] for r in selected) / len(selected)
-                                         if selected else None),
-            "strategy": "one 100-yen trifecta per race: highest conservative expected ROI; not a cross-bet-type policy validation",
+            "racesWithPicks": sum(1 for row in selected if row["tickets"]),
+            "ticketCount": sum(row["tickets"] for row in selected),
+            "meanSelectedConservativeExpectedRoi": (sum(selected_ticket_rois) / len(selected_ticket_rois)
+                                         if selected_ticket_rois else None),
+            "selectionPolicyVersion": REPLAY_SELECTION_POLICY,
+            "selectionPolicy": {"maxPicks": max_picks, "raceBudget": race_budget,
+                                "minExpectedRoi": min_expected_roi, "maxProbStd": max_std,
+                                "minConservativeRoi": min_conservative_roi,
+                                "tieBreak": "selection_ascending"},
+            "strategy": "runtime-like EV-ranked multi-pick exact trifecta replay; not a cross-bet-type policy validation",
             "skippedRaces": dict(skipped),
             "warning": "Retrospective hypothetical replay only; not actual purchases or evidence of profitability."}
 
@@ -469,8 +511,11 @@ def _replay(store: Mapping[str, Any], test_groups: Sequence[Sequence[Mapping[str
 def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], *,
                    model_id: str, artifact_dir: str | Path = "ml/artifacts",
                    min_train_races: int = 300,
-                   feature_schema_version: str = "boat-base-v1") -> dict[str, Any]:
+                   feature_schema_version: str = "boat-base-v1",
+                   replay_max_picks: int = 1, replay_race_budget: int = 100) -> dict[str, Any]:
     """Train and chronologically evaluate an immutable candidate artifact."""
+    _select_runtime_like_tickets({}, {}, {}, max_picks=replay_max_picks,
+                                 race_budget=replay_race_budget)
     safe_rows = [dict(r) for r in rows if r.get("data_origin") == "real"
                  and r.get("race_id") and r.get("race_date")
                  and r.get("predicted_at") and available_by(r, r["predicted_at"])]
@@ -526,7 +571,8 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
     candidate_metrics = _proper_ticket_metrics(test_groups, candidate_distributions)
     top_one = sum(max(probabilities, key=probabilities.get) == _actual_selection(group)
                   for (_, probabilities), group in zip(score_rows, test_groups))
-    replay = _replay(store, test_groups, artifact_for_eval)
+    replay = _replay(store, test_groups, artifact_for_eval,
+                     max_picks=replay_max_picks, race_budget=replay_race_budget)
     meta = {"id": model_id, "sport": "boat", "betType": "trifecta", "status": "candidate",
             "algorithm": "five-fit race-bootstrap pairwise logistic ranking + Plackett-Luce exact-order distribution",
             "ticketModelSchemaVersion": TICKET_SCHEMA,

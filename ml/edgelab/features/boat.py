@@ -154,25 +154,38 @@ def build_boat_prerace_v2_features(entries: Iterable[Mapping[str, Any]], *, race
         racer_id = row.get("racer_id")
         if isinstance(racer_id, str):
             by_racer.setdefault(racer_id, []).append(row)
-    exhibition: dict[int, dict[str, Any]] = {}
-    weather: dict[str, Any] = {}
+    exhibition: dict[int, tuple[Any, str, str, dict[str, Any]]] = {}
+    weather: tuple[Any, str, str, dict[str, Any]] | None = None
     for observation in observations:
         values = _observation_values(observation, race, predicted_at)
         if not values:
             continue
-        if observation.get("kind") == "weather" and int(observation.get("entry_number", -1)) == 0:
-            weather.update(values)
+        try:
+            captured = parse_datetime(observation.get("fetched_at"))
+        except (TypeError, ValueError):
+            continue
+        # The store's arrival order can differ after archive import or replay.
+        # Timestamp wins; source hash and canonical values break same-time ties.
+        digest = str(observation.get("source_sha256") or "")
+        fingerprint = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        key = (captured, digest, fingerprint)
+        try:
+            entry_number = int(observation.get("entry_number", -1))
+        except (TypeError, ValueError):
+            continue
+        if observation.get("kind") == "weather" and entry_number == 0:
+            if weather is None or key > (weather[0], weather[1], weather[2]):
+                weather = (captured, digest, fingerprint, values)
         elif observation.get("kind") == "exhibition":
-            try:
-                lane = int(observation.get("entry_number"))
-            except (TypeError, ValueError):
-                continue
+            lane = entry_number
             if 1 <= lane <= 6:
-                exhibition[lane] = values
+                if lane not in exhibition or key > (exhibition[lane][0], exhibition[lane][1], exhibition[lane][2]):
+                    exhibition[lane] = (captured, digest, fingerprint, values)
+    weather_values = weather[3] if weather else {}
     direction = {"北": 0.0, "北東": 45.0, "東": 90.0, "南東": 135.0,
-                 "南": 180.0, "南西": 225.0, "西": 270.0, "北西": 315.0}.get(weather.get("wind_direction"))
-    wind_speed = _safe_number(weather.get("wind_speed"))
-    wave_height = _safe_number(weather.get("wave_height"))
+                 "南": 180.0, "南西": 225.0, "西": 270.0, "北西": 315.0}.get(weather_values.get("wind_direction"))
+    wind_speed = _safe_number(weather_values.get("wind_speed"))
+    wave_height = _safe_number(weather_values.get("wave_height"))
     wind_x = wind_speed * math.sin(math.radians(direction)) if wind_speed is not None and direction is not None else None
     wind_y = wind_speed * math.cos(math.radians(direction)) if wind_speed is not None and direction is not None else None
     output = []
@@ -185,7 +198,7 @@ def build_boat_prerace_v2_features(entries: Iterable[Mapping[str, Any]], *, race
         racer_id = extra.get("racer_id")
         past = by_racer.get(racer_id, []) if isinstance(racer_id, str) else []
         wins = sum(1 for row in past if row.get("finish_order") == 1 or str(row.get("finish_order")) == "1")
-        obs = exhibition.get(number, {})
+        obs = exhibition.get(number, (None, "", "", {}))[3]
         values = {key: legacy.get(key) for key in PRERACE_V2_FEATURE_COLUMNS
                   if key in legacy and key not in {"history_starts", "history_wins", "history_win_rate"}}
         values.update({

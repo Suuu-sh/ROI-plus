@@ -14,6 +14,19 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab backfill-sync --since 2026-01-01 --
 ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab live --date 2026-10-09 --window-min 25
 ```
 
+アーカイブexport APIのリリース後は、既存の `EDGELAB_API_URL` / `INGEST_TOKEN` で
+1日ずつ取得・検証し、ローカルstoreへ追加できます。これは読み取り専用で、結果をD1へ同期しません。
+
+```sh
+EDGELAB_API_URL=https://example.invalid INGEST_TOKEN=... PYTHONPATH=ml ml/.venv/bin/python -m edgelab import-prerace-archives --date 2026-10-11
+```
+
+アーカイブ本文のSHA256、日付・レースID・公式URL・パーサーバージョン・完全な120通りを検証します。
+beforeinfoは既存 `prerace_observations` 形式に保存します。取得済み時刻・利用可能時刻は原本の
+capture時刻を保ち、確認済み締切の同値証跡は最も早い取得時刻を保持します。三連単オッズは
+同期対象外のローカル専用 `prerace_capture_odds` に隔離し、オフラインリプレイだけで使います。
+同じmanifestとchecksumは再取込せず、拒否した件数と理由を出力します。
+
 ネットワーク収集は公式ボートレース日次 LZH のみを対象にします。取得済み
 ファイルは `data/raw/boatrace` に保持し、再実行時は再取得しません。未開催日は
 スキップ扱いです。番組表は前日利用可能、競走成績内の展示情報は締切 10 分前
@@ -23,9 +36,13 @@ ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab li
 候補を学習し、Plackett-Luce による厳密な三連単順序確率を時間順holdoutで採点します。
 三つの単勝確率の積は使いません。holdout払戻リプレイは同一レースの締切10分前より
 前に記録された公式・完全・非締切の三連単オッズ一式がある場合だけ実施し、不足時はROIを算出しません。
-仮想リプレイは5本以上の独立fitによる ticket確率標準偏差を要求し、`(p - std) * odds - 1`
-の保守的ROIと標準偏差上限で1レース1点（最良の三連単）を選びます。これは単一券種の
-過去リプレイであり、全券種をまたぐ運用方針の検証ではありません。候補学習はモデル行をローカルへ記録しますが、
+仮想リプレイは5本以上の独立fitによるticket確率標準偏差を要求し、運用と同じ期待ROI降順・
+選択文字列昇順で同率順序を決めます。期待ROIと `(p - std) * odds - 1` の保守的ROIが
+それぞれ5%以上で、標準偏差が5%以下の候補から最大6点を選び、整数円のレース予算を配分します。
+既定は運用の初期設定と同じ1点・100円で、`train-trifecta --replay-max-picks 3 --replay-race-budget 300`
+のように実際の設定に合わせられます。0点も許容し、リプレイ出力には
+`trifecta-runtime-ev-multipick-v1` と閾値・点数・予算を記録します。
+これは単一券種の過去リプレイであり、全券種をまたぐ運用方針の検証ではありません。候補学習はモデル行をローカルへ記録しますが、
 推論・リモート同期はせず、昇格も自動化しません。過去のB公開時刻は
 実測されておらず、保持された実績も将来利益を証明しません。
 V2 training rows use the official betting cutoff minus 60 seconds as their feature as-of boundary;

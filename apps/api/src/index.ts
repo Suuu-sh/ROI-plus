@@ -548,9 +548,10 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
         && Number.isFinite(Date.parse(row.predicted_at)) && Date.parse(row.predicted_at)<=inputAsOfAt
         && Number.isFinite(Date.parse(row.odds_captured_at)) && Date.parse(row.odds_captured_at)<=inputAsOfAt
         && row.edgeData.expectedRoi!==null && Number.isFinite(row.edgeData.expectedRoi))
-      .sort((a,b)=>b.edgeData.expectedRoi-a.edgeData.expectedRoi || Number(a.number)-Number(b.number));
-    const selected=ranked.map((row,index)=>({...row,candidateRank:index+1,candidateCount:ranked.length}))
-      .filter(row=>row.edgeData.expectedRoi>=minRoi && ['HIGH_EDGE','POSITIVE_EDGE'].includes(row.edgeData.edge)).slice(0,Math.min(maxPicks,6,raceBudget));
+      .sort((a,b)=>b.edgeData.expectedRoi-a.edgeData.expectedRoi || (String(a.selection)<String(b.selection)?-1:String(a.selection)>String(b.selection)?1:0));
+    const eligible=ranked.filter(row=>row.edgeData.expectedRoi>=minRoi && ['HIGH_EDGE','POSITIVE_EDGE'].includes(row.edgeData.edge));
+    const chosen=eligible.slice(0,Math.min(maxPicks,6,raceBudget));
+    const selected=chosen.map((row,index)=>({...row,candidateRank:index+1,candidateCount:chosen.length}));
     if (!selected.length) {
       await noteAbstention(race, paperAbstentionReason(rows));
       continue;
@@ -1243,8 +1244,13 @@ app.get('/ingest/prerace-capture-archives',async c=>{
  const rows=await all<any>(c.env.DB,`SELECT id,race_id,race_date,captured_at,archive_json
    FROM boatrace_prerace_capture_archives WHERE race_date=? AND id>? ORDER BY id ASC LIMIT ?`,date,cursor,limit+1);
  const hasMore=rows.length>limit, page=rows.slice(0,limit);
- const archives=page.map(row=>({id:row.id,raceId:row.race_id,raceDate:row.race_date,capturedAt:row.captured_at,archive:JSON.parse(row.archive_json)}));
- return c.json({date,limit,archives,nextCursor:hasMore?page.at(-1)?.id??null:null});
+ const archives=await Promise.all(page.map(async row=>{
+   const bytes=new TextEncoder().encode(row.archive_json);
+   const digest=await crypto.subtle.digest('SHA-256',bytes);
+   const archiveSha256=Array.from(new Uint8Array(digest),value=>value.toString(16).padStart(2,'0')).join('');
+   return {id:row.id,raceId:row.race_id,raceDate:row.race_date,capturedAt:row.captured_at,archiveSha256,archiveJson:row.archive_json};
+ }));
+ return c.json({schema:'boat-prerace-capture-export-v1',date,limit,archives,nextCursor:hasMore?page.at(-1)?.id??null:null});
 });
 app.post('/admin/collect-boat-results',async c=>{
  if(!auth(c)&&!proxyAuth(c))return jsonError(c,'unauthorized',401);

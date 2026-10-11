@@ -80,7 +80,7 @@ T-30 / T-10 の比較観測は秒単位のスケジューラーがないため�
 
 収集器は既存の毎分オッズ収集後に動き、同じ最大49リクエスト予算を共有する。毎時05分は結果専用回のため実行しない。1回あたり最大4レース（最大8リクエスト）、リクエスト間隔3秒以上、応答本文512KiB以下、同一レースの重複取得を4分抑止する。永続カーソルを進め、失敗や不正な艇番が先頭レースに固定されて後続を妨げないようにする。締切不足、公式ページ識別不一致、オッズ欠落、締切後の取得、リクエスト予算やD1予約の不足などは理由コードで返す。失敗の要約は既存500 unitのcollection予約枠が使える場合に、同日分の `collection_runs` 1行に保存する。
 
-移行 `0011_boatrace_capture_archives.sql` は日付・カーソル索引と更新・削除を禁止するアーカイブ表を追加する。120オッズは1つのJSON行に保存する。Workerは取得前に既存4,000 unitのオッズ上限から、ロック・カーソル制御用の `estimateWorkerWriteUnits(5)` とアーカイブごとの `estimateWorkerWriteUnits(1)` を予約する。これはアプリ内の保守的な推定値で、D1アカウント全体の使用量ではない。`GET /api/ingest/prerace-capture-archives?date=YYYY-MM-DD&cursor=...&limit=...` は既存 `INGEST_TOKEN` を使い、日付を1つ指定し、1ページ最大25件でPython側の復元に使える。`/board` と `/performance/*` は引き続き購入済みレースの運用成績だけを扱い、この保存データは購入・判断を変えない。新規スケジューラー、binding、認証方式、D1予算は追加しない。移行は追加型で、Worker公開前に適用が必要だが、本変更では本番DB/Workerに操作していない。
+移行 `0011_boatrace_capture_archives.sql` は日付・カーソル索引と更新・削除を禁止するアーカイブ表を追加する。120オッズは1つのJSON行に保存する。Workerは取得前に既存4,000 unitのオッズ上限から、ロック・カーソル制御用の `estimateWorkerWriteUnits(5)` とアーカイブごとの `estimateWorkerWriteUnits(1)` を予約する。これはアプリ内の保守的な推定値で、D1アカウント全体の使用量ではない。`GET /api/ingest/prerace-capture-archives?date=YYYY-MM-DD&cursor=...&limit=...` は既存 `INGEST_TOKEN` を使い、日付を1つ指定し、1ページ最大25件でPython側の復元に使える。exportは保存JSON本文とSHA256を返す。`import-prerace-archives` は本文・レースID・公式URL・120オッズを検証し、beforeinfoを既存の特徴量観測形式に、オッズをローカル専用manifest付き表に追加する。オッズは通常同期へ含めず、オフライン学習・リプレイだけで使う。同一manifestとchecksumは冪等に無視し、cutoffの同一証跡は最も早い実取得時刻を保つ。`/board` と `/performance/*` は引き続き購入済みレースの運用成績だけを扱い、この保存データは購入・判断を変えない。新規スケジューラー、binding、認証方式、D1予算は追加しない。移行は追加型で、Worker公開前に適用が必要だが、本変更では本番DB/Workerに操作していない。
 
 ### 仮想バンクロールと bet の制御
 

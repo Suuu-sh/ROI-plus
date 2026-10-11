@@ -9,8 +9,14 @@ DEFAULT_STORE = Path("ml/data/rows.json")
 def load_rows(path: str | Path = DEFAULT_STORE) -> dict[str, list[dict[str, Any]]]:
     target = Path(path)
     if not target.exists():
-        return {k: [] for k in ("races", "entries", "odds_snapshots", "results", "payouts", "predictions", "ticket_predictions", "prerace_observations", "models", "collection_runs")}
-    return json.loads(target.read_text(encoding="utf-8"))
+        rows = {}
+    else:
+        rows = json.loads(target.read_text(encoding="utf-8"))
+    for table in ("races", "entries", "odds_snapshots", "results", "payouts", "predictions",
+                  "ticket_predictions", "prerace_observations", "models", "collection_runs",
+                  "prerace_capture_archive_manifest", "prerace_capture_odds"):
+        rows.setdefault(table, [])
+    return rows
 
 def save_rows(rows: dict[str, list[dict[str, Any]]], path: str | Path = DEFAULT_STORE) -> None:
     target = Path(path)
@@ -25,6 +31,8 @@ def merge_rows(target: dict[str, list[dict[str, Any]]], incoming: dict[str, list
             "predictions": ("race_id", "model_id", "number", "predicted_at"),
             "ticket_predictions": ("race_id", "model_id", "bet_type", "selection", "predicted_at"),
             "prerace_observations": ("race_id", "kind", "entry_number", "fetched_at"),
+            "prerace_capture_archive_manifest": ("id",),
+            "prerace_capture_odds": ("race_id", "bet_type", "selection", "captured_at"),
             "models": ("id",), "collection_runs": ("id",)}
     for table, new_rows in incoming.items():
         if table not in keys:

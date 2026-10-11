@@ -396,10 +396,11 @@ describe('EdgeLab API',()=>{
   sqlite.prepare("UPDATE settings SET value='2' WHERE key='auto_bet_max_picks'").run();
   sqlite.prepare("UPDATE settings SET value='100' WHERE key='auto_bet_race_budget'").run();
   expect(await Promise.all([autoBet(DB,true,decisionAt),autoBet(DB,true,decisionAt)])).toEqual(expect.arrayContaining([0,2]));
-  const placed=sqlite.prepare("SELECT bet_group_id,candidate_rank,candidate_count,stake,bet_type FROM bets WHERE mode='auto' AND race_id=? ORDER BY candidate_rank").all(raceId) as any[];
+  const placed=sqlite.prepare("SELECT bet_group_id,candidate_rank,candidate_count,stake,bet_type,selection FROM bets WHERE mode='auto' AND race_id=? ORDER BY candidate_rank").all(raceId) as any[];
   expect(placed).toHaveLength(2);expect(placed.map(x=>x.stake)).toEqual([50,50]);
   expect(placed.every(x=>x.bet_type==='trifecta')).toBe(true);
   expect(placed.map(x=>x.candidate_rank)).toEqual([1,2]);expect(placed[0].bet_group_id).toBe(placed[1].bet_group_id);
+  expect(placed.map(x=>x.selection)).toEqual(['1-2-3','1-2-4']);
   expect(placed.every(x=>x.candidate_count===2)).toBe(true);
   expect(sqlite.prepare("SELECT SUM(stake) stake FROM bets WHERE mode='auto' AND race_id=?").get(raceId)).toMatchObject({stake:100});
  });
