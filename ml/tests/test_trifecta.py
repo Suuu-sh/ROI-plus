@@ -142,4 +142,50 @@ def test_replay_consumes_local_archive_odds_and_versions_multi_ticket_policy(mon
     assert single["ticketCount"] == 1 and single["stake"] == 100
     monkeypatch.setattr("edgelab.models.trifecta.ensemble_ordered_triples",
         lambda *_: ({selection: .001 for selection in probabilities}, deviations))
-    empty = _replay(store, [group], {"model": {"unused"
+    empty = _replay(store, [group], {"model": {"unused": True}}, race_budget=100, max_picks=1)
+    assert empty["races"] == 1 and empty["racesWithPicks"] == empty["ticketCount"] == empty["stake"] == 0
+    assert empty["roi"] is None
+
+
+def test_active_forecast_requires_registered_validation_and_trained_before_cutoff():
+    model_id = "boat-trifecta-validated"
+    fitted = _fit(race("train", "2026-01-01"), BASE_FEATURE_COLUMNS)
+    artifact = {"metadata": {"id": model_id, "ticketModelSchemaVersion": "ticket-selection-v1",
+        "ticketPredictionSemantics": "exact-selection-probability-v1", "ticketBetType": "trifecta",
+        "trainedAt": "2026-01-01T00:00:00+00:00"}, "model": fitted,
+        "bootstrap_models": [fitted, fitted, fitted, fitted], "columns": list(BASE_FEATURE_COLUMNS),
+        "temperature": 1.0}
+    digest = "a" * 64
+    model_row = {"id": model_id, "status": "active", "bet_type": "trifecta", "metrics": {
+        "ticketModelSchemaVersion": "ticket-selection-v1",
+        "ticketPredictionSemantics": "exact-selection-probability-v1",
+        "ticketBetType": "trifecta", "ticketArtifactSha256": digest, "promotionEligible": True}}
+    race_id = "boat-20260102-24-01"
+    entries = [{"race_id": race_id, "number": lane, "data_origin": "real",
+        "available_at": "2026-01-02T00:00:00+09:00", "national_win_rate": .2,
+        "local_win_rate": .2, "motor_2rate": 30, "boat_2rate": 30} for lane in range(1, 7)]
+    store = {"races": [{"id": race_id, "sport": "boat", "race_date": "2026-01-02",
+                        "data_origin": "real", "status": "scheduled",
+                        "post_time": "2026-01-02T13:00:00+09:00"}], "entries": entries}
+    predictions = active_ticket_predictions(store, model_row=model_row, artifact=artifact,
+        model_id=model_id, cutoff="2026-01-02T12:00:00+09:00", artifact_sha256=digest)
+    assert len(predictions) == 120
+    assert sum(row["probability"] for row in predictions) == pytest.approx(1.0)
+    assert all(row["prob_std"] == pytest.approx(0, abs=1e-15) for row in predictions)
+    artifact["metadata"]["trainedAt"] = "2026-01-02T12:00:00+09:00"
+    with pytest.raises(ValueError, match="trained strictly before"):
+        active_ticket_predictions(store, model_row=model_row, artifact=artifact,
+            model_id=model_id, cutoff="2026-01-02T12:00:00+09:00", artifact_sha256=digest)
+
+
+def test_temporal_candidate_reports_no_profitability_without_real_odds(tmp_path):
+    rows = [r for day in range(1, 13) for r in race(
+        f"r{day}", f"2026-01-{day:02d}", winner=(day % 6) + 1)]
+    result = train_trifecta(rows, {"races": [], "payouts": [], "odds_snapshots": []},
+                            model_id="boat-trifecta-test", artifact_dir=tmp_path,
+                            min_train_races=2)
+    assert result["status"] == "candidate"
+    assert result["metrics"]["promotionEligible"] is False
+    assert result["metrics"]["payoutReplay"]["roi"] is None
+    assert result["metrics"]["payoutReplay"]["status"] == "insufficient_odds_or_payout_data"
+    assert result["nBootstrapModels"] == 4

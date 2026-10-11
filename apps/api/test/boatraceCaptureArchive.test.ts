@@ -108,4 +108,46 @@ describe('data-only prerace capture archive',()=>{
     const first=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{
       maxRaces:1,now:()=>FIXED_NOW,sleep:async()=>{},fetch:fetchFor('2026-10-11',1),
     });
-    expect(first).toMatchObject({status:'skipped'
+    expect(first).toMatchObject({status:'skipped',reason:'no_valid_six_lane_races',failures:[{raceId:invalid,reason:'entry_lane_set_not_six'}]});
+    const secondRun=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW+60_000),{
+      maxRaces:1,now:()=>FIXED_NOW+60_000,sleep:async()=>{},fetch:fetchFor('2026-10-11',2),
+    });
+    expect(secondRun).toMatchObject({status:'success',records:1});
+    expect(sqlite.prepare('SELECT race_id FROM boatrace_prerace_capture_archives').get()).toMatchObject({race_id:second});
+  });
+
+  it('fails closed before fetching when the existing odds write allowance is exhausted',async()=>{
+    const raceId=addRace();
+    sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'")
+      .run(JSON.stringify({date:'2026-10-11',reserved:4_000,oddsReserved:4_000,essentialReserved:0,optionalReserved:4_000,collectionReserved:0}));
+    let fetched=false;
+    const result=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{now:()=>FIXED_NOW,fetch:async()=>{fetched=true;throw new Error('unexpected');}});
+    expect(result).toMatchObject({status:'skipped',reason:'d1_write_budget_unavailable_or_exhausted',targets:1,attempted:0,records:0});
+    expect(fetched).toBe(false);
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM boatrace_prerace_capture_archives').get()).toMatchObject({n:0});
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boatrace_capture_archive_lock'").get()).toMatchObject({n:0});
+    expect(sqlite.prepare('SELECT id FROM races WHERE id=?').get(raceId)).toBeTruthy();
+  });
+
+  it('exports a single date through existing bearer auth with a bounded cursor page',async()=>{
+    const first=addRace(),second=addRace(2,11*60_000);
+    const fetch=async(input:string)=>{
+      const raceNo=Number(new URL(input).searchParams.get('rno'));
+      return fetchFor('2026-10-11',raceNo)(input);
+    };
+    await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{now:()=>FIXED_NOW,sleep:async()=>{},fetch});
+    const path='/api/ingest/prerace-capture-archives?date=2026-10-11&limit=1';
+    expect((await app.request(path,{}, {DB,INGEST_TOKEN:'test-token'})).status).toBe(401);
+    const response=await app.request(path,{headers:{authorization:'Bearer test-token'}},{DB,INGEST_TOKEN:'test-token'});
+    expect(response.status).toBe(200);
+    const pageOne=await response.json() as any;
+    expect(pageOne).toMatchObject({schema:'boat-prerace-capture-export-v1',date:'2026-10-11',limit:1,archives:[{raceId:first}]});
+    const wrapper=pageOne.archives[0];
+    expect(wrapper.archiveSha256).toBe(createHash('sha256').update(wrapper.archiveJson,'utf8').digest('hex'));
+    expect(JSON.parse(wrapper.archiveJson)).toMatchObject({schema:'boat-prerace-capture-v1'});
+    expect(pageOne.nextCursor).toMatch(new RegExp(`^${first}:capture:\\d{13}$`));
+    const pageTwo=await app.request(`${path}&cursor=${encodeURIComponent(pageOne.nextCursor)}`,{headers:{authorization:'Bearer test-token'}},{DB,INGEST_TOKEN:'test-token'});
+    expect(await pageTwo.json()).toMatchObject({archives:[{raceId:second}],nextCursor:null});
+    expect((await app.request('/api/ingest/prerace-capture-archives?date=2026-10-11&limit=26',{headers:{authorization:'Bearer test-token'}},{DB,INGEST_TOKEN:'test-token'})).status).toBe(400);
+  });
+});

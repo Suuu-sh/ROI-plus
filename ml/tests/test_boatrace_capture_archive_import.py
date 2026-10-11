@@ -144,4 +144,42 @@ def test_features_choose_latest_eligible_archive_observation_by_timestamp_not_ro
     forward = build_boat_prerace_v2_features(store["entries"], race=race,
         predicted_at="2026-10-11T15:19:00+09:00", observations=[same_capture, conflict])
     reverse = build_boat_prerace_v2_features(store["entries"], race=race,
-     
+        predicted_at="2026-10-11T15:19:00+09:00", observations=[conflict, same_capture])
+    assert forward[0]["exhibition_time"] == reverse[0]["exhibition_time"]
+
+
+def test_imported_archive_features_flow_to_training_at_verified_t60():
+    store = _store()
+    store["races"][0]["status"] = "finished"
+    import_capture_archives(store, [_page(_archive("2026-10-11T15:17:03+09:00", 6.78))], DAY)
+    store["results"] = [{"race_id": RACE_ID, "number": lane, "finish_order": lane,
+                         "data_origin": "real"} for lane in range(1, 7)]
+    rows = _make_training_rows(store, "boat", feature_schema="boat-prerace-v2")
+    assert len(rows) == 6
+    assert {row["predicted_at"] for row in rows} == {"2026-10-11T15:18:00+09:00"}
+    assert rows[0]["exhibition_time"] == 6.78
+
+
+class _Response:
+    def __init__(self, payload):
+        self._payload = json.dumps(payload).encode()
+    def read(self, size=-1):
+        return self._payload[:size]
+    def __enter__(self):
+        return self
+    def __exit__(self, *_):
+        return False
+
+
+def test_archive_fetch_uses_existing_bearer_auth_and_follows_bounded_cursor_pages():
+    calls = []
+    first_page = _page(_archive("2026-10-11T15:17:03+09:00", 6.78))
+    first_page["nextCursor"] = "cursor-1"
+    pages = [first_page, _page(_archive("2026-10-11T15:18:03+09:00", 6.90))]
+    def opener(request: Request, timeout=30):
+        calls.append((request, timeout))
+        return _Response(pages[len(calls) - 1])
+    result = fetch_prerace_capture_archives(DAY, base_url="https://example.invalid", token="local-test-token", opener=opener)
+    assert len(result) == 2
+    assert calls[0][0].get_header("Authorization") == "Bearer local-test-token"
+    assert calls[0][1] == 30
