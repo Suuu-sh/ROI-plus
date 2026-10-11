@@ -181,9 +181,27 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         if run.get("target_date") in (previous, day) and run.get("sport") == "boat":
             latest_runs[run["target_date"]] = run
     run_ids = {r.get("id") for r in latest_runs.values()}
+    def has_official_nonfinisher_marker(entry: dict[str, Any]) -> bool:
+        """Keep prior-day K status for entries without a numeric finish order.
+
+        The previous day's results/payouts are synced so settlement can finish,
+        but ordinary prior-day entry updates are unnecessary. Explicit K-file
+        terminal markers are needed to prove that every program entry either
+        finished or has an official non-finisher outcome.
+        """
+        try:
+            finish_code = json.loads(entry.get("features_json") or "{}").get("finish_code")
+        except (TypeError, ValueError):
+            return False
+        return (finish_code in {"F", "L", "K", "欠場", "欠", "失格", "転覆", "妨害", "落水", "エンスト", "不完走"}
+                or (isinstance(finish_code, str) and finish_code.startswith("K")
+                    and finish_code[1:].isdigit()))
+
     payload = {
         "races": [r for r in rows.get("races", []) if r.get("id") in prev_ids | today_ids],
-        "entries": [r for r in rows.get("entries", []) if r.get("race_id") in today_ids],
+        "entries": [r for r in rows.get("entries", [])
+                    if r.get("race_id") in today_ids
+                    or (r.get("race_id") in prev_ids and has_official_nonfinisher_marker(r))],
         "predictions": predictions,
         # K files can already contain same-day finished races during midday or
         # late-night runs; settle those alongside yesterday's outcomes.

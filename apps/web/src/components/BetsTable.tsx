@@ -9,7 +9,8 @@ const resultWaitLabel: Record<NonNullable<Bet['resultWaitReason']>, string> = {
   notstarted: '発走前', officialresultmissing: '公式結果未取得', payoutmissing: '公式払戻未取得',
   settlementpending: '精算待ち', collectionfailed: '結果収集に失敗/一部失敗の記録あり',
   unknown: '状況不明', cancelled: 'レース中止', disqualified: '失格記録あり',
-  withdrawn: '欠場記録あり', sampledata: 'サンプル（公式結果ではありません）',
+  withdrawn: '欠場記録あり', refundmissing: 'F/L記録あり・返還情報未取得',
+  sampledata: 'サンプル（公式結果ではありません）',
 }
 const collectionStatusLabel = { success: '成功', partial: '一部成功', failed: '失敗', skipped: 'スキップ' } as const
 

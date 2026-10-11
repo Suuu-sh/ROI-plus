@@ -89,6 +89,21 @@ def test_fixture_k_utf8_matches_shift_jis():
     assert utf8 == sjis
 
 
+def test_k_false_start_is_saved_as_terminal_entry_without_fabricated_finish_order():
+    source = """1R 一般 H1800m 晴 風 0m 波 0cm
+ 01 1 4950 高岡竜也 50 60 6.90 1 0.06
+ 02 2 5234 塚越海斗 51 61 7.00 2 0.04
+ F 5 3577 向所浩二 54 64 7.30 5 F.01
+ 単勝 1 120
+"""
+    parsed = parse_k(source, race_date="2026-10-10", venue_code="01")
+    race_id = "boat-20261010-01-01"
+    false_start = next(row for row in parsed["entries"]
+                       if row["race_id"] == race_id and row["number"] == 5)
+    assert json.loads(false_start["features_json"])["finish_code"] == "F"
+    assert all(row["number"] != 5 for row in parsed["results"])
+
+
 @pytest.mark.skipif(not PRIVATE_FIXTURES.exists(), reason="private official fixtures are not installed")
 def test_private_official_b_regression():
     parsed = parse_b((PRIVATE_FIXTURES / "b260901.txt").read_bytes())
