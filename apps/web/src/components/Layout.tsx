@@ -47,6 +47,7 @@ function SampleNotice() {
 
 export function Layout() {
   const { pathname } = useLocation()
+  const isBoatRoute = /^\/boat(?:\/|$)/.test(pathname)
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[232px_1fr]">
       <aside className="sticky top-0 hidden h-screen flex-col border-r border-line bg-surface px-3 py-5 lg:flex">
@@ -75,13 +76,15 @@ export function Layout() {
       </aside>
 
       <div className="min-w-0">
-        <header className="sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-line bg-bg/85 px-4 py-3 backdrop-blur lg:px-8">
+        <header className={`${isBoatRoute ? 'lg:hidden' : ''} sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-line bg-bg/85 px-4 py-3 backdrop-blur lg:px-8`}>
           <div className="lg:hidden"><Brand /></div>
-          <div className="hidden text-xs text-muted lg:block">表示データ</div>
-          <OriginToggle />
+          {!isBoatRoute && <>
+            <div className="hidden text-xs text-muted lg:block">表示データ</div>
+            <OriginToggle />
+          </>}
         </header>
         <main className="mx-auto max-w-[1280px] px-4 pb-28 pt-5 lg:px-8 lg:pb-12">
-          <SampleNotice />
+          {!isBoatRoute && <SampleNotice />}
           <ErrorBoundary resetKey={pathname}><Outlet /></ErrorBoundary>
         </main>
       </div>

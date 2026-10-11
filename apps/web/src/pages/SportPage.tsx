@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import type { Bet, RankingCandidate, TicketCandidate, EntryView, RaceDetail, RaceSummary, Sport } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
@@ -6,10 +6,9 @@ import { useOrigin } from '../lib/origin'
 import { useAsync } from '../lib/useAsync'
 import { dateTime, freshness, num, odds, pct, signedPct, signedYen, yen, timeOf, todayJst, tone } from '../lib/format'
 import { t } from '../i18n'
-import { EdgeBadge, Empty, ErrorState, Kpi, Loading, OriginBadge, ProbBar, Section, SportIcon } from '../components/ui'
+import { EdgeBadge, Empty, ErrorState, Loading, OriginBadge, ProbBar, Section, SportIcon } from '../components/ui'
 import { BetSheet } from '../components/BetSheet'
 import { EquityChart } from '../components/EquityChart'
-import { ProfitabilityNotice } from './Performance'
 import { betTypeLabel } from '../lib/betType'
 
 function shiftDate(d: string, days: number) {
@@ -20,11 +19,10 @@ function shiftDate(d: string, days: number) {
 
 export function SportPage({ sport }: { sport: Sport }) {
   const { raceId } = useParams()
-  const { origin } = useOrigin()
+  const { origin: selectedOrigin } = useOrigin()
+  const origin = sport === 'boat' ? 'real' : selectedOrigin
   const [date, setDate] = useState(todayJst)
   const [performanceVersion, setPerformanceVersion] = useState(0)
-  const [historyAll, setHistoryAll] = useState(sport === 'boat')
-  useEffect(() => { setHistoryAll(sport === 'boat') }, [sport])
   const [researchOpen, setResearchOpen] = useState(Boolean(raceId))
   const bets = useAsync(() => api.bets(origin, sport), [sport, origin])
   useEffect(() => { if (raceId) setResearchOpen(true) }, [raceId])
@@ -38,7 +36,6 @@ export function SportPage({ sport }: { sport: Sport }) {
           <h1 className={`flex items-center gap-2 text-xl font-semibold tracking-tight ${accent}`}>
             <SportIcon sport={sport} className="h-6 w-6" />{t().sport[sport]}
           </h1>
-          <p className="mt-1 text-sm text-muted">{sport === 'horse' ? 'JRA 中央競馬' : '全国24場'}・仮想購入とレース結果の確認</p>
         </div>
         <div className="flex items-center gap-1.5">
           <button className="btn-ghost h-8 w-8 px-0" onClick={() => setDate((d) => shiftDate(d, -1))} aria-label="前日">‹</button>
@@ -49,38 +46,54 @@ export function SportPage({ sport }: { sport: Sport }) {
       </div>
 
       {sport === 'boat' && <SportPerformance origin={origin} sport={sport} version={performanceVersion} />}
-      {sport === 'boat' && <div className="flex items-center gap-2 text-sm">
-        <button className={historyAll ? 'btn-primary' : 'btn-ghost'} onClick={() => setHistoryAll(true)}>全期間の購入履歴</button>
-        <button className={!historyAll ? 'btn-primary' : 'btn-ghost'} onClick={() => setHistoryAll(false)}>選択日の購入履歴</button>
-      </div>}
-      <PurchasedRaces bets={bets.data} date={historyAll ? undefined : date} loading={bets.loading} error={bets.error} onRetry={bets.reload} />
+      <PurchasedRaces
+        bets={bets.data}
+        date={sport === 'boat' ? undefined : date}
+        loading={bets.loading}
+        error={bets.error}
+        onRetry={bets.reload}
+      />
 
-      <details className="card group" open={researchOpen || undefined} onToggle={(event) => setResearchOpen(event.currentTarget.open)}>
+      {(sport !== 'boat' || raceId) && <details className="card group" open={researchOpen || undefined} onToggle={(event) => setResearchOpen(event.currentTarget.open)}>
         <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold marker:content-none">レースを調べる <span className="ml-2 text-xs font-normal text-muted">期待値ランキング・出走表</span></summary>
         {researchOpen && <ResearchArea sport={sport} date={date} origin={origin} raceId={raceId} onDate={setDate} onChanged={() => { bets.reload(); setPerformanceVersion((v) => v + 1) }} />}
-      </details>
+      </details>}
     </div>
   )
 }
 
 function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeof useOrigin>['origin']; sport: Sport; version: number }) {
   const q = useAsync(() => api.overview(origin, sport), [origin, sport, version])
-  if (q.error) return <Section title="全期間の仮想運用成績"><ErrorState error={q.error} onRetry={q.reload} /></Section>
-  if (!q.data) return <Section title="全期間の仮想運用成績"><Loading rows={2} /></Section>
+  if (q.error) return <Section className="w-full min-w-0" title="仮想運用成績"><ErrorState error={q.error} onRetry={q.reload} /></Section>
+  if (!q.data) return <Section className="w-full min-w-0" title="仮想運用成績"><Loading rows={2} /></Section>
   const ov = q.data
-  return <section className="space-y-3" aria-label="全期間の仮想運用成績">
-    <h2 className="text-sm font-semibold">全期間の仮想運用成績</h2>
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-      <Kpi label="累計損益" value={signedYen(ov.totalProfit)} valueClass={tone(ov.totalProfit)} />
-      <Kpi label="回収率" value={pct(ov.roi)} sub="確定購入の払戻 ÷ 購入額" />
-      <Kpi label="仮想購入回数" value={ov.betCount.toLocaleString()} sub={`確定 ${ov.settledCount}`} />
-      <Kpi label="的中率" value={pct(ov.hitRate)} />
+  return <section className="card w-full min-w-0 overflow-hidden" aria-label="全期間の仮想運用成績">
+    <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line px-4 py-2">
+      <h2 className="text-sm font-semibold">仮想運用成績</h2>
+      <p className="text-right text-[11px] text-muted">全期間・初期資金 {yen(ov.initialBankroll)}・損益 / 回収率は確定分</p>
+    </header>
+    <div className="grid grid-cols-2 divide-x divide-y divide-line md:grid-cols-4 md:divide-y-0">
+      <PerformanceMetric label="累計損益" value={signedYen(ov.totalProfit)} valueClass={tone(ov.totalProfit)} />
+      <PerformanceMetric label="回収率" value={pct(ov.roi)} sub="確定払戻 ÷ 購入額" />
+      <PerformanceMetric label="仮想購入回数" value={ov.betCount.toLocaleString()} sub={`確定 ${ov.settledCount}`} />
+      <PerformanceMetric label="的中率" value={pct(ov.hitRate)} />
     </div>
-    <Section title="資産推移" right={<span className="text-xs text-muted">初期仮想資金 {yen(ov.initialBankroll)}・確定損益のみ</span>}>
-      {ov.equityCurve.length > 1 ? <EquityChart data={ov.equityCurve} base={ov.initialBankroll} /> : <Empty>確定した仮想購入がまだありません。</Empty>}
-    </Section>
-    <ProfitabilityNotice origin={origin} settledBets={ov.settledCount} />
+    <div className="border-t border-line">
+      <div className="flex items-center justify-between gap-3 px-4 pt-2">
+        <h3 className="text-xs font-semibold">資産推移</h3>
+        <span className="text-[11px] text-muted">確定損益のみ</span>
+      </div>
+      {ov.equityCurve.length > 1 ? <EquityChart data={ov.equityCurve} base={ov.initialBankroll} compact /> : <div className="px-4 py-4 text-center text-xs text-muted">確定した仮想購入がまだありません。</div>}
+    </div>
   </section>
+}
+
+function PerformanceMetric({ label, value, sub, valueClass = '' }: { label: string; value: string; sub?: string; valueClass?: string }) {
+  return <div className="min-w-0 bg-surface px-3 py-2">
+    <div className="text-[11px] font-medium text-muted">{label}</div>
+    <div className={`num mt-0.5 break-words text-xl font-semibold tracking-tight ${valueClass}`}>{value}</div>
+    {sub && <div className="num text-[10px] text-muted">{sub}</div>}
+  </div>
 }
 
 function ResearchArea({ sport, date, origin, raceId, onDate, onChanged }: { sport: Sport; date: string; origin: ReturnType<typeof useOrigin>['origin']; raceId?: string; onDate: (date: string) => void; onChanged: () => void }) {
@@ -105,51 +118,35 @@ export function filterBetsByDate(bets: Bet[], date: string) { return bets.filter
 
 function PurchaseRail({ groups }: { groups: Bet[][] }) {
   const rail = useRef<HTMLDivElement>(null)
-  const id = useId()
-  const [edges, setEdges] = useState({ start: true, end: true })
-  useEffect(() => {
-    const element = rail.current
-    if (!element) return
-    const update = () => setEdges({ start: element.scrollLeft <= 1, end: element.scrollLeft + element.clientWidth >= element.scrollWidth - 1 })
-    update()
-    element.addEventListener('scroll', update, { passive: true })
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
-    observer?.observe(element)
-    return () => { element.removeEventListener('scroll', update); observer?.disconnect() }
-  }, [])
   const slide = (direction: number) => {
     const element = rail.current
     if (!element) return
     const card = element.firstElementChild as HTMLElement | null
     element.scrollBy({ left: direction * ((card?.getBoundingClientRect().width ?? element.clientWidth) + 12), behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
   }
-  return <div className="min-w-0">
-    <div className="flex items-center justify-between gap-2 px-3 pt-3">
-      <p className="text-[11px] text-muted">{groups.length}レース・横にスワイプして確認</p>
-      <div className="flex gap-1">
-        <button className="btn-ghost focus-ring h-8 w-8 px-0" aria-label="前の購入レース" aria-controls={id} disabled={edges.start} onClick={() => slide(-1)}>‹</button>
-        <button className="btn-ghost focus-ring h-8 w-8 px-0" aria-label="次の購入レース" aria-controls={id} disabled={edges.end} onClick={() => slide(1)}>›</button>
-      </div>
-    </div>
-    <p className="px-3 pt-2 text-[10px] text-muted">確定オッズは保存払戻の換算値です。非的中などでは記録がない場合があります（現在のオッズではありません）。</p>
-    <div ref={rail} id={id} role="region" aria-label="購入レースの横スクロール" tabIndex={0}
+  return <div ref={rail} role="region" aria-label="購入レースの横スクロール" tabIndex={0}
       className="purchase-rail focus-ring"
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return
         if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); slide(event.key === 'ArrowLeft' ? -1 : 1) }
       }}>
-      {groups.map((items) => <PurchasedRace key={items[0].raceId} bets={items} />)}
-    </div>
+    {groups.map((items) => <PurchasedRace key={items[0].raceId} bets={items} />)}
   </div>
 }
 
-export function PurchasedRaces({ bets, date, loading, error, onRetry }: { bets: Bet[] | null; date?: string; loading: boolean; error: Error | null; onRetry: () => void }) {
+export function PurchasedRaces({ bets, date, loading, error, onRetry }: {
+  bets: Bet[] | null
+  date?: string
+  loading: boolean
+  error: Error | null
+  onRetry: () => void
+}) {
   const grouped = new Map<string, Bet[]>()
   for (const bet of date ? filterBetsByDate(bets ?? [], date) : bets ?? []) grouped.set(bet.raceId, [...(grouped.get(bet.raceId) ?? []), bet])
-  return <Section className="min-w-0 overflow-hidden" title="購入したレース" right={<span className="text-xs text-muted">{date ?? '全期間'}・仮想購入レビュー</span>}>
-    {error ? <ErrorState error={error} onRetry={onRetry} /> : loading && !bets ? <Loading rows={2} /> : grouped.size === 0 ? <Empty>{date ? 'この日付の仮想購入はありません。日付を切り替えるか、' : '仮想購入はまだありません。'}レースを調べるから購入できます。</Empty> :
-      <PurchaseRail key={`${date ?? 'all'}:${[...grouped.keys()].join(',')}`} groups={[...grouped.values()]} />}
-  </Section>
+  return <section className="w-full min-w-0">
+      {error ? <ErrorState error={error} onRetry={onRetry} /> : loading && !bets ? <Loading rows={2} /> : grouped.size === 0 ? <Empty>{date ? 'この日付の仮想購入はありません。' : '仮想購入はまだありません。'}</Empty> :
+        <PurchaseRail key={`${date ?? 'all'}:${[...grouped.keys()].join(',')}`} groups={[...grouped.values()]} />}
+  </section>
 }
 
 export function PurchasedRace({ bets }: { bets: Bet[] }) {

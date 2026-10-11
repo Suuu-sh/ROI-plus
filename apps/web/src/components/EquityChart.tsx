@@ -1,12 +1,12 @@
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { yen } from '../lib/format'
 
-export function EquityChart({ data, base }: { data: { at: string; bankroll: number }[]; base: number }) {
+export function EquityChart({ data, base, compact = false }: { data: { at: string; bankroll: number }[]; base: number; compact?: boolean }) {
   const last = data.at(-1)?.bankroll ?? base
   const up = last >= base
   const color = up ? 'rgb(var(--pos))' : 'rgb(var(--neg))'
   return (
-    <div className="h-[240px] w-full">
+    <div className={`w-full ${compact ? 'h-[168px]' : 'h-[240px]'}`}>
       <ResponsiveContainer>
         <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
           <defs>
