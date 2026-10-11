@@ -131,6 +131,7 @@ function PurchaseRail({ groups }: { groups: Bet[][] }) {
         <button className="btn-ghost focus-ring h-8 w-8 px-0" aria-label="次の購入レース" aria-controls={id} disabled={edges.end} onClick={() => slide(1)}>›</button>
       </div>
     </div>
+    <p className="px-3 pt-2 text-[10px] text-muted">確定オッズは保存払戻の換算値です。非的中などでは記録がない場合があります（現在のオッズではありません）。</p>
     <div ref={rail} id={id} role="region" aria-label="購入レースの横スクロール" tabIndex={0}
       className="purchase-rail focus-ring"
       onKeyDown={(event) => {
@@ -172,15 +173,18 @@ function PurchaseSnapshot({ bet: b }: { bet: Bet }) {
   const label = b.status === 'open' ? '仮想購入・精算待ち' : b.status === 'void' ? '無効' : b.status === 'won' ? '的中（精算記録）' : '不的中（精算記録）'
   return <div className="rounded-lg border border-line bg-raised/30 p-2.5">
     <div className="flex flex-wrap items-center justify-between gap-1"><div className="break-words font-mono text-sm font-semibold">{betTypeLabel[b.betType]} {b.selection}<span className="ml-2 rounded bg-raised px-1.5 py-0.5 font-sans text-[10px] text-muted">仮想・{b.mode === 'auto' ? '自動' : '手動'}</span></div><span className={`text-[11px] ${b.status === 'won' ? 'text-pos' : b.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{label}</span></div>
+    <dl className="mt-2 grid grid-cols-2 gap-2 rounded-md bg-surface/60 p-2 text-xs">
+      <div><dt className="text-[10px] text-muted">購入時オッズ</dt><dd className="num mt-0.5 font-semibold">{b.oddsAtBet == null ? '記録なし' : odds(b.oddsAtBet)}</dd></div>
+      <div><dt className="text-[10px] text-muted">確定オッズ（払戻換算）</dt><dd className="num mt-0.5 font-semibold">{b.status === 'void' ? '対象外（無効）' : b.finalOdds == null ? b.status === 'open' ? '未記録 / 精算待ち' : '記録なし' : odds(b.finalOdds)}</dd></div>
+    </dl>
     <dl className="mt-2 grid grid-cols-3 gap-x-2 gap-y-2 text-xs">
       <div><dt className="text-[10px] text-muted">購入時確率</dt><dd className="num mt-0.5">{pct(b.predictedProb)}</dd></div>
-      <div><dt className="text-[10px] text-muted">購入時オッズ</dt><dd className="num mt-0.5">{odds(b.oddsAtBet)}</dd></div>
       <div><dt className="text-[10px] text-muted">購入時期待収益率</dt><dd className={`num mt-0.5 ${tone(b.expectedRoi)}`}>{signedPct(b.expectedRoi)}</dd></div>
+      <div><dt className="text-[10px] text-muted">購入時候補順位</dt><dd className="num mt-0.5">{b.candidateRank == null ? '記録なし' : `${b.candidateRank}位 / ${b.candidateCount ?? '—'}件`}</dd></div>
       <div><dt className="text-[10px] text-muted">購入額</dt><dd className="num mt-0.5 break-words">{b.stake.toLocaleString()}円</dd></div>
       <div><dt className="text-[10px] text-muted">払戻</dt><dd className="num mt-0.5 break-words">{b.payout == null ? '記録なし' : `${b.payout.toLocaleString()}円`}</dd></div>
       <div><dt className="text-[10px] text-muted">損益</dt><dd className={`num mt-0.5 break-words ${tone(b.profit)}`}>{b.profit == null ? '記録なし' : `${b.profit > 0 ? '+' : ''}${b.profit.toLocaleString()}円`}</dd></div>
     </dl>
-    <p className="mt-2 border-t border-line pt-1.5 text-[10px] text-muted">購入時候補順位 <span className="num text-ink">{b.candidateRank == null ? '記録なし' : `${b.candidateRank}位 / ${b.candidateCount ?? '—'}件`}</span></p>
   </div>
 }
 

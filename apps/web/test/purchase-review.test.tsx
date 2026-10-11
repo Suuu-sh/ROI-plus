@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { Bet, RaceDetail } from '@edgelab/shared/src/types'
 import { api } from '../src/lib/api'
@@ -24,6 +24,26 @@ const race = (entries: RaceDetail['entries'], dataOrigin: 'sample' | 'real' = 's
 const openReview = () => fireEvent.click(screen.getByText('購入後の結果レビューを開く'))
 
 describe('purchased race review', () => {
+  it('shows differing saved purchase and payout-converted final odds side by side without requesting results', () => {
+    render(<MemoryRouter><PurchasedRace bets={[{ ...bet, status: 'won', oddsAtBet: 3.2, finalOdds: 4.5, payout: 450, profit: 350 }]} /></MemoryRouter>)
+    const purchase = screen.getByText('購入時オッズ').parentElement!
+    const final = screen.getByText('確定オッズ（払戻換算）').parentElement!
+    expect(purchase.parentElement).toBe(final.parentElement)
+    expect(within(purchase).getByText('3.2')).toBeTruthy()
+    expect(within(final).getByText('4.5')).toBeTruthy()
+    expect(screen.getByText('SAMPLE')).toBeTruthy()
+    expect(api.race).not.toHaveBeenCalled()
+  })
+
+  it.each(['open', 'won', 'lost', 'void'] as const)('does not fabricate final odds for %s records', (status) => {
+    render(<MemoryRouter><PurchasedRace bets={[{ ...bet, status, oddsAtBet: null, finalOdds: status === 'void' ? 0 : null, payout: status === 'lost' || status === 'void' ? 0 : null }]} /></MemoryRouter>)
+    expect(within(screen.getByText('購入時オッズ').parentElement!).getByText('記録なし')).toBeTruthy()
+    const final = within(screen.getByText('確定オッズ（払戻換算）').parentElement!)
+    expect(final.getByText(status === 'void' ? '対象外（無効）' : status === 'open' ? '未記録 / 精算待ち' : '記録なし')).toBeTruthy()
+    expect(final.queryByText('0.0')).toBeNull()
+    expect(api.race).not.toHaveBeenCalled()
+  })
+
   it('keeps purchase snapshot visible and fetches outcome only when review is opened', async () => {
     vi.mocked(api.race).mockResolvedValue(race([{ number: 2, finishOrder: 1 } as RaceDetail['entries'][number]]))
     render(<MemoryRouter><PurchasedRace bets={[bet]} /></MemoryRouter>)
@@ -113,7 +133,7 @@ describe('purchased race review', () => {
     const snapshots = screen.getByLabelText('このレースの購入明細')
     expect(snapshots.tabIndex).toBe(0)
     expect(snapshots.className).toContain('max-h-[300px]')
-    expect(snapshots.querySelectorAll('dl')).toHaveLength(6)
+    expect(snapshots.querySelectorAll('dl')).toHaveLength(12)
     expect(screen.getByText('購入明細は上下にスクロールできます')).toBeTruthy()
     expect(api.race).not.toHaveBeenCalled()
   })
