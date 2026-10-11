@@ -81,7 +81,7 @@ def test_sync_prioritizes_parent_rows_then_results_and_payouts_before_entries(mo
 
 
 @pytest.mark.parametrize("table", [
-    "results", "payouts", "entries", "odds_snapshots", "predictions", "ticket_predictions",
+    "results", "entries", "odds_snapshots", "predictions", "ticket_predictions",
 ])
 def test_race_related_ingests_chunk_at_50_rows(monkeypatch, table):
     payload_sizes = []
@@ -99,7 +99,8 @@ def test_race_related_ingests_chunk_at_50_rows(monkeypatch, table):
     assert len(result[table]) == 3
 
 
-def test_race_ingest_uses_smaller_chunks_for_sequential_worker_lookups(monkeypatch):
+@pytest.mark.parametrize("table", ["races", "payouts"])
+def test_sequential_lookup_ingests_use_smaller_chunks(monkeypatch, table):
     payload_sizes = []
 
     def accept(req, **_kwargs):
@@ -108,11 +109,11 @@ def test_race_ingest_uses_smaller_chunks_for_sequential_worker_lookups(monkeypat
         return _Response({"upserted": size, "changed": size})
 
     monkeypatch.setattr(sync, "urlopen", accept)
-    result = sync.sync_rows({"races": [{"id": f"race{i}"} for i in range(23)]},
+    result = sync.sync_rows({table: [{"id": f"row{i}"} for i in range(23)]},
                             base_url="https://example.test", token="t")
     assert payload_sizes == [10, 10, 3]
     assert sum(payload_sizes) == 23
-    assert len(result["races"]) == 3
+    assert len(result[table]) == 3
 
 
 def test_ingest_retries_one_timed_out_idempotent_chunk(monkeypatch):
@@ -156,6 +157,36 @@ def test_ingest_does_not_retry_non_timeout_or_repeat_timeout(monkeypatch):
     monkeypatch.setattr(sync.time, "sleep", lambda _seconds: None)
     with pytest.raises(RuntimeError, match="ingest races failed"):
         sync.sync_rows({"races": [{"id": "race"}]},
+                       base_url="https://example.test", token="t")
+    assert len(requests) == 2
+
+
+def test_ingest_retries_one_transient_worker_503_but_keeps_429_fail_closed(monkeypatch):
+    requests = []
+
+    def unavailable_then_accept(req, **_kwargs):
+        requests.append(req.data)
+        if len(requests) == 1:
+            raise HTTPError(req.full_url, 503, "Service Unavailable", {}, None)
+        return _Response({"upserted": 1, "changed": 0})
+
+    monkeypatch.setattr(sync, "urlopen", unavailable_then_accept)
+    monkeypatch.setattr(sync.time, "sleep", lambda _seconds: None)
+    result = sync.sync_rows({"payouts": [{"id": "payout"}]},
+                            base_url="https://example.test", token="t")
+    assert len(requests) == 2
+    assert requests[0] == requests[1]
+    assert result["payouts"]["noop"] is True
+
+    requests.clear()
+
+    def repeated_unavailable(req, **_kwargs):
+        requests.append(req.data)
+        raise HTTPError(req.full_url, 503, "Service Unavailable", {}, None)
+
+    monkeypatch.setattr(sync, "urlopen", repeated_unavailable)
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        sync.sync_rows({"payouts": [{"id": "payout"}]},
                        base_url="https://example.test", token="t")
     assert len(requests) == 2
 
