@@ -5,11 +5,12 @@ import { all, first, run, type Db, type Statement } from './repo/db.js';
 import { candidate, betId, payoutYen, settleValues, validateYenStake } from './services/logic.js';
 import { collectOdds } from './services/collectBoatraceOdds.js';
 import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
+import { collectResults } from './services/collectBoatraceResults.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, seedUnknownWriteBudget, allowOneDayWriteBudget, ONE_DAY_ALLOWANCE, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
-interface Env { DB: Db; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; PROXY_TOKEN?: string; }
+interface Env { DB: Db; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; PROXY_TOKEN?: string; }
 type Ctx = { Bindings: Env };
 const SAFE_BOAT_SCHEMA = 'boat-venue-v2';
 const TICKET_MODEL_SCHEMA = 'ticket-selection-v1';
@@ -391,12 +392,11 @@ async function autoBet(db: Db, enabled: boolean) {
   }
   return n;
 }
-async function collectScheduledOdds(db: Db, oddsEnabled: boolean, trifectaOddsEnabled: boolean) {
-  const requestBudget={used:0,max:49};
+async function collectScheduledOdds(db: Db, oddsEnabled: boolean, trifectaOddsEnabled: boolean, requestBudget={used:0,max:49}) {
   if (trifectaOddsEnabled) {
     // Reserve a small bounded slice for the opt-in parser before legacy win
     // collection; both collectors share the existing per-run 49-fetch cap.
-    requestBudget.max=20;
+    requestBudget.max=Math.min(49,requestBudget.used+20);
     await collectTrifectaOdds(db,new Date(),{maxRequests:10,requestBudget});
   }
   requestBudget.max=49;
@@ -757,10 +757,10 @@ app.get('/bets',async c=>{const sport=c.req.query('sport'),status=c.req.query('s
  (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin AND x.finish_order=1) winner_count,
  (SELECT COUNT(*) FROM results x JOIN payouts p ON p.race_id=x.race_id AND p.data_origin=x.data_origin AND p.bet_type='win' AND p.selection=CAST(x.number AS TEXT) AND p.payout>0 WHERE x.race_id=r.id AND x.data_origin=r.data_origin AND x.finish_order=1) paid_winner_count,
  (SELECT CASE WHEN json_valid(e.features_json) THEN json_extract(e.features_json,'$.finish_code') END FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin AND CAST(e.number AS TEXT)=b.selection LIMIT 1) finish_code,
- (SELECT cr.source FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_source,
- (SELECT cr.status FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_status,
- (SELECT cr.started_at FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_attempt_at,
- (SELECT COALESCE(cr.finished_at,cr.started_at) FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND cr.status='success' AND julianday(COALESCE(cr.finished_at,cr.started_at))<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_success_at
+ (SELECT cr.source FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND (cr.source='mbrace-boat' OR (cr.source='boatrace-results-worker-v1' AND cr.id='boat-result:'||r.id)) AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_source,
+ (SELECT cr.status FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND (cr.source='mbrace-boat' OR (cr.source='boatrace-results-worker-v1' AND cr.id='boat-result:'||r.id)) AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_status,
+ (SELECT cr.started_at FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND (cr.source='mbrace-boat' OR (cr.source='boatrace-results-worker-v1' AND cr.id='boat-result:'||r.id)) AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_attempt_at,
+ (SELECT COALESCE(cr.finished_at,cr.started_at) FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND (cr.source='mbrace-boat' OR (cr.source='boatrace-results-worker-v1' AND cr.id='boat-result:'||r.id)) AND cr.sport=r.sport AND cr.target_date=r.race_date AND cr.status='success' AND julianday(COALESCE(cr.finished_at,cr.started_at))<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_success_at
 FROM bets b JOIN races r ON r.id=b.race_id JOIN venues v ON v.id=r.venue_id WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.status=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at DESC`,sport||null,sport||null,status||null,status||null,origin,origin);return c.json(rows.map(b=>({...mapBet(b),venueName:b.venue_name,raceNo:b.race_no,raceDate:b.race_date})));});
 app.get('/performance/rank-comparison',async c=>{
  const db=c.env.DB,origin=originFilter(c.req.query('origin'));
@@ -949,9 +949,22 @@ app.get('/ingest/models',async c=>{
 app.post('/admin/settle',async c=>{if(!auth(c))return jsonError(c,'unauthorized',401);return c.json({settled:await settleOpen(c.env.DB)});});
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env) => {
   if (event.cron !== '* * * * *') return;
+  const requestBudget={used:0,max:49};
+  // Reserve minute :05 for the hourly result pass. This is not a ten-minute
+  // maintenance boundary; isolating it avoids consuming the 50-query free
+  // D1 allowance needed by odds + settlement in the same invocation.
+  if (env.ENABLE_BOATRACE_RESULTS_SCRAPE === 'true' && Math.floor(event.scheduledTime/60_000)%60===5) {
+    try {
+      const result=await collectResults(env.DB,new Date(),{requestBudget});
+      console.info(JSON.stringify({event:'boat-hourly-results',status:result.status,targets:result.targets,verified:result.verified,records:result.records,attempted:result.attempted,reason:'reason' in result?result.reason:null}));
+    } catch {
+      console.info(JSON.stringify({event:'boat-hourly-results',status:'failed',reason:'hourly-pass-failed'}));
+    }
+    return;
+  }
   if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true' || env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE === 'true') {
     // A collection quota/write failure must not block ten-minute settlement.
-    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true', env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true').catch(() => undefined);
+    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true', env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true',requestBudget).catch(() => undefined);
   }
   if (Math.floor(event.scheduledTime / 60_000) % 10 !== 0) return;
   await cron(env.DB, env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true');

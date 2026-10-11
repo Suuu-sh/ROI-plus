@@ -159,6 +159,22 @@ npm -w apps/web run deploy
 - D1 変更は `0004_ticket_predictions_and_odds_evidence.sql`（購入時オッズ時刻は既存の `0007_ranked_multi_bets.sql` を利用） の追加 migration。三連単オッズ収集は `ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE` が明示的に有効なときだけ Cron で動き、未設定／false が既定。単勝と共有する Worker fetch 試行上限49・最低3秒間隔を守る。取得は6艇120組が完全な非確定市場だけ保存し、source URL・取得時刻・本文 SHA-256・品質状態を記録する。これらは出所記録であり、署名や利用許諾の証明ではない。
 - 自動購入は同じレース予算内で単勝の複数選択と三連単の保守的ROIを比較し、券種追加で露出を増やさない。モデル学習時刻は予測時刻より厳密に前であることを要求する。
 
+## 購入済みボートの毎時結果取得（2026-10-11）
+
+`ENABLE_BOATRACE_RESULTS_SCRAPE` が明示的に `true` の場合だけ、既存毎分 Cron の **毎時05分**を結果ページ取得に割り当てる。実装の未設定／false は無効。本プロジェクトの設定には、ユーザーによる結果ページ取得・本番反映の明示承認後に true を追加した。設定ファイルだけではデプロイ完了・実取得を証明しない。許諾はユーザー申告に基づき、独立した証明ではない。
+
+- 対象は非隔離の実データ・ボートで、締切から5分以上経過し、openの仮想購入（単勝／三連単）があるレースのみ。競馬・サンプル・未購入レース・予測・モデル・学習・履歴全体を取得／再実行しない。正常な全着順と必要な払戻が保存済みなら再取得しない。
+- 公式 `https://www.boatrace.jp/owpc/pc/race/raceresult` を最大4レース／回、通信失敗時のみ1回再試行、最大8 fetch試行、取得間隔3秒以上、1試行8秒、本文512 KiB以内で扱う。最終試行の古い順に選ぶ。対象超過・未公開・予算不足・Cron遅延により、全購入の1時間以内反映は保証しない。
+- 05分の結果専用回ではオッズ取得を実行しない。他59分のオッズと10分境界の精算・自動仮想購入・cleanupは維持する。同じCronの49 fetch budgetを渡し、追加49枠は設けない。JSON bulk insertを使い、正常4対象で予約・ロックを含め33 D1 statement、全対象のbatch失敗後に失敗ログを書く最悪経路でも37以内。これは結果専用回の設計・合成確認であり、他Cronやアカウント全体のquota保証ではない。
+- `roi_d1_write_budget_utc` に essential `16 + 55 × 対象数` unit と collection `5 × 対象数` unitを、fetch／時間ロックより先に予約する。欠落・破損・枯渇・CAS失敗なら取得しない。未消費分も返金しない。collection専用500 unit／日も共有するため途中停止し得る。自動予算拡張はしない。
+- URLと本文の場コード画像・active開催日・唯一の選択レース・active結果タブを照合する。保存済み6艇の登録番号を必須とし、艇番ごとに一致する全6着順（1〜6の重複なし）と勝者の正の単勝払戻を要求する。三連単は1〜3着の組番一致も要求する。部分結果、欠場・非完走・同着・返還・中止等は拒否しopenを維持する。返還の見出しだけでなく実値を判定する。
+- 着順／払戻／finished状態／成功証跡をD1 batchで原子的に保存する。各statement内でもrace identity・open実購入・隔離除外・6艇の登録番号・既存結果との一致を再確認し、fetch待ち中の状態変更を拒否する。既存結果・確定購入の修正、entry特徴量の変更、払戻の購入時オッズへの流用はしない。
+- `collection_runs` の source `boatrace-results-worker-v1`、固定ID `boat-result:<raceId>` で1レース1行の最新試行だけを保持する。reason JSONにrace ID、公式URL、取得時刻、本文SHA-256、品質状態、安全な固定失敗理由を保存し、本文・任意例外文は保存しない。これは出所記録であり署名ではない。購入一覧は固定race IDが一致する結果取得だけを表示する。
+
+成功結果は次の既存10分精算（通常は毎時10分）で照合する。安全なCronログ `boat-hourly-results` は状態・対象数・検証済みレース数・保存レコード数・fetch試行数・固定予算理由だけを記録し、本文や任意例外文は出さない。夜間B/K日次同期は維持し、学習用データ取得へ拡張しない。SPEC §2/§5のB/K採用・Worker結果照合のみという記述とは追加取得元・頻度の差分があり、SPECは変更していない。
+
+根拠: `apps/api/src/services/boatraceResults.ts`, `collectBoatraceResults.ts`, `apps/api/src/index.ts`。現行Cloudflareの [D1 per-invocation limits](https://developers.cloudflare.com/d1/platform/limits/) と [D1 batch](https://developers.cloudflare.com/d1/worker-api/d1-database/) を確認し、オッズ／精算の同時実行を結果専用回から分離した。
+
 ## 会場混同の復旧ガード
 
 共通B/Kパーサーは唐津/津の重複を避けるため長い場名を優先する。旧モデルは復旧済みの出所markerがないため稼働・昇格・rollbackから除外し、正確なartifact/クリーンな入力に基づく候補を別IDで人手検証する。`auto_bet_paused` はWorker有効フラグより優先する停止条件。migration 0006の永続隔離は表示・精算・校正・資金計算・再ingestに適用する。migration 0007 は bet に購入時点のグループ・順位・候補母数・予測/オッズ時刻を追加する。なお SPEC §3/§5 は単一 bet と `unit_stake` 倍数を記述しており、現実装の複数選択・正の整数円 stake と差分がある。払戻列は整数円 `INT` のまま、切り捨て規則を導入した。SPEC は変更していない。原本からの修復と、固定評価期間の候補検証・Actions artifact復旧の流れは [RECOVERY](RECOVERY.md) を参照。
