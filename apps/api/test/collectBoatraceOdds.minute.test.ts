@@ -82,6 +82,32 @@ describe('minute odds collection controls', () => {
     expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:0});
   });
 
+  it('stores a labelled cutoff and observation time from the odds page already fetched', async () => {
+    const collectorNow = new Date();
+    race('cutoff-from-odds-page', collectorNow.getTime() + 5 * 60_000, jstDate(collectorNow));
+    const labels = ['12:04','12:34','13:04','13:34','14:04','14:34','15:04','15:34','16:04','16:34','17:04','17:34'];
+    const schedule = `<table><tbody><tr><th>レース</th>${labels.map((_,i)=>`<td>${i+1}R</td>`).join('')}</tr>
+      <tr><th>締切予定時刻</th>${labels.map(time=>`<td>${time}</td>`).join('')}</tr></tbody></table>`;
+    const fetch = vi.fn(async (url:string) => ({ ok:true,status:200,text:async()=>collectionPage(url).replace('<p>締切時オッズ',`${schedule}<p>締切時オッズ`) }));
+    const result = await collectOdds(DB, collectorNow, { fetch, sleep:async()=>{} });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({status:'success',targets:1,cutoffUpdates:1,cutoffWriteUnavailable:false});
+    expect(sqlite.prepare("SELECT betting_cutoff_at,betting_cutoff_source,betting_cutoff_observed_at FROM races WHERE id='cutoff-from-odds-page'").get())
+      .toMatchObject({betting_cutoff_at:`${today}T12:04:00+09:00`,betting_cutoff_source:'boatrace-racelist-cutoff-v1'});
+    expect(Date.parse((sqlite.prepare("SELECT betting_cutoff_observed_at FROM races WHERE id='cutoff-from-odds-page'").get() as any).betting_cutoff_observed_at)).toBeGreaterThan(0);
+  });
+
+  it('leaves cutoff evidence absent when the fetched odds page has no explicit schedule label', async () => {
+    const collectorNow = new Date();
+    race('cutoff-label-missing', collectorNow.getTime() + 5 * 60_000, jstDate(collectorNow));
+    const fetch = vi.fn(async (url:string) => ({ ok:true,status:200,text:async()=>collectionPage(url) }));
+    const result = await collectOdds(DB, collectorNow, { fetch, sleep:async()=>{} });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({status:'success',targets:1,cutoffUpdates:0,cutoffWriteUnavailable:false});
+    expect(sqlite.prepare("SELECT betting_cutoff_at,betting_cutoff_source,betting_cutoff_observed_at FROM races WHERE id='cutoff-label-missing'").get())
+      .toMatchObject({betting_cutoff_at:null,betting_cutoff_source:null,betting_cutoff_observed_at:null});
+  });
+
   it('uses a 50-second freshness window', async () => {
     race('fresh-30s'); race('stale-60s');
     sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('fresh-odds','fresh-30s','win','1',2,?,'test','real')").run(stamp(now.getTime() - 30_000));
@@ -208,8 +234,8 @@ describe('minute odds collection controls', () => {
     const inputAsOf = Date.now();
     const cutoff = inputAsOf + 60_000;
     race('scheduled-t60', cutoff + 4 * 60_000, today);
-    sqlite.prepare("UPDATE races SET betting_cutoff_at=?,betting_cutoff_source='boatrace-racelist-cutoff-v1' WHERE id='scheduled-t60'")
-      .run(stamp(cutoff));
+    sqlite.prepare("UPDATE races SET betting_cutoff_at=?,betting_cutoff_source='boatrace-racelist-cutoff-v1',betting_cutoff_observed_at=? WHERE id='scheduled-t60'")
+      .run(stamp(cutoff), stamp(inputAsOf - 30_000));
     for (let number = 1; number <= 6; number++) {
       sqlite.prepare(`INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin)
         VALUES(?, 'scheduled-t60','win',?,20,?,'fixture','real')`)

@@ -4,7 +4,9 @@ ALTER TABLE races ADD COLUMN betting_cutoff_at TEXT;
 ALTER TABLE races ADD COLUMN betting_cutoff_source TEXT CHECK (
   betting_cutoff_source IS NULL OR betting_cutoff_source = 'boatrace-racelist-cutoff-v1'
 );
+ALTER TABLE races ADD COLUMN betting_cutoff_observed_at TEXT;
 ALTER TABLE paper_decisions ADD COLUMN cutoff_source TEXT CHECK (
   cutoff_source IS NULL OR cutoff_source = 'boatrace-racelist-cutoff-v1'
 );
+ALTER TABLE paper_decisions ADD COLUMN cutoff_observed_at TEXT;
 ALTER TABLE paper_decisions ADD COLUMN input_as_of_at TEXT;

@@ -13,7 +13,7 @@ let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
 const env=(extra:Record<string,unknown>={})=>({DB,INGEST_TOKEN:'test-token',ENABLE_AUTO_BET:'true',...extra});
 const jstIso=(ms=Date.now())=>new Date(ms+9*60*60*1000).toISOString().replace('Z','+09:00');
 const jstDate=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
-const setPaperCutoff=(raceId:string,decisionAt:number)=>sqlite.prepare('UPDATE races SET race_date=?,post_time=?,betting_cutoff_at=?,betting_cutoff_source=? WHERE id=?').run(jstDate(),jstIso(decisionAt+240_000),jstIso(decisionAt+60_000),'boatrace-racelist-cutoff-v1',raceId);
+const setPaperCutoff=(raceId:string,decisionAt:number)=>sqlite.prepare('UPDATE races SET race_date=?,post_time=?,betting_cutoff_at=?,betting_cutoff_source=?,betting_cutoff_observed_at=? WHERE id=?').run(jstDate(),jstIso(decisionAt+240_000),jstIso(decisionAt+60_000),'boatrace-racelist-cutoff-v1',jstIso(decisionAt-30_000),raceId);
 const canonicalJson=(value:any):string=>Array.isArray(value)?`[${value.map(canonicalJson).join(',')}]`:value&&typeof value==='object'?`{${Object.keys(value).sort().map(k=>`${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`:JSON.stringify(value)??'null';
 const sha256Json=(value:unknown)=>createHash('sha256').update(canonicalJson(value),'utf8').digest('hex');
 const sha256Text=(value:string)=>createHash('sha256').update(value,'utf8').digest('hex');
@@ -411,8 +411,8 @@ describe('EdgeLab API',()=>{
   sqlite.prepare('UPDATE races SET race_date=? WHERE id=?').run(jstDate(),race.id);
   addBetInputs(race.id,'paper-t60');
   expect(await autoBet(DB,true,decisionAt)).toBe(1);
-  const stored=sqlite.prepare("SELECT phase,cutoff_at,cutoff_source,target_at,input_as_of_at,decided_at,outcome,reason,bet_group_id,snapshot_json FROM paper_decisions WHERE race_id=?").get(race.id) as any;
-  expect(stored).toMatchObject({phase:'primary_t60',cutoff_at:jstIso(decisionAt+60_000),cutoff_source:'boatrace-racelist-cutoff-v1',target_at:jstIso(decisionAt),outcome:'placed',reason:null});
+  const stored=sqlite.prepare("SELECT phase,cutoff_at,cutoff_source,cutoff_observed_at,target_at,input_as_of_at,decided_at,outcome,reason,bet_group_id,snapshot_json FROM paper_decisions WHERE race_id=?").get(race.id) as any;
+  expect(stored).toMatchObject({phase:'primary_t60',cutoff_at:jstIso(decisionAt+60_000),cutoff_source:'boatrace-racelist-cutoff-v1',cutoff_observed_at:jstIso(decisionAt-30_000),target_at:jstIso(decisionAt),outcome:'placed',reason:null});
   const frozenSnapshot=JSON.parse(stored.snapshot_json);
   expect(frozenSnapshot.phase).toBe('primary_t60');
   expect(Date.parse(stored.input_as_of_at)).toBe(Date.parse(frozenSnapshot.inputAsOfAt));
@@ -428,14 +428,14 @@ describe('EdgeLab API',()=>{
   sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('paper-late-odds',?,'win',?,30,?,'test','sample')")
     .run(race.id,String(frozenSnapshot.selections[0].selection),jstIso(decisionAt+5_000));
   expect(await autoBet(DB,true,decisionAt+5_000)).toBe(0);
-  expect(sqlite.prepare('SELECT snapshot_json,decided_at,input_as_of_at FROM paper_decisions WHERE race_id=?').get(race.id)).toMatchObject({snapshot_json:stored.snapshot_json,decided_at:stored.decided_at,input_as_of_at:stored.input_as_of_at});
+  expect(sqlite.prepare('SELECT snapshot_json,decided_at,input_as_of_at,cutoff_observed_at FROM paper_decisions WHERE race_id=?').get(race.id)).toMatchObject({snapshot_json:stored.snapshot_json,decided_at:stored.decided_at,input_as_of_at:stored.input_as_of_at,cutoff_observed_at:stored.cutoff_observed_at});
   const listed=await app.request('/api/bets?origin=sample',{},env());
   expect((await listed.json() as any[]).find(row=>row.raceId===race.id&&row.mode==='auto')?.decisionPhase).toBe('primary_t60');
   const read=await app.request(`/api/paper/decisions?date=${jstDate()}`,{},env());
   expect(read.status).toBe(200);const body=await read.json() as any;
   expect(body.timing.comparisons).toMatchObject({t30:{phase:'comparison_t30',status:'unavailable'},t10:{phase:'comparison_t10',status:'unavailable'}});
   expect(body.timing.primary).toMatchObject({cutoffSource:'boatrace-racelist-cutoff-v1',acceptedSecondsBeforeCutoff:{min:50,max:70}});
-  expect(body.decisions.find((row:any)=>row.raceId===race.id)).toMatchObject({phase:'primary_t60',outcome:'placed',cutoffSource:'boatrace-racelist-cutoff-v1',inputAsOfAt:stored.input_as_of_at,snapshot:frozenSnapshot});
+  expect(body.decisions.find((row:any)=>row.raceId===race.id)).toMatchObject({phase:'primary_t60',outcome:'placed',cutoffSource:'boatrace-racelist-cutoff-v1',cutoffObservedAt:stored.cutoff_observed_at,inputAsOfAt:stored.input_as_of_at,snapshot:frozenSnapshot});
   expect(body.decisions.find((row:any)=>row.raceId===race.id).actualSecondsBeforeCutoff).toBeGreaterThanOrEqual(50);
   expect(body.decisions.find((row:any)=>row.raceId===race.id).actualSecondsBeforeCutoff).toBeLessThanOrEqual(70);
   const oldBet=sqlite.prepare("SELECT decision_phase FROM bets WHERE race_id<>? AND data_origin='sample' LIMIT 1").get(race.id) as any;
@@ -446,7 +446,7 @@ describe('EdgeLab API',()=>{
   const inputAsOfAt=Date.now();setPaperCutoff(race.id,inputAsOfAt);addBetInputs(race.id,'paper-race-invariant');
   await Promise.all([
    autoBetWithReport(DB,true,inputAsOfAt),
-   recordPaperAbstention(DB,race.id,jstIso(inputAsOfAt+60_000),'boatrace-racelist-cutoff-v1',Date.now(),'concurrent_abstention_probe'),
+   recordPaperAbstention(DB,race.id,jstIso(inputAsOfAt+60_000),'boatrace-racelist-cutoff-v1',jstIso(inputAsOfAt-30_000),Date.now(),'concurrent_abstention_probe'),
   ]);
   const decision=sqlite.prepare("SELECT outcome,bet_group_id FROM paper_decisions WHERE race_id=? AND phase='primary_t60'").get(race.id) as any;
   const bets=sqlite.prepare("SELECT bet_group_id,decision_phase FROM bets WHERE race_id=? AND mode='auto'").all(race.id) as any[];
@@ -476,8 +476,8 @@ describe('EdgeLab API',()=>{
   expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE race_id=? AND mode='auto'").get(race.id)).toMatchObject({n:0});
  });
  it('records T-60 abstentions for stale odds, invalid probabilities, unavailable models, missing cutoffs, and missed timing',async()=>{
-  const races=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' ORDER BY id LIMIT 6").all() as {id:string}[];
-  expect(races.length).toBe(6);
+  const races=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' ORDER BY id LIMIT 7").all() as {id:string}[];
+  expect(races.length).toBe(7);
   const decisionAt=Date.now();
   for(const race of races)setPaperCutoff(race.id,decisionAt);
   sqlite.prepare(`UPDATE races SET race_date=? WHERE id IN (${races.map(()=>'?').join(',')})`).run(jstDate(),...races.map(r=>r.id));
@@ -488,9 +488,11 @@ describe('EdgeLab API',()=>{
   sqlite.prepare('UPDATE predictions SET probability=NULL WHERE race_id=?').run(races[1].id);
   addBetInputs(races[2].id,'paper-no-model');
   sqlite.prepare('DELETE FROM predictions WHERE race_id=?').run(races[2].id);
-  sqlite.prepare('UPDATE races SET betting_cutoff_at=NULL,betting_cutoff_source=NULL WHERE id=?').run(races[3].id);
+  sqlite.prepare('UPDATE races SET betting_cutoff_at=NULL,betting_cutoff_source=NULL,betting_cutoff_observed_at=NULL WHERE id=?').run(races[3].id);
+  sqlite.prepare('UPDATE races SET post_time=? WHERE id=?').run(jstIso(decisionAt+2*60_000),races[3].id);
   sqlite.prepare('UPDATE races SET betting_cutoff_at=? WHERE id=?').run(jstIso(decisionAt+30_000),races[4].id);
   sqlite.prepare('UPDATE races SET betting_cutoff_at=? WHERE id=?').run(jstIso(decisionAt+10_000),races[5].id);
+  sqlite.prepare('UPDATE races SET betting_cutoff_observed_at=? WHERE id=?').run(jstIso(decisionAt-11*60_000),races[6].id);
   const beforePerformance=await (await app.request('/api/performance/overview?origin=sample',{},env())).json() as any;
   expect(await autoBet(DB,true,decisionAt)).toBe(0);
   const reasons=sqlite.prepare('SELECT race_id,reason,outcome FROM paper_decisions').all() as any[];
@@ -501,6 +503,7 @@ describe('EdgeLab API',()=>{
    expect.objectContaining({race_id:races[3].id,reason:'missing_or_invalid_cutoff',outcome:'abstained'}),
    expect.objectContaining({race_id:races[4].id,reason:'missed_timing',outcome:'abstained'}),
    expect.objectContaining({race_id:races[5].id,reason:'missed_timing',outcome:'abstained'}),
+   expect.objectContaining({race_id:races[6].id,reason:'stale_cutoff_evidence',outcome:'abstained'}),
   ]));
   sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES('paper-stale-late',?,'win',?,20,?,'test','sample')")
     .run(races[0].id,staleSelection,jstIso(decisionAt+1_000));

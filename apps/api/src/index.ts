@@ -6,6 +6,7 @@ import { candidate, betId, payoutYen, settleValues, validateYenStake } from './s
 import { collectOdds } from './services/collectBoatraceOdds.js';
 import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
 import { collectResults } from './services/collectBoatraceResults.js';
+import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, seedUnknownWriteBudget, allowOneDayWriteBudget, ONE_DAY_ALLOWANCE, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
@@ -19,6 +20,8 @@ const PRIMARY_PAPER_PHASE = 'primary_t60' as const;
 const PRIMARY_PAPER_OFFSET_MS = 60_000;
 const PRIMARY_PAPER_TOLERANCE_MS = 10_000;
 const TRUSTED_CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1' as const;
+const MISSING_CUTOFF_PROBE_BEFORE_POST_MS = 2 * 60_000;
+const MISSING_CUTOFF_PROBE_AFTER_POST_MS = 3 * 60_000;
 const PAPER_COMPARISON_PHASES = {
   t30: { phase: 'comparison_t30', status: 'unavailable', reason: 'minute-level collection and ten-minute decisions cannot observe second offsets' },
   t10: { phase: 'comparison_t10', status: 'unavailable', reason: 'minute-level collection and ten-minute decisions cannot observe second offsets' },
@@ -126,7 +129,7 @@ const ingestTables: Record<string,{table:string; required:string[]; conflict:str
 };
 const allowedColumns: Record<string,string[]> = {
   venues:'id sport name'.split(' '),
-  races:'id sport venue_id race_date race_no name distance surface track_condition weather wind_speed wave_height post_time betting_cutoff_at betting_cutoff_source status data_origin updated_at'.split(' '),
+  races:'id sport venue_id race_date race_no name distance surface track_condition weather wind_speed wave_height post_time betting_cutoff_at betting_cutoff_source betting_cutoff_observed_at status data_origin updated_at'.split(' '),
   entries:'id race_id number frame name jockey trainer weight_carried horse_weight racer_class national_win_rate local_win_rate motor_no motor_2rate boat_no boat_2rate exhibition_time start_exhibition features_json available_at data_origin'.split(' '),
   odds_snapshots:'id race_id bet_type selection odds captured_at source data_origin source_url source_sha256 quality_status'.split(' '),
   results:'race_id finish_order number data_origin'.split(' '),
@@ -138,7 +141,7 @@ const allowedColumns: Record<string,string[]> = {
 };
 const updateColumns: Record<string,string[]> = {
   venues:['sport','name'],
-  races:'sport venue_id race_date race_no name distance surface track_condition weather wind_speed wave_height post_time betting_cutoff_at betting_cutoff_source status data_origin updated_at'.split(' '),
+  races:'sport venue_id race_date race_no name distance surface track_condition weather wind_speed wave_height post_time betting_cutoff_at betting_cutoff_source betting_cutoff_observed_at status data_origin updated_at'.split(' '),
   entries:'frame name jockey trainer weight_carried horse_weight racer_class national_win_rate local_win_rate motor_no motor_2rate boat_no boat_2rate exhibition_time start_exhibition features_json available_at data_origin'.split(' '),
   odds_snapshots:'odds source data_origin source_url source_sha256 quality_status'.split(' '), results:['finish_order','data_origin'], predictions:'probability prob_std data_origin'.split(' '),
   ticket_predictions:'probability prob_std data_origin feature_schema_version artifact_sha256'.split(' '),
@@ -175,10 +178,12 @@ async function ingest(c: any, name: string) {
       if (existing && row.data_origin !== existing.data_origin) return jsonError(c, 'ingest data origin must match the persisted race', 409);
       const hasCutoff = row.betting_cutoff_at !== undefined && row.betting_cutoff_at !== null;
       const hasCutoffSource = row.betting_cutoff_source !== undefined && row.betting_cutoff_source !== null;
-      if ((hasCutoff || hasCutoffSource) && (row.sport !== 'boat' || !hasCutoff || !hasCutoffSource
+      const hasCutoffObservedAt = row.betting_cutoff_observed_at !== undefined && row.betting_cutoff_observed_at !== null;
+      if ((hasCutoff || hasCutoffSource || hasCutoffObservedAt) && (row.sport !== 'boat' || !hasCutoff || !hasCutoffSource || !hasCutoffObservedAt
           || row.betting_cutoff_source !== TRUSTED_CUTOFF_SOURCE
-          || typeof row.betting_cutoff_at !== 'string' || !Number.isFinite(Date.parse(row.betting_cutoff_at)))) {
-        return jsonError(c, 'betting cutoff requires a valid timestamp and explicit official racelist cutoff provenance');
+          || typeof row.betting_cutoff_at !== 'string' || !Number.isFinite(Date.parse(row.betting_cutoff_at))
+          || typeof row.betting_cutoff_observed_at !== 'string' || !Number.isFinite(Date.parse(row.betting_cutoff_observed_at)))) {
+        return jsonError(c, 'betting cutoff requires valid time and observation timestamps with explicit official racelist cutoff provenance');
       }
       raceDate = typeof existing?.race_date === 'string' ? existing.race_date : typeof row.race_date === 'string' ? row.race_date : null;
     } else if (['entries','odds_snapshots','results','payouts','predictions','ticket_predictions'].includes(table)) {
@@ -365,9 +370,12 @@ async function settleOpen(db: Db) {
   }
   return settled;
 }
-function primaryPaperTiming(cutoffAt: string | null | undefined, decisionAt: number, cutoffSource?: string | null) {
+function primaryPaperTiming(cutoffAt: string | null | undefined, decisionAt: number, cutoffSource?: string | null, cutoffObservedAt?: string | null) {
   const cutoffMs = cutoffAt ? Date.parse(cutoffAt) : Number.NaN;
-  if (cutoffSource !== TRUSTED_CUTOFF_SOURCE || !Number.isFinite(cutoffMs)) return { eligible: false, reason: 'missing_or_invalid_cutoff', cutoffMs: null, targetMs: null, secondsBeforeCutoff: null, targetDeltaSeconds: null };
+  const observedMs = cutoffObservedAt ? Date.parse(cutoffObservedAt) : Number.NaN;
+  if (cutoffSource !== TRUSTED_CUTOFF_SOURCE || !Number.isFinite(cutoffMs) || !Number.isFinite(observedMs)) return { eligible: false, reason: 'missing_or_invalid_cutoff', cutoffMs: null, targetMs: null, secondsBeforeCutoff: null, targetDeltaSeconds: null };
+  if (observedMs > decisionAt + 5_000) return { eligible: false, reason: 'future_cutoff_observation', cutoffMs, targetMs: cutoffMs - PRIMARY_PAPER_OFFSET_MS, secondsBeforeCutoff: null, targetDeltaSeconds: null };
+  if (decisionAt - observedMs > BOATRACE_CUTOFF_MAX_AGE_MS) return { eligible: false, reason: 'stale_cutoff_evidence', cutoffMs, targetMs: cutoffMs - PRIMARY_PAPER_OFFSET_MS, secondsBeforeCutoff: null, targetDeltaSeconds: null };
   const targetMs = cutoffMs - PRIMARY_PAPER_OFFSET_MS;
   const delta = decisionAt - targetMs;
   const secondsBeforeCutoff = (cutoffMs - decisionAt) / 1000;
@@ -388,17 +396,18 @@ function paperAbstentionReason(rows: any[]): string {
   if (!rows.some(row => Number.isFinite(Number(row.odds)) && Number(row.odds) > 0 && Number.isFinite(Date.parse(row.odds_captured_at)))) return 'odds_missing_or_stale';
   return 'no_qualifying_edge';
 }
-async function recordPaperAbstention(db: Db, raceId: string, cutoffAt: string | null, cutoffSource: string | null, inputAsOfAt: number, reason: string, writeReserved = false) {
+async function recordPaperAbstention(db: Db, raceId: string, cutoffAt: string | null, cutoffSource: string | null, cutoffObservedAt: string | null, inputAsOfAt: number, reason: string, writeReserved = false) {
   if (!writeReserved && !await reserveWorkerWrites(db, 1)) return 'budget_unavailable' as const;
   const cutoffMs = cutoffAt ? Date.parse(cutoffAt) : Number.NaN;
   const trustedCutoff = cutoffSource === TRUSTED_CUTOFF_SOURCE && Number.isFinite(cutoffMs);
   const targetAt = trustedCutoff ? isoJstAt(cutoffMs - PRIMARY_PAPER_OFFSET_MS) : null;
-  const result = await run(db, `INSERT INTO paper_decisions(race_id,phase,cutoff_at,target_at,input_as_of_at,decided_at,outcome,reason,cutoff_source)
-    SELECT ?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),'abstained',
+  const result = await run(db, `INSERT INTO paper_decisions(race_id,phase,cutoff_at,target_at,cutoff_observed_at,input_as_of_at,decided_at,outcome,reason,cutoff_source)
+    SELECT ?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),'abstained',
       CASE WHEN ?<>'missing_or_invalid_cutoff' AND ? IS NOT NULL AND (julianday(?) - julianday('now'))*86400<50 THEN 'missed_timing' ELSE ? END,?
     WHERE NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=? AND b.mode='auto')
     ON CONFLICT(race_id,phase) DO NOTHING`, raceId, PRIMARY_PAPER_PHASE,
-    trustedCutoff ? cutoffAt : null, targetAt, isoJstAt(inputAsOfAt), reason, trustedCutoff ? cutoffAt : null,
+    trustedCutoff ? cutoffAt : null, targetAt, trustedCutoff && cutoffObservedAt && Number.isFinite(Date.parse(cutoffObservedAt)) ? cutoffObservedAt : null,
+    isoJstAt(inputAsOfAt), reason, trustedCutoff ? cutoffAt : null,
     trustedCutoff ? cutoffAt : null, reason, trustedCutoff ? cutoffSource : null, raceId);
   return Number(result.meta?.changes ?? 0) > 0 ? 'recorded' as const : 'duplicate' as const;
 }
@@ -426,20 +435,29 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
   const inputAsOfAtIso = isoJstAt(inputAsOfAt), freshAfter = oddsFreshAfter(inputAsOfAt), raceDate = jstRaceDate(new Date(inputAsOfAt));
   const nextRaceDate = jstRaceDate(new Date(decisionAt + 24 * 60 * 60_000));
   const noteAbstention = async (race: any, reason: string, writeReserved = false) => {
-    const timing = primaryPaperTiming(race.betting_cutoff_at, Date.now(), race.betting_cutoff_source);
+    const timing = primaryPaperTiming(race.betting_cutoff_at, Date.now(), race.betting_cutoff_source, race.betting_cutoff_observed_at);
     const finalReason = reason !== 'missing_or_invalid_cutoff' && timing.reason === 'missed_timing' ? 'missed_timing' : reason;
     report.abstainedByReason[finalReason] = (report.abstainedByReason[finalReason] ?? 0) + 1;
-    const saved = await recordPaperAbstention(db, race.id, race.betting_cutoff_at ?? null, race.betting_cutoff_source ?? null, inputAsOfAt, finalReason, writeReserved);
+    const saved = await recordPaperAbstention(db, race.id, race.betting_cutoff_at ?? null, race.betting_cutoff_source ?? null,
+      race.betting_cutoff_observed_at ?? null, inputAsOfAt, finalReason, writeReserved);
     if (saved === 'budget_unavailable') report.unrecordedAbstentionCount++;
   };
-  // Only an explicitly labelled official cutoff can enter the T-60 path.
-  // The legacy B-file post_time field is not treated as cutoff evidence.
-  const missingCutoffs = await all<any>(db, `SELECT r.id FROM races r WHERE r.race_date=? AND r.status='scheduled'
-    AND (r.betting_cutoff_at IS NULL OR julianday(r.betting_cutoff_at) IS NULL OR r.betting_cutoff_source IS NULL OR r.betting_cutoff_source<>?)
+  // The legacy B-file post_time is only a bounded discovery window for an
+  // explicit abstention. It is never substituted for the official cutoff.
+  const missingCutoffs = await all<any>(db, `SELECT r.id,r.post_time,r.betting_cutoff_at,r.betting_cutoff_source,r.betting_cutoff_observed_at FROM races r WHERE r.race_date=? AND r.status='scheduled'
+    AND julianday(r.post_time)>=julianday(?) AND julianday(r.post_time)<=julianday(?)
+    AND (r.betting_cutoff_at IS NULL OR julianday(r.betting_cutoff_at) IS NULL OR r.betting_cutoff_source IS NULL OR r.betting_cutoff_source<>?
+      OR r.betting_cutoff_observed_at IS NULL OR julianday(r.betting_cutoff_observed_at) IS NULL
+      OR julianday(r.betting_cutoff_observed_at)<julianday(?) OR julianday(r.betting_cutoff_observed_at)>julianday(?))
     AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')
     AND NOT EXISTS(SELECT 1 FROM paper_decisions d WHERE d.race_id=r.id AND d.phase='primary_t60')
-    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) ORDER BY r.id LIMIT 20`, raceDate, TRUSTED_CUTOFF_SOURCE);
-  for (const race of missingCutoffs) await noteAbstention({ ...race, betting_cutoff_at: null, betting_cutoff_source: null }, 'missing_or_invalid_cutoff');
+    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) ORDER BY julianday(r.post_time),r.id LIMIT 20`, raceDate,
+    isoJstAt(inputAsOfAt - MISSING_CUTOFF_PROBE_BEFORE_POST_MS),isoJstAt(inputAsOfAt + MISSING_CUTOFF_PROBE_AFTER_POST_MS),TRUSTED_CUTOFF_SOURCE,
+    isoJstAt(inputAsOfAt - BOATRACE_CUTOFF_MAX_AGE_MS),isoJstAt(inputAsOfAt + 5_000));
+  for (const race of missingCutoffs) {
+    const timing=primaryPaperTiming(race.betting_cutoff_at,inputAsOfAt,race.betting_cutoff_source,race.betting_cutoff_observed_at);
+    await noteAbstention(race,timing.reason==='stale_cutoff_evidence'||timing.reason==='future_cutoff_observation'?timing.reason:'missing_or_invalid_cutoff');
+  }
 
   // Minute cron evaluates the target window and catches only recent misses.
   // The short bounded lookback is enough to record a missed minute without
@@ -454,10 +472,11 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
     isoJstAt(inputAsOfAt - 2 * 60_000),isoJstAt(inputAsOfAt + PRIMARY_PAPER_OFFSET_MS + PRIMARY_PAPER_TOLERANCE_MS));
   const dueRaces: any[] = [];
   for (const race of recentRaces) {
-    const result = primaryPaperTiming(race.betting_cutoff_at, inputAsOfAt, race.betting_cutoff_source);
+    const result = primaryPaperTiming(race.betting_cutoff_at, inputAsOfAt, race.betting_cutoff_source, race.betting_cutoff_observed_at);
     if (result.eligible && race.status === 'scheduled') dueRaces.push(race);
     else if (result.eligible) await noteAbstention(race, 'race_not_scheduled');
     else if (result.reason === 'missed_timing') await noteAbstention(race, 'missed_timing');
+    else if (result.reason === 'stale_cutoff_evidence' || result.reason === 'future_cutoff_observation' || result.reason === 'missing_or_invalid_cutoff') await noteAbstention(race, result.reason);
   }
   report.evaluatedRaceCount = dueRaces.length;
   if (!dueRaces.length) return { bought: 0, report };
@@ -524,7 +543,7 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
     // after all reads and the budget reservation, immediately before the D1
     // transaction, so a slow evaluation cannot place late and claim T-60.
     const committedAt = Date.now();
-    const commitTiming = primaryPaperTiming(race.betting_cutoff_at, committedAt, race.betting_cutoff_source);
+    const commitTiming = primaryPaperTiming(race.betting_cutoff_at, committedAt, race.betting_cutoff_source, race.betting_cutoff_observed_at);
     if (!commitTiming.eligible) {
       await noteAbstention(race, commitTiming.reason === 'missed_timing' ? 'missed_timing' : 'timing_window_elapsed', true);
       continue;
@@ -537,17 +556,19 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
       SELECT json_extract(value,'$.id'),json_extract(value,'$.race_id'),json_extract(value,'$.sport'),json_extract(value,'$.bet_type'),json_extract(value,'$.selection'),json_extract(value,'$.stake'),'auto',json_extract(value,'$.predicted_prob'),json_extract(value,'$.odds_at_bet'),json_extract(value,'$.expected_roi'),json_extract(value,'$.edge_label'),json_extract(value,'$.model_id'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),'open',json_extract(value,'$.data_origin'),?,json_extract(value,'$.candidate_rank'),json_extract(value,'$.candidate_count'),json_extract(value,'$.odds_captured_at'),json_extract(value,'$.predicted_at_at_bet'),json_extract(value,'$.decision_phase')
       FROM json_each(?) WHERE ${availableBankrollSql}>=? AND NOT EXISTS(SELECT 1 FROM bets WHERE race_id=? AND mode='auto')
         AND NOT EXISTS(SELECT 1 FROM paper_decisions WHERE race_id=? AND phase='primary_t60')
-        AND EXISTS(SELECT 1 FROM races rr WHERE rr.id=? AND rr.status='scheduled' AND rr.betting_cutoff_at=? AND rr.betting_cutoff_source=?
+        AND EXISTS(SELECT 1 FROM races rr WHERE rr.id=? AND rr.status='scheduled' AND rr.betting_cutoff_at=? AND rr.betting_cutoff_source=? AND rr.betting_cutoff_observed_at=?
+          AND julianday(rr.betting_cutoff_observed_at)<=julianday(?) AND julianday(rr.betting_cutoff_observed_at)>=julianday(?)
+          AND julianday(rr.betting_cutoff_observed_at)>=julianday(strftime('%Y-%m-%dT%H:%M:%fZ','now','-10 minutes'))
           AND ABS((julianday(rr.betting_cutoff_at)-julianday(?))*86400-60)<=10
           AND ABS((julianday(rr.betting_cutoff_at)-julianday('now'))*86400-60)<=10)
-      ON CONFLICT(race_id,bet_type,selection) WHERE mode='auto' DO NOTHING`).bind(groupId,JSON.stringify(payload),totalStake,race.id,race.id,race.id,race.betting_cutoff_at,TRUSTED_CUTOFF_SOURCE,isoJstAt(committedAt));
-    const snapshotJson=JSON.stringify({phase:PRIMARY_PAPER_PHASE,cutoffAt:race.betting_cutoff_at,cutoffSource:race.betting_cutoff_source,targetAt:isoJstAt(Date.parse(race.betting_cutoff_at)-PRIMARY_PAPER_OFFSET_MS),inputAsOfAt:inputAsOfAtIso,
+      ON CONFLICT(race_id,bet_type,selection) WHERE mode='auto' DO NOTHING`).bind(groupId,JSON.stringify(payload),totalStake,race.id,race.id,race.id,race.betting_cutoff_at,TRUSTED_CUTOFF_SOURCE,race.betting_cutoff_observed_at,inputAsOfAtIso,isoJstAt(inputAsOfAt - BOATRACE_CUTOFF_MAX_AGE_MS),isoJstAt(committedAt));
+    const snapshotJson=JSON.stringify({phase:PRIMARY_PAPER_PHASE,cutoffAt:race.betting_cutoff_at,cutoffSource:race.betting_cutoff_source,cutoffObservedAt:race.betting_cutoff_observed_at,targetAt:isoJstAt(Date.parse(race.betting_cutoff_at)-PRIMARY_PAPER_OFFSET_MS),inputAsOfAt:inputAsOfAtIso,
       selections:selected.map(row=>({betType:row.bet_type??'win',selection:row.selection??String(row.number),probability:Number(row.probability),probStd:Number(row.prob_std),odds:Number(row.odds),oddsCapturedAt:row.odds_captured_at,predictedAt:row.predicted_at,modelId:row.model_id}))});
-    const decisionInsert=db.prepare(`INSERT INTO paper_decisions(race_id,phase,cutoff_at,target_at,input_as_of_at,decided_at,outcome,reason,bet_group_id,snapshot_json,cutoff_source)
-      SELECT ?,? ,?,?,?,(SELECT MIN(placed_at) FROM bets WHERE bet_group_id=? AND mode='auto' AND decision_phase='primary_t60'),'placed',NULL,?,?,?
+    const decisionInsert=db.prepare(`INSERT INTO paper_decisions(race_id,phase,cutoff_at,target_at,cutoff_observed_at,input_as_of_at,decided_at,outcome,reason,bet_group_id,snapshot_json,cutoff_source)
+      SELECT ?,? ,?,?,?,?,(SELECT MIN(placed_at) FROM bets WHERE bet_group_id=? AND mode='auto' AND decision_phase='primary_t60'),'placed',NULL,?,?,?
         WHERE EXISTS(SELECT 1 FROM bets WHERE bet_group_id=? AND mode='auto' AND decision_phase='primary_t60')
         AND NOT EXISTS(SELECT 1 FROM paper_decisions WHERE race_id=? AND phase='primary_t60')
-      ON CONFLICT(race_id,phase) DO NOTHING`).bind(race.id,PRIMARY_PAPER_PHASE,race.betting_cutoff_at,isoJstAt(Date.parse(race.betting_cutoff_at)-PRIMARY_PAPER_OFFSET_MS),inputAsOfAtIso,groupId,groupId,snapshotJson,TRUSTED_CUTOFF_SOURCE,groupId,race.id);
+      ON CONFLICT(race_id,phase) DO NOTHING`).bind(race.id,PRIMARY_PAPER_PHASE,race.betting_cutoff_at,isoJstAt(Date.parse(race.betting_cutoff_at)-PRIMARY_PAPER_OFFSET_MS),race.betting_cutoff_observed_at,inputAsOfAtIso,groupId,groupId,snapshotJson,TRUSTED_CUTOFF_SOURCE,groupId,race.id);
     let insertedCount=0;
     if (db.batch) {
       const results=await db.batch([betInsert,decisionInsert]) as any[];
@@ -980,13 +1001,13 @@ app.get('/bets/quarantine-summary',async c=>{const sport=c.req.query('sport'),or
 app.get('/paper/decisions',async c=>{
  const date=c.req.query('date')??jstRaceDate();
  if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return jsonError(c,'date must be YYYY-MM-DD');
- const rows=await all<any>(c.env.DB,`SELECT d.race_id,d.phase,d.cutoff_at,d.cutoff_source,d.target_at,d.input_as_of_at,d.decided_at,d.outcome,d.reason,d.bet_group_id,d.snapshot_json
+ const rows=await all<any>(c.env.DB,`SELECT d.race_id,d.phase,d.cutoff_at,d.cutoff_source,d.cutoff_observed_at,d.target_at,d.input_as_of_at,d.decided_at,d.outcome,d.reason,d.bet_group_id,d.snapshot_json
    FROM paper_decisions d JOIN races r ON r.id=d.race_id WHERE r.race_date=? ORDER BY julianday(d.decided_at),d.race_id,d.phase LIMIT 500`,date);
  return c.json({date,timing:{primary:{phase:PRIMARY_PAPER_PHASE,cutoffSource:TRUSTED_CUTOFF_SOURCE,targetOffsetSeconds:60,toleranceSeconds:10,
    acceptedSecondsBeforeCutoff:{min:50,max:70}},comparisons:PAPER_COMPARISON_PHASES},
    decisions:rows.map(row=>{let snapshot=null;try{snapshot=row.snapshot_json?JSON.parse(row.snapshot_json):null;}catch{}
     const cutoffMs=row.cutoff_at?Date.parse(row.cutoff_at):Number.NaN,decidedMs=Date.parse(row.decided_at),actualSecondsBeforeCutoff=Number.isFinite(cutoffMs)&&Number.isFinite(decidedMs)?(cutoffMs-decidedMs)/1000:null;
-    return {raceId:row.race_id,phase:row.phase,cutoffAt:row.cutoff_at??null,cutoffSource:row.cutoff_source??null,targetAt:row.target_at??null,inputAsOfAt:row.input_as_of_at??null,decidedAt:row.decided_at,
+    return {raceId:row.race_id,phase:row.phase,cutoffAt:row.cutoff_at??null,cutoffSource:row.cutoff_source??null,cutoffObservedAt:row.cutoff_observed_at??null,targetAt:row.target_at??null,inputAsOfAt:row.input_as_of_at??null,decidedAt:row.decided_at,
       actualSecondsBeforeCutoff,targetDeltaSeconds:actualSecondsBeforeCutoff===null?null:60-actualSecondsBeforeCutoff,outcome:row.outcome,reason:row.reason??null,betGroupId:row.bet_group_id??null,snapshot};})});
 });
 app.get('/bets',async c=>{const sport=c.req.query('sport'),status=c.req.query('status'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');const rows=await all<any>(c.env.DB,`SELECT b.*,v.name venue_name,r.race_no,r.status race_status,r.post_time,r.race_date,

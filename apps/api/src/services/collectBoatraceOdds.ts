@@ -1,8 +1,9 @@
 import { all, type Db, type Statement } from '../repo/db.js';
 import { isStablePool, oddsUrl, parseWinOdds, USER_AGENT } from './boatraceOdds.js';
-import { readWriteBudget, reserveWriteBudget, utcDate } from './writeBudget.js';
+import { parseBoatraceCutoff, BOATRACE_CUTOFF_REFRESH_MS } from './boatraceCutoff.js';
+import { estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, utcDate } from './writeBudget.js';
 
-type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string };
+type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string; betting_cutoff_at:string|null; betting_cutoff_source:string|null; betting_cutoff_observed_at:string|null };
 type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
 export type CollectOddsOptions = {
   maxRequests?: number;
@@ -17,7 +18,7 @@ const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 
 export async function selectOddsTargets(db: Db, now: Date, maxRequests = 30): Promise<RaceTarget[]> {
   const at = now.getTime(), after = jstIso(at), before = jstIso(at + 15 * 60_000), fresh = jstIso(at - 50_000);
-  return all<RaceTarget>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date FROM races r
+  return all<RaceTarget>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date,r.betting_cutoff_at,r.betting_cutoff_source,r.betting_cutoff_observed_at FROM races r
     WHERE r.data_origin='real' AND r.sport='boat' AND r.status='scheduled'
       AND r.race_date=?
       AND r.post_time>=? AND r.post_time<=?
@@ -78,6 +79,7 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
     const sleep = opts.sleep ?? pause;
     const requestBudget = opts.requestBudget ?? { used: 0, max: 49 };
     const statements: Statement[] = [];
+    const cutoffStatements: Statement[] = [];
     const errors: string[] = [];
     const exclusions: string[] = [];
     let failed = 0, excluded = 0, records = 0, attempted = 0;
@@ -98,6 +100,27 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
           } catch (error) { requestError = error; }
         }
         if (requestError !== undefined) throw requestError;
+        const observedAt = jstIso(Date.now());
+        try {
+          const cutoffTime = parseBoatraceCutoff(html, { raceDate: race.race_date, venueCode: race.venue_id, raceNo: race.race_no });
+          const cutoffAt = `${race.race_date}T${cutoffTime}:00+09:00`;
+          const priorObservedAt = race.betting_cutoff_observed_at ? Date.parse(race.betting_cutoff_observed_at) : NaN;
+          const needsRefresh = race.betting_cutoff_at !== cutoffAt
+            || race.betting_cutoff_source !== 'boatrace-racelist-cutoff-v1'
+            || !Number.isFinite(priorObservedAt) || Date.now() - priorObservedAt >= BOATRACE_CUTOFF_REFRESH_MS
+            || priorObservedAt > Date.now() + 5_000;
+          if (needsRefresh) {
+            cutoffStatements.push(db.prepare(`UPDATE races SET betting_cutoff_at=?,betting_cutoff_source='boatrace-racelist-cutoff-v1',betting_cutoff_observed_at=?
+              WHERE id=? AND sport='boat' AND status='scheduled' AND data_origin='real' AND race_date=? AND venue_id=? AND race_no=?
+                AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=races.id)
+                AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=races.id AND b.mode='auto')
+                AND NOT EXISTS(SELECT 1 FROM paper_decisions d WHERE d.race_id=races.id AND d.phase='primary_t60')
+                AND (betting_cutoff_at IS NULL OR betting_cutoff_at<>? OR betting_cutoff_source IS NULL OR betting_cutoff_source<>'boatrace-racelist-cutoff-v1'
+                  OR betting_cutoff_observed_at IS NULL OR julianday(betting_cutoff_observed_at)<julianday(?) OR julianday(betting_cutoff_observed_at)>julianday(?))`)
+              .bind(cutoffAt, observedAt, race.id, race.race_date, race.venue_id, race.race_no,
+                cutoffAt, jstIso(Date.now() - BOATRACE_CUTOFF_REFRESH_MS), jstIso(Date.now() + 5_000)));
+          }
+        } catch { /* The odds page can still be useful; cutoff absence stays fail-closed. */ }
         const parsed = parseWinOdds(html, { raceDate: race.race_date, venueCode: race.venue_id, raceNo: race.race_no });
         if (!parsed.final && !isStablePool(parsed.odds)) {
           excluded++;
@@ -133,11 +156,24 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
     const startedAt = jstIso(now.getTime());
     const error = errors.length ? errors.join('; ').slice(0, 2000) : null;
     const reason = exclusions.length ? `quality_excluded: ${exclusions.join(' | ')}` : null;
+    let cutoffUpdates = 0, cutoffWriteUnavailable = false;
+    if (cutoffStatements.length) {
+      if (await reserveWriteBudget(db, utcDate(now), estimateWorkerWriteUnits(cutoffStatements.length), 'essential')) {
+        try {
+          if (db.batch) {
+            const saved = await db.batch(cutoffStatements) as any[];
+            cutoffUpdates = saved.reduce((sum, result) => sum + Number(result?.meta?.changes ?? 0), 0);
+          } else {
+            for (const statement of cutoffStatements) cutoffUpdates += Number((await statement.run()).meta?.changes ?? 0);
+          }
+        } catch { cutoffWriteUnavailable = true; }
+      } else cutoffWriteUnavailable = true;
+    }
     if (statements.length > 0) {
       const writeUnits = records * 5 + 5;
       if (!await reserveWriteBudget(db, utcDate(now), writeUnits, 'odds')) {
         // Fetching was read-only; fail closed without persisting an unbudgeted snapshot or status.
-        return { status: 'skipped' as const, records: 0, targets: admittedTargets.length, failed, excluded, reason: 'daily D1 write budget unavailable or exhausted' };
+        return { status: 'skipped' as const, records: 0, targets: admittedTargets.length, failed, excluded, reason: 'daily D1 write budget unavailable or exhausted', cutoffUpdates, cutoffWriteUnavailable };
       }
     }
     const previous = await db.prepare(`SELECT status,records,error,reason FROM collection_runs
@@ -151,7 +187,7 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
       if (db.batch) await db.batch(statements);
       else for (const statement of statements) await statement.run();
     }
-    return { status, records, targets: admittedTargets.length, failed, excluded };
+    return { status, records, targets: admittedTargets.length, failed, excluded, cutoffUpdates, cutoffWriteUnavailable };
   } finally {
     // If cleanup fails, the five-minute lease still prevents a stuck lock forever.
     await db.prepare(`UPDATE settings SET value='' WHERE key='odds_lock' AND value=?`).bind(nowIso).run().catch(() => undefined);
