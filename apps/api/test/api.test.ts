@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { app, settleOpen, autoBet } from '../src/index.js';
 import { D1SqliteAdapter } from './d1-adapter.js';
 import { payoutYen, settleValues } from '../src/services/logic.js';
+import { readWriteBudget, reserveWriteBudget } from '../src/services/writeBudget.js';
 
 const root=resolve(import.meta.dirname,'../../..');
 let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
@@ -89,6 +90,30 @@ describe('EdgeLab API',()=>{
   expect(denied.status).toBe(429); expect(await denied.json()).toMatchObject({code:'d1_write_budget_unavailable',budget:{state:'missing'}});
   const seed=await app.request('/api/ingest/write-budget/seed',{method:'POST',headers:authHeader,body:JSON.stringify({date:new Date().toISOString().slice(0,10),confirmed:true})},env());
   expect(seed.status).toBe(201); expect(await seed.json()).toMatchObject({state:'exhausted',remaining:0});
+ });
+ it('applies only the explicit one-day whitelist and preserves existing reservations',async()=>{
+  const today=new Date().toISOString().slice(0,10), tomorrow=new Date(`${today}T00:00:00.000Z`);
+  tomorrow.setUTCDate(tomorrow.getUTCDate()+1);
+  const auth={authorization:'Bearer test-token','content-type':'application/json'};
+  sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:today,reserved:19_946,oddsReserved:0}));
+  const allowance={date:today,confirmed:true,limit:30_000,essentialLimit:24_000,optionalLimit:6_000};
+  expect((await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(allowance)},env())).status).toBe(401);
+  expect((await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:auth,body:JSON.stringify({...allowance,confirmed:false})},env())).status).toBe(400);
+  expect((await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:auth,body:JSON.stringify({...allowance,priority:'essential'})},env())).status).toBe(400);
+  sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:today,reserved:20_000,oddsReserved:0}));
+  expect((await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:auth,body:JSON.stringify(allowance)},env())).status).toBe(409);
+  sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:today,reserved:19_946,oddsReserved:0}));
+  const applied=await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:auth,body:JSON.stringify(allowance)},env());
+  expect(applied.status).toBe(200);
+  expect(await applied.json()).toMatchObject({date:today,limit:30_000,essentialLimit:24_000,optionalLimit:6_000,reserved:19_948,essentialReserved:15_948,remaining:10_052,allowance:{date:today,limit:30_000}});
+  const stored=JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
+  expect(stored.reserved).toBe(19_948);
+  expect((await app.request('/api/ingest/write-budget',{headers:auth},env())).status).toBe(200);
+  expect(await reserveWriteBudget(DB,today,2_000,'optional')).toBe(true);
+  expect(await readWriteBudget(DB,today)).toMatchObject({reserved:21_948,optionalReserved:6_000,optionalRemaining:0});
+  // The override is date-scoped; the next UTC day uses the default ceilings.
+  const rollover=await readWriteBudget(DB,tomorrow.toISOString().slice(0,10));
+  expect(rollover).toMatchObject({limit:20_000,essentialLimit:16_000,optionalLimit:4_000,reserved:0,allowance:null});
  });
  it('rejects historical ingest without an open bet, but protects open-bet settlement inputs',async()=>{
   const raceId='boat-20010101-01-01', auth={authorization:'Bearer test-token','content-type':'application/json'};
