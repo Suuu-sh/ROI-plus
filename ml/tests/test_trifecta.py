@@ -108,6 +108,22 @@ def test_odds_replay_is_strictly_pre_cutoff_and_exact_trifecta_only():
     assert _captured_odds(store, race_id, cutoff, "2026-01-01T12:10:00+09:00") == {}
 
 
+def test_odds_replay_excludes_market_older_than_runtime_freshness_window():
+    as_of = "2026-01-01T12:00:00+09:00"
+    race_id = "boat-20260101-24-01"
+    url = "https://www.boatrace.jp/owpc/pc/race/odds3t?rno=1&jcd=24&hd=20260101"
+    stale_market = [{"race_id": race_id, "bet_type": "trifecta", "selection": f"{a}-{b}-{c}",
+        "odds": 25, "captured_at": "2026-01-01T11:49:59+09:00",
+        "source": "boatrace-trifecta-official-v1", "source_url": url,
+        "source_sha256": "a" * 64, "quality_status": "verified-complete-v1",
+        "data_origin": "real"} for a in range(1, 7) for b in range(1, 7) for c in range(1, 7)
+        if len({a, b, c}) == 3]
+    store = {"races": [{"id": race_id, "venue_id": "24", "race_date": "2026-01-01", "race_no": 1}],
+             "odds_snapshots": stale_market}
+
+    assert _captured_odds(store, race_id, as_of, "2026-01-01T12:10:00+09:00") == {}
+
+
 def test_replay_consumes_local_archive_odds_and_versions_multi_ticket_policy(monkeypatch):
     group = race("boat-20260101-24-01", "2026-01-01", winner=1)
     for row in group:

@@ -338,8 +338,9 @@ def _temperature(valid: Sequence[Mapping[str, Any]], model: Mapping[str, Any]) -
 def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
                    post_time: str) -> dict[str, float]:
     """Use one coherent official, non-final, complete 120-ticket market."""
-    from datetime import datetime
-    cutoff = datetime.fromisoformat(predicted_at.replace("Z", "+00:00"))
+    from datetime import datetime, timedelta
+    as_of = datetime.fromisoformat(predicted_at.replace("Z", "+00:00"))
+    fresh_after = as_of - timedelta(minutes=10)
     deadline = datetime.fromisoformat(post_time.replace("Z", "+00:00"))
     race = next((r for r in store.get("races", []) if str(r.get("id")) == race_id), None)
     if not race:
@@ -370,9 +371,10 @@ def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
             odds = float(row.get("odds"))
         except (TypeError, ValueError):
             continue
-        if captured.tzinfo is None or cutoff.tzinfo is None or deadline.tzinfo is None:
+        if captured.tzinfo is None or as_of.tzinfo is None or deadline.tzinfo is None:
             continue
-        if captured > cutoff or captured >= deadline or not math.isfinite(odds) or odds <= 0:
+        if (captured < fresh_after or captured > as_of or captured >= deadline
+                or not math.isfinite(odds) or odds <= 0):
             continue
         selection = str(row.get("selection") or "")
         if selection not in expected:
