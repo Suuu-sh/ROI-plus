@@ -1,120 +1,114 @@
-import { useState } from 'react'
+import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import type { ModelInfo, Overview, Sport } from '@edgelab/shared/src/types'
+import type { Bet } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
-import { useOrigin, type OriginFilter } from '../lib/origin'
-import { representativeModel } from '../lib/models'
+import { useOrigin } from '../lib/origin'
 import { useAsync } from '../lib/useAsync'
-import { num, pct, signedPct, signedYen, tone, yen } from '../lib/format'
+import { betTypeLabel } from '../lib/betType'
+import { dateTime, pct, signedYen, tone, yen } from '../lib/format'
 import { t } from '../i18n'
 import { EquityChart } from '../components/EquityChart'
-import { BetsTable } from '../components/BetsTable'
 import { Empty, ErrorState, Kpi, Loading, Section, SportIcon } from '../components/ui'
+
+type PurchasedRace = {
+  raceId: string
+  sport: Bet['sport']
+  raceDate?: string
+  venueName?: string
+  raceNo?: number
+  bets: Bet[]
+  latestPurchase: string
+}
+
+function groupPurchasedRaces(bets: Bet[]): PurchasedRace[] {
+  const groups = new Map<string, PurchasedRace>()
+  for (const bet of bets) {
+    const group = groups.get(bet.raceId) ?? {
+      raceId: bet.raceId,
+      sport: bet.sport,
+      raceDate: bet.raceDate,
+      venueName: bet.venueName,
+      raceNo: bet.raceNo,
+      bets: [],
+      latestPurchase: bet.placedAt,
+    }
+    group.bets.push(bet)
+    if (bet.placedAt > group.latestPurchase) group.latestPurchase = bet.placedAt
+    groups.set(bet.raceId, group)
+  }
+  return [...groups.values()].sort((a, b) => b.latestPurchase.localeCompare(a.latestPurchase))
+}
 
 export function OverviewPage() {
   const { origin } = useOrigin()
-  const all = useAsync(() => Promise.all([
-    api.overview(origin), api.bets(origin),
-  ]), [origin])
+  const all = useAsync(() => Promise.all([api.overview(origin), api.bets(origin)]), [origin])
+  const purchasedRaces = useMemo(() => all.data ? groupPurchasedRaces(all.data[1]) : [], [all.data])
 
   if (all.error) return <div className="card"><ErrorState error={all.error} onRetry={all.reload} /></div>
   if (!all.data) return <div className="card"><Loading rows={5} /></div>
-  const [ov, bets] = all.data
+  const [performance, bets] = all.data
+  const unresolved = bets.filter((bet) => bet.status === 'open').length
 
-  return (
-    <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">概要</h1>
-        <p className="mt-1 text-sm text-muted">初期仮想資金 {yen(ov.initialBankroll)}・1点 ¥100 からの仮想運用成績</p>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        <Kpi label="総仮想資産" value={yen(ov.bankroll)} sub={signedPct(ov.bankroll / ov.initialBankroll - 1)} />
-        <Kpi label="累計損益" value={signedYen(ov.totalProfit)} valueClass={tone(ov.totalProfit)} />
-        <Kpi label="回収率" value={pct(ov.roi)} valueClass={ov.roi == null ? '' : ov.roi >= 1 ? 'text-pos' : 'text-neg'} sub="払戻 ÷ 購入額" />
-        <Kpi label="仮想購入回数" value={ov.betCount.toLocaleString()} sub={`確定 ${ov.settledCount}`} />
-        <Kpi label="的中率" value={pct(ov.hitRate)} />
-        <Kpi label="最大ドローダウン" value={yen(ov.maxDrawdown)} sub={pct(ov.maxDrawdownPct)} valueClass={ov.maxDrawdown > 0 ? 'text-neg' : ''} />
-      </div>
-
-      <Section title="資産推移" right={<span className="text-xs text-muted">破線＝初期資金</span>}>
-        <div className="px-2 pb-3 pt-2">
-          {ov.equityCurve.length > 1 ? <EquityChart data={ov.equityCurve} base={ov.initialBankroll} /> : <Empty>確定した仮想購入がまだありません。</Empty>}
-        </div>
-      </Section>
-
-      <LazySportComparison origin={origin} />
-
-      <Section title="最近の仮想購入" right={<Link to="/performance" className="text-xs text-accent hover:underline">成績の詳細 →</Link>}>
-        <BetsTable bets={bets} limit={8} />
-      </Section>
+  return <div className="space-y-5">
+    <div>
+      <h1 className="text-xl font-semibold tracking-tight">運用ボード</h1>
+      <p className="mt-1 text-sm text-muted">仮想購入の実績と、購入記録があるレースだけを表示します。</p>
     </div>
-  )
-}
 
-function LazySportComparison({ origin }: { origin: OriginFilter }) {
-  const [open, setOpen] = useState(false)
-  return <details className="card" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary className="cursor-pointer px-4 py-3 text-sm font-semibold">競馬 vs ボートレースを比較</summary>
-    {open && <SportComparisonData origin={origin} />}
-  </details>
-}
-
-function SportComparisonData({ origin }: { origin: OriginFilter }) {
-  const q = useAsync(() => Promise.all([api.overview(origin, 'horse'), api.overview(origin, 'boat'), api.models()]), [origin])
-  if (q.error) return <ErrorState error={q.error} onRetry={q.reload} />
-  if (!q.data) return <Loading rows={2} />
-  return <SportComparison horse={q.data[0]} boat={q.data[1]} models={q.data[2]} origin={origin} />
-}
-
-function SportComparison({ horse, boat, models, origin }: { horse: Overview; boat: Overview; models: ModelInfo[]; origin: OriginFilter }) {
-  const active = (s: Sport) => representativeModel(models, s, origin)
-  const rows: { sport: Sport; ov: Overview; model: ModelInfo | null }[] = [
-    { sport: 'horse', ov: horse, model: active('horse') },
-    { sport: 'boat', ov: boat, model: active('boat') },
-  ]
-  // ROI が高い方を強調（どちらも確定購入がある場合のみ）
-  // 確定購入が各100件以上かつ回収率差が5pt以上のときだけリードを示す（それ未満は誤差の範囲）
-  const comparable = horse.roi != null && boat.roi != null && horse.settledCount >= 100 && boat.settledCount >= 100
-  const leader = comparable && Math.abs(horse.roi! - boat.roi!) >= 0.05 ? (horse.roi! > boat.roi! ? 'horse' : 'boat') : null
-  const verdict = !comparable ? '比較に十分な確定購入がまだありません（各100件以上で判定）'
-    : leader ? `${t().sport[leader]}が回収率で ${Math.abs((horse.roi! - boat.roi!) * 100).toFixed(1)}pt リード`
-    : '回収率の差は 5pt 未満で、現時点では優劣をつけられません'
-  return (
-    <Section title="競馬 vs ボートレース" right={<span className="text-right text-xs text-muted">{verdict}</span>}>
-      <div className="grid divide-y divide-line md:grid-cols-2 md:divide-x md:divide-y-0">
-        {rows.map(({ sport, ov, model }) => (
-          <div key={sport} className="p-4">
-            <div className="flex items-center justify-between">
-              <div className={`flex items-center gap-2 font-semibold ${sport === 'horse' ? 'text-horse' : 'text-boat'}`}>
-                <SportIcon sport={sport} className="h-5 w-5" />{t().sport[sport]}
-              </div>
-              {leader === sport && <span className="rounded-full bg-pos/10 px-2 py-0.5 text-[11px] font-semibold text-pos">回収率リード</span>}
-            </div>
-            <dl className="mt-4 grid grid-cols-3 gap-y-4 text-sm">
-              <Stat k="回収率" v={pct(ov.roi)} cls={ov.roi == null ? '' : ov.roi >= 1 ? 'text-pos' : 'text-neg'} />
-              <Stat k="損益" v={signedYen(ov.totalProfit)} cls={tone(ov.totalProfit)} />
-              <Stat k="購入/的中率" v={`${ov.settledCount} / ${pct(ov.hitRate, 0)}`} />
-              <Stat k="Log Loss" v={num(model?.metrics.logLoss, 3)} hint={model?.metrics.baselineLogLoss != null ? `基準 ${num(model.metrics.baselineLogLoss, 3)}` : undefined} />
-              <Stat k="Brier" v={num(model?.metrics.brier, 3)} />
-              <Stat k="校正誤差 ECE" v={num(model?.metrics.ece, 3)} />
-            </dl>
-            <div className="mt-4 text-xs text-muted">
-              {model ? <>{model.status === 'active' ? '稼働モデル' : t().modelStatus[model.status]} <span className="font-mono text-ink">{model.id}</span>{model.testFrom && <span className="text-faint">（test {model.testFrom}〜{model.testTo}）</span>}</> : <span className="text-warn">学習済みモデルがありません（未学習）</span>}
-            </div>
-          </div>
-        ))}
+    <Section title="運用成績" right={<span className="text-xs text-muted">確定分の払戻と損益 · 初期資金 {yen(performance.initialBankroll)}</span>}>
+      <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-3 xl:grid-cols-6">
+        <Kpi label="仮想資産" value={yen(performance.bankroll)} />
+        <Kpi label="確定損益" value={signedYen(performance.totalProfit)} valueClass={tone(performance.totalProfit)} />
+        <Kpi label="回収率" value={pct(performance.roi)} valueClass={performance.roi == null ? '' : performance.roi >= 1 ? 'text-pos' : 'text-neg'} sub="確定払戻 ÷ 購入額" />
+        <Kpi label="購入点数" value={performance.betCount.toLocaleString()} sub={`確定 ${performance.settledCount}`} />
+        <Kpi label="的中率" value={pct(performance.hitRate)} />
+        <Kpi label="未確定" value={unresolved.toLocaleString()} sub="損益・回収率の集計対象外" />
+      </div>
+      <div className="border-t border-line px-2 pb-3 pt-2">
+        {performance.equityCurve.length > 1 ? <EquityChart data={performance.equityCurve} base={performance.initialBankroll} /> : <Empty>確定した仮想購入がまだありません。</Empty>}
       </div>
     </Section>
-  )
+
+    <Section title="購入したレース" right={<span className="text-xs text-muted">{purchasedRaces.length}レース · {bets.length}点</span>}>
+      {!purchasedRaces.length ? <Empty>この表示条件では仮想購入がありません。未購入レースは表示しません。</Empty> : <div className="divide-y divide-line">
+        {purchasedRaces.map((race) => <PurchasedRaceCard key={race.raceId} race={race} />)}
+      </div>}
+    </Section>
+  </div>
 }
 
-function Stat({ k, v, cls = '', hint }: { k: string; v: string; cls?: string; hint?: string }) {
-  return (
-    <div>
-      <dt className="text-[11px] text-muted">{k}</dt>
-      <dd className={`num mt-0.5 font-semibold ${cls}`}>{v}</dd>
-      {hint && <dd className="num text-[10px] text-faint">{hint}</dd>}
+function PurchasedRaceCard({ race }: { race: PurchasedRace }) {
+  const resolved = race.bets.filter((bet) => bet.status !== 'open')
+  const pendingCount = race.bets.length - resolved.length
+  const knownPayouts = resolved.filter((bet) => bet.payout != null)
+  const settledPayout = knownPayouts.reduce((sum, bet) => sum + (bet.payout ?? 0), 0)
+  const knownProfits = resolved.filter((bet) => bet.profit != null)
+  const settledProfit = knownProfits.reduce((sum, bet) => sum + (bet.profit ?? 0), 0)
+  const target = `/${race.sport}/${encodeURIComponent(race.raceId)}`
+  return <article className="p-4">
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <Link to={target} className="flex items-center gap-2 font-semibold hover:text-accent">
+          <SportIcon sport={race.sport} className={`h-4 w-4 ${race.sport === 'boat' ? 'text-boat' : 'text-horse'}`} />
+          {race.venueName ?? race.raceId}{race.raceNo != null ? ` ${race.raceNo}R` : ''}
+          <span className="text-xs font-normal text-muted">詳細 →</span>
+        </Link>
+        <div className="mt-1 text-[11px] text-muted">{race.raceDate ?? '開催日不明'} · 購入 {race.bets.length}点 · {dateTime(race.latestPurchase)} 時点</div>
+      </div>
+      <div className="grid grid-cols-2 gap-x-5 gap-y-1 text-right text-xs sm:grid-cols-4">
+        <div><div className="text-[10px] text-muted">購入額</div><div className="num font-semibold">{yen(race.bets.reduce((sum, bet) => sum + bet.stake, 0))}</div></div>
+        <div><div className="text-[10px] text-muted">確定払戻</div><div className="num font-semibold">{knownPayouts.length === resolved.length && resolved.length ? yen(settledPayout) : knownPayouts.length ? '一部未確認' : '未確定'}</div></div>
+        <div><div className="text-[10px] text-muted">確定損益</div><div className={`num font-semibold ${knownProfits.length === resolved.length && resolved.length ? tone(settledProfit) : 'text-muted'}`}>{knownProfits.length === resolved.length && resolved.length ? signedYen(settledProfit) : knownProfits.length ? '一部未確認' : '未確定'}</div></div>
+        <div><div className="text-[10px] text-muted">精算状況</div><div className="font-semibold">{pendingCount ? `未確定 ${pendingCount}点` : '全点確定'}</div></div>
+      </div>
     </div>
-  )
+    <div className="mt-3 flex flex-wrap gap-2">
+      {race.bets.map((bet) => <div key={bet.id} className="flex items-center gap-2 rounded-lg border border-line bg-raised/40 px-2.5 py-2 text-xs">
+        <span className="font-mono font-medium">{betTypeLabel[bet.betType]} {bet.selection}</span>
+        <span className="num text-muted">{yen(bet.stake)}</span>
+        <span className={bet.status === 'won' ? 'text-pos' : bet.status === 'void' ? 'text-warn' : 'text-muted'}>{t().betStatus[bet.status]}</span>
+        {bet.status !== 'open' && bet.payout != null && <span className="num text-muted">払戻 {yen(bet.payout)}</span>}
+      </div>)}
+    </div>
+  </article>
 }

@@ -563,6 +563,50 @@ app.get('/races/:id', async c=>{
  return c.json({id:r.id,sport:r.sport,venueId:r.venue_id,venueName:r.venue_name,raceDate:r.race_date,raceNo:r.race_no,name:r.name,distance:r.distance,surface:r.surface,trackCondition:r.track_condition,weather:r.weather,windSpeed:r.wind_speed,waveHeight:r.wave_height,postTime:r.post_time,status:r.status,dataOrigin:r.data_origin,entryCount:entries.length,topEdge:best?.edge??'INSUFFICIENT_DATA',bestExpectedRoi:best?.expectedRoi??null,model:modelRow?mapModel(modelRow):null,predictedAt:entries.find(x=>x.predicted_at)?.predicted_at??null,dataFreshnessMinutes:entries.find(x=>x.captured_at)?Math.max(0,(Date.now()-Date.parse(entries.find(x=>x.captured_at).captured_at))/60000):null,entries:entryViews,tickets,payouts});
 });
 function mapModel(m:any){return {id:m.id,sport:m.sport,betType:m.bet_type,version:m.version,algorithm:m.algorithm,status:m.status,trainFrom:m.train_from,trainTo:m.train_to,validFrom:m.valid_from,validTo:m.valid_to,testFrom:m.test_from,testTo:m.test_to,nTrain:m.n_train,metrics:JSON.parse(m.metrics_json||'{}'),trainedAt:m.trained_at,notes:m.notes};}
+// Read-only historical evidence view. Unlike /races/:id, this route does not
+// apply live candidate eligibility, active-model gates, or scheduled-race
+// filtering. It reads one exact real boat race and at most one 121-row batch
+// for each evidence table so stored history can be inspected without changing
+// what can be bought or inferred from the live candidate endpoints.
+app.get('/shadow/races/:id', async c=>{
+ const id=c.req.param('id');
+ if(!/^boat-\d{8}-\d{2}-\d{2}$/.test(id))return jsonError(c,'invalid real boat race id');
+ const db=c.env.DB;
+ const race=await first<any>(db,`SELECT r.id,r.sport,r.venue_id venueId,v.name venueName,r.race_date raceDate,r.race_no raceNo,
+   r.post_time postTime,r.status,r.data_origin dataOrigin,(SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real') entryCount
+   FROM races r JOIN venues v ON v.id=r.venue_id
+   WHERE r.id=? AND r.sport='boat' AND r.data_origin='real'
+     AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,id);
+ if(!race)return jsonError(c,'not found',404);
+
+ const predictionHeader=await first<any>(db,`SELECT p.model_id modelId,p.predicted_at predictedAt,m.version modelVersion,m.status modelStatus
+   FROM ticket_predictions p LEFT JOIN models m ON m.id=p.model_id
+   WHERE p.race_id=? AND p.bet_type='trifecta' AND p.data_origin='real'
+   ORDER BY julianday(p.predicted_at) DESC,p.model_id LIMIT 1`,id);
+ let predictionBatch=null;
+ if(predictionHeader){
+   const rows=await all<any>(db,`SELECT selection,probability,prob_std probStd,feature_schema_version featureSchemaVersion,artifact_sha256 artifactSha256
+     FROM ticket_predictions
+     WHERE race_id=? AND model_id=? AND bet_type='trifecta' AND data_origin='real' AND predicted_at=?
+     ORDER BY selection LIMIT 121`,id,predictionHeader.modelId,predictionHeader.predictedAt);
+   predictionBatch={...predictionHeader,rowCount:rows.length,rows};
+ }
+
+ const oddsHeader=await first<any>(db,`SELECT captured_at capturedAt,source,source_url sourceUrl,source_sha256 sourceSha256,quality_status qualityStatus
+   FROM odds_snapshots
+   WHERE race_id=? AND bet_type='trifecta' AND data_origin='real'
+   ORDER BY julianday(captured_at) DESC LIMIT 1`,id);
+ let oddsSnapshot=null;
+ if(oddsHeader){
+   const rows=await all<any>(db,`SELECT selection,odds FROM odds_snapshots
+     WHERE race_id=? AND bet_type='trifecta' AND data_origin='real' AND captured_at=?
+       AND source IS ? AND source_url IS ? AND source_sha256 IS ? AND quality_status IS ?
+     ORDER BY selection LIMIT 121`,id,oddsHeader.capturedAt,oddsHeader.source,oddsHeader.sourceUrl,oddsHeader.sourceSha256,oddsHeader.qualityStatus);
+   oddsSnapshot={...oddsHeader,rowCount:rows.length,rows};
+ }
+ c.header('Cache-Control','private, no-store');
+ return c.json({race,predictionBatch,oddsSnapshot,pointInTimeAvailability:'not-recorded'});
+});
 app.get('/rankings',async c=>{
  const db=c.env.DB,sport=c.req.query('sport'),date=c.req.query('date'),origin=originFilter(c.req.query('origin')); if(sport&&!validSport(sport))return jsonError(c,'invalid sport'); if(!date)return jsonError(c,'date is required');
  const rows=await all<any>(db,`SELECT r.id race_id,r.sport,r.data_origin,r.race_no,r.post_time,v.name venue_name,e.number,e.name,p.probability,p.prob_std,p.model_id,m.status model_status,o.odds,o.captured_at,p.predicted_at FROM races r JOIN venues v ON v.id=r.venue_id JOIN entries e ON e.race_id=r.id AND e.data_origin=r.data_origin JOIN predictions p ON p.id=(SELECT p2.id FROM predictions p2 JOIN models pm ON pm.id=p2.model_id AND pm.status='active' AND pm.sport=r.sport AND pm.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(pm.metrics_json) THEN (json_type(pm.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(pm.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(pm.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(pm.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(pm.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(pm.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) WHERE p2.race_id=r.id AND p2.number=e.number AND p2.data_origin=r.data_origin AND julianday(p2.predicted_at)<=julianday(?) AND julianday(p2.predicted_at)<=julianday(r.post_time) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1) JOIN models m ON m.id=p.model_id AND m.status='active' AND m.sport=r.sport AND m.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(m.metrics_json) THEN (json_type(m.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) JOIN odds_snapshots o ON o.race_id=r.id AND o.data_origin=r.data_origin AND o.bet_type='win' AND o.selection=CAST(e.number AS TEXT) AND o.captured_at=(SELECT o2.captured_at FROM odds_snapshots o2 WHERE o2.race_id=r.id AND o2.data_origin=r.data_origin AND o2.bet_type='win' AND o2.selection=CAST(e.number AS TEXT) AND julianday(o2.captured_at)<=julianday(?) AND julianday(o2.captured_at)>=julianday(?) AND julianday(o2.captured_at)<=julianday(r.post_time) ORDER BY julianday(o2.captured_at) DESC LIMIT 1) WHERE julianday(p.predicted_at)<=julianday(?) AND r.race_date=? AND r.status='scheduled' AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?) AND (? IS NULL OR r.sport=?) AND (? IS NULL OR r.data_origin=?) AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,now(),now(),oddsFreshAfter(),now(),date,now(),sport||null,sport||null,origin,origin);
@@ -724,7 +768,10 @@ async function ticketCandidatesForRace(db: Db, race: any, maxStd: number): Promi
     output.push({ raceId: race.id, sport: race.sport, venueName: race.venue_name, raceNo: race.race_no, postTime: race.post_time,
         betType: 'trifecta', selection, probability: p.probability, probStd: p.prob_std, odds, oddsCapturedAt: latestOdds.captured_at,
         breakEvenProb: 1 / odds, expectedRoi: score.expectedRoi!, conservativeRoi: score.conservativeRoi!, edge: score.edge,
-        modelId: model.id, dataFreshnessMinutes: Math.max(0, (Date.now() - Date.parse(latestOdds.captured_at)) / 60000),
+        modelId: model.id, modelVersion: model.version, modelArtifactSha256: metrics.ticketArtifactSha256,
+        predictedAt: latest.predicted_at, oddsSource: 'boatrace-trifecta-official-v1', oddsSourceUrl: latestOdds.source_url,
+        oddsSourceSha256: latestOdds.source_sha256,
+        dataFreshnessMinutes: Math.max(0, (Date.now() - Date.parse(latestOdds.captured_at)) / 60000),
         dataOrigin: 'real', buyEligible: score.edge === 'HIGH_EDGE' || score.edge === 'POSITIVE_EDGE' });
     }
   }

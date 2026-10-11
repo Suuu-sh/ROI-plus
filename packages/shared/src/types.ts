@@ -46,7 +46,9 @@ export interface TicketCandidate {
   raceId: string; sport: Sport; venueName: string; raceNo: number; postTime: string | null;
   betType: Exclude<BetType, 'win'>; selection: string; probability: number; probStd: number;
   odds: number; oddsCapturedAt: string | null; breakEvenProb: number; expectedRoi: number; conservativeRoi: number;
-  edge: EdgeLabel; modelId: string; dataFreshnessMinutes: number | null; dataOrigin: DataOrigin;
+  edge: EdgeLabel; modelId: string; modelVersion: string; modelArtifactSha256: string; predictedAt: string;
+  oddsSource: string; oddsSourceUrl: string; oddsSourceSha256: string;
+  dataFreshnessMinutes: number | null; dataOrigin: DataOrigin;
   buyEligible: boolean;
 }
 

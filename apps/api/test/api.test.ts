@@ -58,6 +58,34 @@ describe('EdgeLab API',()=>{
   const r=await app.request(`/api/races?sport=horse&date=${today}&origin=sample`,{},env());
   expect(r.status).toBe(200); const rows=await r.json() as any[]; expect(rows.length).toBeGreaterThanOrEqual(12); expect(rows.every(x=>x.dataOrigin==='sample')).toBe(true);
  });
+ it('reads one bounded historical trifecta batch and odds snapshot without making candidates or writing',async()=>{
+  const {raceId}=addValidatedTrifectaFixture();
+  sqlite.prepare("UPDATE races SET status='finished',post_time=? WHERE id=?").run(jstIso(Date.now()-60_000),raceId);
+  const beforeBudget=(sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value;
+  const response=await app.request(`/api/shadow/races/${raceId}`,{},env());
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  const snapshot=await response.json() as any;
+  expect(snapshot).toMatchObject({
+   race:{id:raceId,sport:'boat',dataOrigin:'real',status:'finished',entryCount:6},
+   pointInTimeAvailability:'not-recorded',
+  });
+  expect(snapshot.predictionBatch).toMatchObject({modelId:'boat-trifecta-validated',modelVersion:'v1',rowCount:120});
+  expect(snapshot.predictionBatch.rows).toHaveLength(120);
+  expect(snapshot.oddsSnapshot).toMatchObject({source:'boatrace-trifecta-official-v1',qualityStatus:'verified-complete-v1',rowCount:120});
+  expect(snapshot.oddsSnapshot.rows).toHaveLength(120);
+  expect(snapshot).not.toHaveProperty('candidates');
+  expect(snapshot.predictionBatch.rows[0]).not.toHaveProperty('buyEligible');
+  const standardDetail=await app.request(`/api/races/${raceId}`,{},env());
+  expect((await standardDetail.json() as any).tickets).toEqual([]);
+  expect((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value).toBe(beforeBudget);
+ });
+ it('rejects malformed or non-real race IDs on the historical evidence route',async()=>{
+  expect((await app.request('/api/shadow/races/not-a-race',{},env())).status).toBe(400);
+  const sample=sqlite.prepare("SELECT id FROM races WHERE sport='boat' AND data_origin='sample' LIMIT 1").get() as {id:string};
+  expect((await app.request(`/api/shadow/races/${sample.id}`,{},env())).status).toBe(400);
+  expect((await app.request('/api/shadow/races/boat-20990101-98-01',{},env())).status).toBe(404);
+ });
  it('ingest requires bearer and upserts idempotently',async()=>{
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('venue-99','boat','API fixture')").run();
   const race={id:'boat-20990101-99-01',sport:'boat',venue_id:'venue-99',race_date:'2099-01-01',race_no:1,status:'scheduled',data_origin:'real',updated_at:'2099-01-01T00:00:00Z'};
