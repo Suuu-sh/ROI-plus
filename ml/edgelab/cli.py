@@ -150,6 +150,11 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     # a fresh K fetch for today and the prior day; B files keep their stable cache.
     collect_boat(previous, day, refresh_k_dates={previous, day})
     rows = load_rows()
+    try:
+        beforeinfo_result = collect_beforeinfo(day, now=cutoff, window_min=25, max_requests=8)
+        rows = load_rows()
+    except Exception as exc:
+        beforeinfo_result = {"status": "failed", "reason": type(exc).__name__, "observations": 0}
     from edgelab.sync import fetch_model_registry
     registry = fetch_model_registry()
     _apply_model_registry(rows, registry)
@@ -207,6 +212,7 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         # late-night runs; settle those alongside yesterday's outcomes.
         "results": [r for r in rows.get("results", []) if r.get("race_id") in prev_ids | today_ids],
         "payouts": [r for r in rows.get("payouts", []) if r.get("race_id") in prev_ids | today_ids],
+        "prerace_observations": [r for r in rows.get("prerace_observations", []) if r.get("race_id") in today_ids],
         "collection_runs": [r for r in rows.get("collection_runs", []) if r.get("id") in run_ids],
         "venues": __import__("edgelab.venues", fromlist=["venue_rows"]).venue_rows(),
         "models": rows.get("models", []),
@@ -226,11 +232,12 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
             "forecast_ready": forecast_ready,
             "forecast_status": "ready" if forecast_ready else "not_ready",
             "forecast_reason": forecast_reason,
-            "predictions": len(predictions), "sync": synced,
+            "predictions": len(predictions), "prerace_observations": beforeinfo_result, "sync": synced,
             "feedback_models": len(learning_report["models"])}
 
 
-def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str) -> list[dict[str, Any]]:
+def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
+                       feature_schema: str = "boat-base-v1") -> list[dict[str, Any]]:
     outcomes = {(row.get("race_id"), row.get("number")): row.get("finish_order")
                 for row in store.get("results", []) if row.get("data_origin") == "real"}
     races = {row.get("id"): row for row in store.get("races", [])
@@ -238,18 +245,35 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str) -> l
     entries = [row for row in store.get("entries", [])
                if row.get("race_id") in races and row.get("data_origin") == "real"]
     if sport == "boat":
-        from edgelab.features.boat import build_boat_features
+        from edgelab.features.boat import (PRERACE_V2_SCHEMA, build_boat_features,
+                                           build_boat_prerace_v2_features, completed_racer_history)
         grouped: dict[str, list[dict[str, Any]]] = {}
         for entry in entries:
             grouped.setdefault(str(entry["race_id"]), []).append(entry)
         enriched = []
+        history = completed_racer_history(store) if feature_schema == PRERACE_V2_SCHEMA else []
         for race_id, group in grouped.items():
             race = races[race_id]
-            # Historical training uses B-file base features only. K-file exhibition
-            # and weather fields are not assumed safe just because B availability is known.
-            features = build_boat_features(group, race_date=race["race_date"])
-            from edgelab.features.boat import FEATURE_COLUMNS
-            enriched.extend({**{k: v for k, v in entry.items() if k not in FEATURE_COLUMNS}, **feature}
+            if feature_schema == PRERACE_V2_SCHEMA:
+                # T-60 training inputs require the exact official racelist cutoff.
+                # B-file post_time is only a start-time approximation and is not
+                # promoted to a betting cutoff.
+                if (race.get("betting_cutoff_source") != "boatrace-racelist-cutoff-v1"
+                        or not race.get("betting_cutoff_at")):
+                    continue
+                predicted_at = race["betting_cutoff_at"]
+                features = build_boat_prerace_v2_features(group, race=race, predicted_at=predicted_at,
+                    history=history, observations=store.get("prerace_observations", []))
+                from edgelab.features.boat import PRERACE_V2_FEATURE_COLUMNS
+                feature_columns = PRERACE_V2_FEATURE_COLUMNS
+            else:
+                if feature_schema != "boat-base-v1":
+                    raise ValueError(f"unsupported boat feature schema: {feature_schema}")
+                # Existing v1 model training remains B-file-only.
+                features = build_boat_features(group, race_date=race["race_date"])
+                from edgelab.features.boat import FEATURE_COLUMNS
+                feature_columns = FEATURE_COLUMNS
+            enriched.extend({**{k: v for k, v in entry.items() if k not in feature_columns}, **feature}
                             for entry, feature in zip(group, features))
         entries = enriched
     cohort_ids = set()
@@ -281,12 +305,17 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str) -> l
                "finish_order": finish,
                "winner": str(finish) == "1", "target": str(finish) == "1"}
         post_time = race.get("post_time")
-        if post_time:
+        if feature_schema == "boat-prerace-v2":
+            cutoff = race.get("betting_cutoff_at")
+            if race.get("betting_cutoff_source") == "boatrace-racelist-cutoff-v1" and cutoff:
+                row["predicted_at"] = cutoff
+                row["available_at"] = entry.get("available_at")
+        elif post_time:
             try:
                 cutoff = datetime.fromisoformat(post_time.replace("Z", "+00:00")) - timedelta(minutes=10)
                 row["predicted_at"] = cutoff.isoformat()
-                # Default features use only program (B) data; K's pre-race fields
-                # carry their own timestamp in features_json.pre_race_available_at.
+                # Legacy candidate training remains B-file-only. T-60 candidate
+                # rows use the true cutoff branch above and source observation times.
                 row["available_at"] = entry.get("available_at")
             except (TypeError, ValueError):
                 pass
@@ -339,41 +368,21 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                             continue
                 content = read_lzh(path)
                 parsed = parser(content, race_date=day.isoformat())
+                if kind == "K":
+                    observed_at = _now()
+                    for result in parsed.get("results", []):
+                        result["available_at"] = observed_at
                 for table, values in parsed.items():
                     rows.setdefault(table, []).extend(values)
             except Exception as exc:  # each date gets a durable failure record
                 errors.append(f"{kind}: {type(exc).__name__}: {exc}")
-        # K's exhibit/ST fields are only usable from ten minutes before the
-        # scheduled deadline. Reuse the official B timetable, never race-day
-        # midnight, as their availability timestamp.
+        # Restore the official B schedule after parsing K results; the result
+        # page can report a different post-race display time.
         scheduled = {race["id"]: race.get("post_time") for race in rows.get("races", [])
                      if race.get("post_time")}
         for race in rows.get("races", []):
             if race.get("status") == "finished" and race.get("id") in scheduled:
                 race["post_time"] = scheduled[race["id"]]
-        for entry in rows.get("entries", []):
-            if entry.get("exhibition_time") is not None or entry.get("start_exhibition") is not None:
-                post_time = scheduled.get(entry.get("race_id"))
-                pre_race_at = None
-                if post_time:
-                    try:
-                        pre_race_at = (datetime.fromisoformat(post_time.replace("Z", "+00:00"))
-                                       - timedelta(minutes=10)).isoformat()
-                    except ValueError:
-                        pre_race_at = None
-                # Keep the row-level available_at from the B program; record the
-                # later availability of exhibition data separately.
-                # 番組情報（選手・モーター等）は B と同じく開催日 0:00 時点で利用可能。
-                # B が欠けた日でも ingest 必須項目が埋まるよう、pop せず同じ値を入れる。
-                race_date = str(entry.get("race_id", ""))[5:13]
-                entry["available_at"] = (f"{race_date[:4]}-{race_date[4:6]}-{race_date[6:]}T00:00:00+09:00"
-                                         if len(race_date) == 8 and race_date.isdigit() else None)
-                try:
-                    extra = json.loads(entry.get("features_json") or "{}")
-                except (TypeError, ValueError):
-                    extra = {}
-                extra["pre_race_available_at"] = pre_race_at
-                entry["features_json"] = json.dumps(extra, ensure_ascii=False, separators=(",", ":"))
         merge_rows(store, rows)
         status = "failed" if errors and not rows else "partial" if errors else "skipped" if not rows and existing else "success"
         store.setdefault("collection_runs", []).append({
@@ -387,6 +396,26 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
     # Preserve failed-run telemetry and allow the following workflow sync step
     # to deliver it to the collection-status endpoint.
     return 0
+
+
+def collect_beforeinfo(day: str, *, now: str | None = None, window_min: int = 25,
+                       max_requests: int = 8, store_path: str | Path = DEFAULT_STORE,
+                       fetcher=None, wait_for_slot=None) -> dict[str, Any]:
+    """Collect bounded current-day official exhibition/weather observations."""
+    from edgelab.collectors.boatrace_beforeinfo import collect_beforeinfo as collect
+    from edgelab.storage import load_rows
+
+    current = datetime.fromisoformat(now.replace("Z", "+00:00")) if now else datetime.now(ZoneInfo("Asia/Tokyo"))
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ZoneInfo("Asia/Tokyo"))
+    if current.astimezone(ZoneInfo("Asia/Tokyo")).date().isoformat() != date.fromisoformat(day).isoformat():
+        return {"status": "skipped", "targets": 0, "requests": 0, "observations": 0, "failures": [],
+                "reason": "collector accepts current JST day only"}
+    store = load_rows(store_path)
+    result = collect(store, now=current, window_min=window_min, max_requests=max_requests,
+                     fetcher=fetcher, wait_for_slot=wait_for_slot)
+    save_rows(store, store_path)
+    return result
 
 
 def rebuild_boat(raw_dir: str | Path = "data/raw/boatrace") -> dict[str, int]:
@@ -570,7 +599,7 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--to", dest="date_to", required=True)
     train = sub.add_parser("train", help="train an independent sport model")
     train.add_argument("--sport", choices=("boat", "horse"), required=True)
-    trifecta = sub.add_parser("train-trifecta", help="train/evaluate an offline candidate exact-order boat trifecta model")
+    trifecta = sub.add_parser("train-trifecta", help="train/evaluate an offline T-60, pre-race-v2 candidate exact-order trifecta model")
     trifecta.add_argument("--model-id", help="immutable candidate model ID")
     trifecta.add_argument("--artifact-dir", default="ml/artifacts")
     trifecta.add_argument("--min-train-races", type=int, default=300)
@@ -585,7 +614,7 @@ def _parser() -> argparse.ArgumentParser:
     sync = sub.add_parser("sync", help="sync local normalized rows to /api/ingest")
     sync.add_argument("--dry-run", action="store_true")
     sync.add_argument("--output-dir", default="ml/outbox")
-    sync.add_argument("--tables", nargs="+", choices=("venues", "races", "entries", "results", "payouts", "odds_snapshots", "models", "predictions", "ticket_predictions", "collection_runs"))
+    sync.add_argument("--tables", nargs="+", choices=("venues", "races", "entries", "results", "payouts", "odds_snapshots", "models", "predictions", "ticket_predictions", "prerace_observations", "collection_runs"))
     backfill = sub.add_parser("backfill", help="collect a date range of boat data")
     backfill.add_argument("--from", dest="date_from", required=True)
     backfill.add_argument("--to", dest="date_to", required=True)
@@ -612,6 +641,12 @@ def _parser() -> argparse.ArgumentParser:
     live.add_argument("--window-min", type=int, default=25)
     live.add_argument("--now", help="ISO timestamp")
     live.add_argument("--max-requests", type=int, default=30)
+    beforeinfo = sub.add_parser("collect-beforeinfo", help="collect current-day official exhibition and weather observations")
+    beforeinfo.add_argument("--date", required=True)
+    beforeinfo.add_argument("--now", help="ISO timestamp; defaults to current JST time")
+    beforeinfo.add_argument("--window-min", type=int, default=25)
+    beforeinfo.add_argument("--max-requests", type=int, default=8)
+    beforeinfo.add_argument("--sync", action="store_true", help="sync today's collected rows after the DB migration is installed")
     daily = sub.add_parser("daily", help="run the idempotent daily boat pipeline")
     daily.add_argument("--date", default=None, help="JST date (defaults to today)")
     daily.add_argument("--now", help="ISO timestamp cutoff (defaults to current time)")
@@ -637,6 +672,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "collect-boat":
         return collect_boat(args.date_from, args.date_to)
+    if args.command == "collect-beforeinfo":
+        result = collect_beforeinfo(args.date, now=args.now, window_min=args.window_min,
+                                    max_requests=args.max_requests)
+        if args.sync and result.get("observations"):
+            from edgelab.sync import sync_rows
+            store = load_rows()
+            day = date.fromisoformat(args.date).isoformat()
+            today_ids = {r.get("id") for r in store.get("races", []) if r.get("race_date") == day}
+            result["sync"] = sync_rows({"prerace_observations": [o for o in store.get("prerace_observations", [])
+                                                                  if o.get("race_id") in today_ids]})
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     if args.command == "preview-boat-day":
         print(json.dumps(preview_boat_day(args.date, args.raw, args.output), ensure_ascii=False))
         return 0
@@ -646,13 +693,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "train-trifecta":
         from edgelab.models.trifecta import train_trifecta
         rows = load_rows()
-        training_rows = _make_training_rows(rows, "boat")
+        from edgelab.features.boat import PRERACE_V2_SCHEMA
+        training_rows = _make_training_rows(rows, "boat", feature_schema=PRERACE_V2_SCHEMA)
         digest = hashlib.sha256("|".join(sorted({str(r.get("race_id")) for r in training_rows})).encode()).hexdigest()[:8]
         model_id = args.model_id or f"boat-trifecta-lgbm-{datetime.now(timezone.utc):%Y%m%d}-{digest}"
         if any(str(model.get("id")) == model_id for model in rows.get("models", [])):
             raise RuntimeError("candidate model ID already exists locally; model IDs are immutable")
         result = train_trifecta(training_rows, rows, model_id=model_id,
-                                artifact_dir=args.artifact_dir, min_train_races=args.min_train_races)
+                                artifact_dir=args.artifact_dir, min_train_races=args.min_train_races,
+                                feature_schema_version=PRERACE_V2_SCHEMA)
         if result.get("status") == "candidate":
             metrics = dict(result.get("metrics") or {})
             metrics["ticketArtifactSha256"] = result["ticketArtifactSha256"]
@@ -847,7 +896,7 @@ def main(argv: list[str] | None = None) -> int:
         rows = load_rows()
         from edgelab.venues import venue_rows
         payload = {key: rows.get(key, []) for key in
-                   ("races", "entries", "results", "payouts", "odds_snapshots", "models", "predictions", "ticket_predictions", "collection_runs")}
+                   ("races", "entries", "results", "payouts", "odds_snapshots", "models", "predictions", "ticket_predictions", "prerace_observations", "collection_runs")}
         payload["venues"] = venue_rows()
         if args.tables:
             payload = {key: payload[key] for key in args.tables if key in payload}

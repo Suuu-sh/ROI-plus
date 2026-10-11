@@ -9,7 +9,7 @@ DEFAULT_STORE = Path("ml/data/rows.json")
 def load_rows(path: str | Path = DEFAULT_STORE) -> dict[str, list[dict[str, Any]]]:
     target = Path(path)
     if not target.exists():
-        return {k: [] for k in ("races", "entries", "odds_snapshots", "results", "payouts", "predictions", "ticket_predictions", "models", "collection_runs")}
+        return {k: [] for k in ("races", "entries", "odds_snapshots", "results", "payouts", "predictions", "ticket_predictions", "prerace_observations", "models", "collection_runs")}
     return json.loads(target.read_text(encoding="utf-8"))
 
 def save_rows(rows: dict[str, list[dict[str, Any]]], path: str | Path = DEFAULT_STORE) -> None:
@@ -24,6 +24,7 @@ def merge_rows(target: dict[str, list[dict[str, Any]]], incoming: dict[str, list
             "odds_snapshots": ("race_id", "bet_type", "selection", "captured_at"),
             "predictions": ("race_id", "model_id", "number", "predicted_at"),
             "ticket_predictions": ("race_id", "model_id", "bet_type", "selection", "predicted_at"),
+            "prerace_observations": ("race_id", "kind", "entry_number", "fetched_at"),
             "models": ("id",), "collection_runs": ("id",)}
     for table, new_rows in incoming.items():
         if table not in keys:
@@ -37,6 +38,11 @@ def merge_rows(target: dict[str, list[dict[str, Any]]], incoming: dict[str, list
                 # K files enrich B rows; preserve fields absent from the newer
                 # source rather than erasing prior facts with SQL-style NULLs.
                 merged = {**previous, **{key: value for key, value in row.items() if value is not None}}
+                if (table == "results" and previous.get("finish_order") == row.get("finish_order")
+                        and previous.get("available_at")):
+                    # Re-reading an unchanged K outcome cannot make it appear
+                    # earlier than the first time this local store observed it.
+                    merged["available_at"] = previous["available_at"]
                 if isinstance(previous.get("features_json"), str) and isinstance(row.get("features_json"), str):
                     try:
                         extras = json.loads(previous["features_json"])

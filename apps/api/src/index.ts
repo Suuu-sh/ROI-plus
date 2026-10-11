@@ -1,1264 +1,17 @@
-import { collectionIssues } from './services/collectionIssues.js';
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import { all, first, run, type Db, type Statement } from './repo/db.js';
-import { candidate, betId, payoutYen, settleValues, validateYenStake } from './services/logic.js';
-import { collectOdds } from './services/collectBoatraceOdds.js';
-import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
-import { collectResults } from './services/collectBoatraceResults.js';
-import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
-import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
-import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, seedUnknownWriteBudget, allowOneDayWriteBudget, ONE_DAY_ALLOWANCE, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
-import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
-
-interface Env { DB: Db; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; PROXY_TOKEN?: string; }
-type Ctx = { Bindings: Env };
-const SAFE_BOAT_SCHEMA = 'boat-venue-v2';
-const TICKET_MODEL_SCHEMA = 'ticket-selection-v1';
-const TICKET_PROBABILITY_SEMANTICS = 'exact-selection-probability-v1';
-const PRIMARY_PAPER_PHASE = 'primary_t60' as const;
-const PRIMARY_PAPER_OFFSET_MS = 60_000;
-const PRIMARY_PAPER_TOLERANCE_MS = 10_000;
-const TRUSTED_CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1' as const;
-const MISSING_CUTOFF_PROBE_BEFORE_POST_MS = 2 * 60_000;
-const MISSING_CUTOFF_PROBE_AFTER_POST_MS = 3 * 60_000;
-const PAPER_COMPARISON_PHASES = {
-  t30: { phase: 'comparison_t30', status: 'unavailable', reason: 'minute-level collection and ten-minute decisions cannot observe second offsets' },
-  t10: { phase: 'comparison_t10', status: 'unavailable', reason: 'minute-level collection and ten-minute decisions cannot observe second offsets' },
-} as const;
-// A full field is represented by either an official numeric finish or an
-// explicit non-finisher code parsed from the official K result file.
-const terminalFinishCodeSql = `(json_valid(e.features_json) AND (
-  json_extract(e.features_json,'$.finish_code') IN ('F','L','K','æ¬ å ´','æ¬ ','å¤±æ ¼','è»¢è¦†','å¦¨å®³','è½æ°´','ã‚¨ãƒ³ã‚¹ãƒˆ','ä¸å®Œèµ°')
-  OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))`;
-const isTerminalFinishCode = (value: unknown): boolean =>
-  typeof value === 'string' && (['F','L','K','æ¬ å ´','æ¬ ','å¤±æ ¼','è»¢è¦†','å¦¨å®³','è½æ°´','ã‚¨ãƒ³ã‚¹ãƒˆ','ä¸å®Œèµ°'].includes(value)
-    || /^K\d$/.test(value));
-const app = new Hono<Ctx>().basePath('/api');
-app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization'] }));
-// æœ¬ç•ªã§ã¯é–²è¦§ç³» API ã‚’ã€Cloudflare Access ã§ä¿è­·ã•ã‚ŒãŸç”»é¢ Workerï¼ˆService Bindingï¼‰çµŒç”±ã«é™å®šã™ã‚‹ã€‚
-// PROXY_TOKEN æœªè¨­å®šï¼ˆãƒ­ãƒ¼ã‚«ãƒ«é–‹ç™ºãƒ»ãƒ†ã‚¹ãƒˆï¼‰ã§ã¯åˆ¶é™ã—ãªã„ã€‚ingest ã¯å¾“æ¥ã©ãŠã‚Š INGEST_TOKEN ã§èªè¨¼ã€‚
-app.use('*', async (c, next) => {
-  const proxy = c.env.PROXY_TOKEN;
-  const path = new URL(c.req.url).pathname;
-  if (!proxy || path === '/api/health' || path.startsWith('/api/ingest/') || path === '/api/admin/settle' || path === '/api/admin/collect-boat-results') return next();
-  if (c.req.header('X-ROI-Proxy') !== proxy) return c.json({ error: 'forbidden' }, 403);
-  return next();
-});
-// Cache only authenticated, read-only dashboard data. Keep URLs (including the
-// complete query string) as keys; mutable ledgers and purchase-sensitive views
-// intentionally bypass this cache. Cache API failures must never fail a read.
-const READ_CACHE_TTL_SECONDS = 10;
-function cacheableReadPath(path: string): boolean {
-  return path === '/api/races' || path === '/api/rankings' || path === '/api/models'
-    || path === '/api/collection/status' || /^\/api\/races\/[^/]+$/.test(path);
-}
-app.use('*', async (c, next) => {
-  if (c.req.method !== 'GET' || !c.env.PROXY_TOKEN || !cacheableReadPath(new URL(c.req.url).pathname)) return next();
-  const keyUrl = new URL(c.req.url);
-  keyUrl.pathname = `/__roi_read_cache_v1${keyUrl.pathname}`;
-  const key = new Request(keyUrl.toString(), { method: 'GET' });
-  let cache: Cache | undefined;
-  let cached: Response | undefined;
-  try {
-    cache = (globalThis.caches as CacheStorage & { default?: Cache } | undefined)?.default;
-    cached = await cache?.match(key);
-  } catch { /* Cache is an optimization only. */ }
-  if (cached) {
-    const headers = new Headers(cached.headers);
-    headers.set('Cache-Control', 'private, no-store');
-    return new Response(cached.body, { status: cached.status, statusText: cached.statusText, headers });
-  }
-
-  // Do not wrap next() in a cache-error handler: application failures must
-  // propagate normally and must never cause the route to be executed twice.
-  await next();
-  const responseHeaders = new Headers(c.res.headers);
-  responseHeaders.set('Cache-Control', 'private, no-store');
-  c.res = new Response(c.res.body, { status: c.res.status, statusText: c.res.statusText, headers: responseHeaders });
-  if (c.res.status !== 200 || !c.res.headers.get('content-type')?.includes('application/json')) return;
-  const storeHeaders = new Headers(c.res.headers);
-  storeHeaders.set('Cache-Control', `public, max-age=${READ_CACHE_TTL_SECONDS}`);
-  try {
-    await cache?.put(key, new Response(c.res.clone().body, { status: c.res.status, statusText: c.res.statusText, headers: storeHeaders }));
-  } catch { /* Ignore cache write errors; return the fresh D1 response. */ }
-});
-// Persist timestamps with a consistent JST offset; selection queries use
-// julianday() so comparisons remain correct when imported ISO offsets differ.
-const isoJstAt = (timestamp: number) => new Date(timestamp + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
-const now = () => isoJstAt(Date.now());
-const ODDS_MAX_AGE_MS = 10 * 60 * 1000;
-const oddsFreshAfter = (timestamp = Date.now()) => isoJstAt(timestamp - ODDS_MAX_AGE_MS);
-const reserveWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'essential');
-const reserveOptionalWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'optional');
-const validSport = (v: string | null): v is Sport => v === 'horse' || v === 'boat';
-const originFilter = (v: string | null | undefined) => v === 'sample' || v === 'real' ? v : null;
-const jsonError = (c: any, message: string, status = 400) => c.json({ error: message }, status);
-async function setting(db: Db, key: string, fallback: string): Promise<string> {
-  return (await first<{value:string}>(db, 'SELECT value FROM settings WHERE key=?', key))?.value ?? fallback;
-}
-const availableBankrollSql = `(COALESCE((SELECT CAST(value AS REAL) FROM settings WHERE key='initial_bankroll'), 100000)
-  + COALESCE((SELECT SUM(CASE WHEN b.status IN ('won','lost') THEN b.profit ELSE 0 END) FROM bets b WHERE NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=b.id)), 0)
-  - COALESCE((SELECT SUM(CASE WHEN b.status='open' THEN b.stake ELSE 0 END) FROM bets b WHERE NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=b.id)), 0))`;
-const nonQuarantinedBet = (alias = 'b') => `NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=${alias}.id)`;
-function auth(c: any) { const token = c.env.INGEST_TOKEN; return !!token && c.req.header('Authorization') === `Bearer ${token}`; }
-// Trusted frontend Service Binding adds this secret header; never accept a
-// missing/empty token as authenticated and do not weaken ingest bearer auth.
-function proxyAuth(c: any) { const token=c.env.PROXY_TOKEN;return !!token&&c.req.header('X-ROI-Proxy')===token; }
-function parseList(body: unknown): Record<string, unknown>[] | null {
-  const rows = Array.isArray(body) ? body : body && typeof body === 'object' && Array.isArray((body as any).items) ? (body as any).items : null;
-  return rows && rows.every((x: unknown) => x && typeof x === 'object' && !Array.isArray(x)) ? rows as Record<string, unknown>[] : null;
-}
-const jstRaceDate = (date = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
-function raceDateWindow() {
-  const today = jstRaceDate(), yesterday = new Date(`${today}T00:00:00+09:00`);
-  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-  return new Set([today, jstRaceDate(yesterday)]);
-}
-const ingestTables: Record<string,{table:string; required:string[]; conflict:string}> = {
-  venues:{table:'venues',required:['id','sport','name'],conflict:'id'},
-  races:{table:'races',required:['id','sport','venue_id','race_date','race_no','status','data_origin'],conflict:'id'},
-  entries:{table:'entries',required:['id','race_id','number','name','available_at','data_origin'],conflict:'race_id,number'},
-  odds:{table:'odds_snapshots',required:['id','race_id','bet_type','selection','captured_at','data_origin'],conflict:'race_id,bet_type,selection,captured_at'},
-  results:{table:'results',required:['race_id','finish_order','number','data_origin'],conflict:'race_id,number'},
-  payouts:{table:'payouts',required:['race_id','bet_type','selection','payout','data_origin'],conflict:'race_id,bet_type,selection'},
-  predictions:{table:'predictions',required:['id','race_id','model_id','number','probability','predicted_at','data_origin'],conflict:'race_id,model_id,number,predicted_at'},
-  'ticket-predictions':{table:'ticket_predictions',required:['id','race_id','model_id','bet_type','selection','probability','predicted_at','data_origin','feature_schema_version','artifact_sha256'],conflict:'race_id,model_id,bet_type,selection,predicted_at'},
-  models:{table:'models',required:['id','sport','bet_type','version','algorithm','status'],conflict:'id'},
-  'collection-runs':{table:'collection_runs',required:['id','source','sport','target_date','started_at','status'],conflict:'id'},
-};
-const allowedColumns: Record<string,string[]> = {
-  venues:'id sport name'.split(' '),
-  races:'id sport venue_id race_date race_no name distance surface track_condition weather wind_speed wave_height post_time betting_cutoff_at betting_cutoff_source betting_cutoff_observed_at status data_origin updated_at'.split(' '),
-  entries:'id race_id number frame name jockey trainer weight_carried horse_weight racer_class national_win_rate local_win_rate motor_no motor_2rate boat_no boat_2rate exhibition_time start_exhibition features_json available_at data_origin'.split(' '),
-  odds_snapshots:'id race_id bet_type selection odds captured_at source data_origin source_url source_sha256 quality_status'.split(' '),
-  results:'race_id finish_order number data_origin'.split(' '),
-  payouts:'race_id bet_type selection payout popularity data_origin'.split(' '),
-  predictions:'id race_id model_id number probability prob_std predicted_at data_origin'.split(' '),
-  ticket_predictions:'id race_id model_id bet_type selection probability prob_std predicted_at data_origin feature_schema_version artifact_sha256'.split(' '),
-  models:'id sport bet_type version algorithm status train_from train_to valid_from valid_to test_from test_to n_train metrics_json trained_at notes'.split(' '),
-  collection_runs:'id source sport target_date started_at finished_at status records error reason'.split(' '),
-};
-const updateColumns: Record<string,string[]> = {
-  venues:['sport','name'],
-  races:'sport venue_id race_date race_no name distance surface track_condition weather wind_speed wave_height post_time betting_cutoff_at betting_cutoff_source betting_cutoff_observed_at status data_origin updated_at'.split(' '),
-  entries:'frame name jockey trainer weight_carried horse_weight racer_class national_win_rate local_win_rate motor_no motor_2rate boat_no boat_2rate exhibition_time start_exhibition features_json available_at data_origin'.split(' '),
-  odds_snapshots:'odds source data_origin source_url source_sha256 quality_status'.split(' '), results:['finish_order','data_origin'], predictions:'probability prob_std data_origin'.split(' '),
-  ticket_predictions:'probability prob_std data_origin feature_schema_version artifact_sha256'.split(' '),
-  payouts:'payout popularity data_origin'.split(' '),
-  models:'sport bet_type version algorithm status train_from train_to valid_from valid_to test_from test_to n_train metrics_json trained_at notes'.split(' '),
-  collection_runs:'source sport target_date started_at finished_at status records error reason'.split(' '),
-};
-async function ingest(c: any, name: string) {
-  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
-  const config = ingestTables[name], rows = parseList(await c.req.json().catch(()=>null));
-  if (!config || !rows || rows.length > 500 || rows.some(r => config.required.some(k => r[k] === undefined))) return jsonError(c, 'invalid payload (maximum 500 rows)');
-  if ((name === 'venues' && rows.length > 50) || (name === 'models' && rows.length > 20)) return jsonError(c, 'small reference/model batches only');
-  const table = config.table, allowed = allowedColumns[table], updates = updateColumns[table];
-  const db: Db = c.env.DB, statements: Statement[] = [];
-  if (['entries','odds_snapshots','results','payouts','predictions','ticket_predictions'].includes(table)) {
-    const raceIds=[...new Set(rows.map(r=>typeof r.race_id==='string'?r.race_id:null).filter((x):x is string=>!!x))];
-    if (raceIds.length) {
-      const quarantined=await first<any>(db,'SELECT COUNT(*) count FROM data_repair_quarantined_races q JOIN json_each(?) ids ON ids.value=q.race_id',JSON.stringify(raceIds));
-      if (Number(quarantined?.count??0)>0) return jsonError(c, 'source data for a quarantined race cannot be ingested');
-    }
-  }
-  const currentWindow = raceDateWindow();
-  const rowCategory = new Map<Record<string, unknown>, WriteCategory>();
-  // Historical backfill is disabled at the API boundary. Date classification
-  // comes from the persisted race row where available, never a client priority claim.
-  for (const row of rows) {
-    let raceDate: string | null = null;
-    let raceId: string | null = null;
-    if (table === 'races') {
-      raceId = typeof row.id === 'string' ? row.id : null;
-      const existing = raceId ? await first<any>(db, 'SELECT race_date,data_origin FROM races WHERE id=?', raceId) : null;
-      if (raceId && await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',raceId)) return jsonError(c, 'race is quarantined by a source-repair audit');
-      if (existing && row.race_date !== undefined && row.race_date !== existing.race_date) return jsonError(c, 'race date cannot be changed for an existing race', 409);
-      if (existing && row.data_origin !== existing.data_origin) return jsonError(c, 'ingest data origin must match the persisted race', 409);
-      const hasCutoff = row.betting_cutoff_at !== undefined && row.betting_cutoff_at !== null;
-      const hasCutoffSource = row.betting_cutoff_source !== undefined && row.betting_cutoff_source !== null;
-      const hasCutoffObservedAt = row.betting_cutoff_observed_at !== undefined && row.betting_cutoff_observed_at !== null;
-      if ((hasCutoff || hasCutoffSource || hasCutoffObservedAt) && (row.sport !== 'boat' || !hasCutoff || !hasCutoffSource || !hasCutoffObservedAt
-          || row.betting_cutoff_source !== TRUSTED_CUTOFF_SOURCE
-          || typeof row.betting_cutoff_at !== 'string' || !Number.isFinite(Date.parse(row.betting_cutoff_at))
-          || typeof row.betting_cutoff_observed_at !== 'string' || !Number.isFinite(Date.parse(row.betting_cutoff_observed_at)))) {
-        return jsonError(c, 'betting cutoff requires valid time and observation timestamps with explicit official racelist cutoff provenance');
-      }
-      raceDate = typeof existing?.race_date === 'string' ? existing.race_date : typeof row.race_date === 'string' ? row.race_date : null;
-    } else if (['entries','odds_snapshots','results','payouts','predictions','ticket_predictions'].includes(table)) {
-      raceId = typeof row.race_id === 'string' ? row.race_id : null;
-      const race = raceId ? await first<any>(db, 'SELECT race_date,data_origin FROM races WHERE id=?', raceId) : null;
-      raceDate = typeof race?.race_date === 'string' ? race.race_date : null;
-      if (!raceDate) return jsonError(c, 'ingest race must already exist', 409);
-      if (row.data_origin !== race.data_origin) return jsonError(c, 'ingest data origin must match the persisted race', 409);
-    } else if (table === 'collection_runs') {
-      raceDate = typeof row.target_date === 'string' ? row.target_date : null;
-    }
-    const openBet = raceId && ['races','entries','results','payouts'].includes(table)
-      ? await first<any>(db, `SELECT 1 FROM bets b JOIN races r ON r.id=b.race_id AND r.data_origin=b.data_origin WHERE b.race_id=? AND b.status='open' AND ${nonQuarantinedBet('b')} LIMIT 1`, raceId)
-      : null;
-    const earliestAcceptedDate = [...currentWindow].sort()[0];
-    if (raceDate && raceDate < earliestAcceptedDate && !openBet) {
-      return c.json({ error: 'historical ingest is disabled; only today/yesterday data and open-bet settlement inputs are accepted', code: 'historical_ingest_disabled' }, 409);
-    }
-    const currentRaceData = !!raceDate && currentWindow.has(raceDate);
-    let category: WriteCategory = 'optional';
-    if (table === 'collection_runs') category = 'collection';
-    else if (openBet) category = 'essential';
-    else if (currentRaceData && ['races','entries','results','payouts'].includes(table)) category = 'essential';
-    else if (currentRaceData && ['predictions','ticket_predictions'].includes(table)) {
-      const modelId = row.model_id;
-      const model = typeof modelId === 'string' ? await first<any>(db, 'SELECT status FROM models WHERE id=?', modelId) : null;
-      if (model?.status === 'active') category = 'essential';
-    }
-    rowCategory.set(row, category);
-  }
-  const changedByCategory: Record<'essential' | 'optional' | 'collection', Partial<Record<IngestTable, number>>> = { essential: {}, optional: {}, collection: {} };
-  const sideEffectsByCategory: Record<'essential' | 'optional' | 'collection', number> = { essential: 0, optional: 0, collection: 0 };
-  for (const row of rows) {
-    if (table === 'races' && await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',row.id)) return jsonError(c, 'race is quarantined by a source-repair audit');
-    const generatedUpdatedAt = table === 'races' && row.updated_at === undefined;
-    if (generatedUpdatedAt) row.updated_at = now();
-    if (table === 'models' && (row.status === 'active' || row.status === 'retired')) {
-      const existing = await first<any>(c.env.DB, 'SELECT status FROM models WHERE id=?', row.id);
-      if (!existing || existing.status !== row.status) return jsonError(c, 'ingest cannot change model lifecycle status');
-    }
-    if (table === 'models' && !['candidate','untrained','active','retired'].includes(String(row.status))) return jsonError(c, 'invalid model status');
-    if (table === 'ticket_predictions') {
-      const model = await first<any>(db, 'SELECT sport,bet_type,metrics_json,trained_at FROM models WHERE id=?', String(row.model_id));
-      let metrics: any;
-      try { metrics = JSON.parse(model?.metrics_json || '{}'); } catch { return jsonError(c, 'ticket model metadata is invalid'); }
-      const selection = typeof row.selection === 'string' ? canonicalTicketSelection(String(row.bet_type) as BetType, row.selection) : null;
-      if (!model || model.sport !== (await first<any>(db, 'SELECT sport FROM races WHERE id=?', String(row.race_id)))?.sport
-          || model.bet_type !== row.bet_type || row.bet_type === 'win'
-          || metrics.ticketModelSchemaVersion !== TICKET_MODEL_SCHEMA
-          || metrics.ticketPredictionSemantics !== TICKET_PROBABILITY_SEMANTICS
-          || metrics.ticketBetType !== row.bet_type
-          || typeof metrics.ticketArtifactSha256 !== 'string'
-          || !/^[a-f0-9]{64}$/.test(metrics.ticketArtifactSha256)
-          || row.feature_schema_version !== TICKET_MODEL_SCHEMA
-          || row.artifact_sha256 !== metrics.ticketArtifactSha256
-          || !selection || selection !== row.selection
-          || typeof row.predicted_at !== 'string' || !Number.isFinite(Date.parse(row.predicted_at)) || Date.parse(row.predicted_at) > Date.now()
-          || !model.trained_at || !Number.isFinite(Date.parse(model.trained_at)) || Date.parse(model.trained_at) >= Date.parse(row.predicted_at)
-          || typeof row.probability !== 'number' || !Number.isFinite(row.probability) || row.probability < 0 || row.probability > 1
-          || (row.prob_std !== undefined && row.prob_std !== null && (!Number.isFinite(row.prob_std) || Number(row.prob_std) < 0))) {
-        return jsonError(c, 'ticket prediction does not match a compatible exact-type model contract');
-      }
-    }
-    const cols = Object.keys(row).filter(k => allowed.includes(k) && row[k] !== undefined);
-    if (config.required.some(k => !cols.includes(k))) return jsonError(c, 'missing required fields');
-    // IDs and server-generated updated_at are not natural-key data; avoid
-    // manufacturing writes when an upstream retry repeats an identical row.
-    const updateCols = updates.filter(k=>cols.includes(k) && k !== 'id');
-    const businessUpdateCols = updateCols.filter(k => k !== 'updated_at');
-    const keyCols = config.conflict.split(',');
-    const keyValues = keyCols.map(k => row[k]);
-    const previous = await first<any>(db, `SELECT * FROM ${table} WHERE ${keyCols.map(k=>`${k}=?`).join(' AND ')}`, ...keyValues);
-    let changed = !previous;
-    if (previous) {
-      if (table === 'models' && (previous.status === 'active' || previous.status === 'retired')) changed = false;
-      else changed = businessUpdateCols.some(k => {
-        if (table === 'races' && k === 'status' && ['finished','cancelled'].includes(previous.status)) return false;
-        return previous[k] !== row[k] && !(previous[k] == null && row[k] == null);
-      });
-    }
-    if (changed) {
-      const ingestTable = table as IngestTable;
-      const rowPriority = rowCategory.get(row);
-      const category = rowPriority === 'essential' || rowPriority === 'collection' ? rowPriority : 'optional';
-      changedByCategory[category][ingestTable] = (changedByCategory[category][ingestTable] ?? 0) + 1;
-    }
-    const updateSet = updateCols.map(k=>`${k}=excluded.${k}`);
-    if (table === 'races' && cols.includes('status')) updateSet[updateSet.indexOf('status=excluded.status')] = "status=CASE WHEN races.status IN ('finished','cancelled') THEN races.status ELSE excluded.status END";
-    const guardExpr = (k: string) => table === 'races' && k === 'status'
-      ? `CASE WHEN races.status IN ('finished','cancelled') THEN races.status ELSE excluded.status END IS NOT races.status`
-      : `${table}.${k} IS NOT excluded.${k}`;
-    const noOpGuard = businessUpdateCols.length ? `(${businessUpdateCols.map(guardExpr).join(' OR ')})` : '0';
-    const updateWhere = table === 'models' ? ` WHERE models.status NOT IN ('active','retired') AND ${noOpGuard}` : ` WHERE ${noOpGuard}`;
-    const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(()=>'?').join(',')}) ON CONFLICT(${config.conflict}) DO UPDATE SET ${updateSet.join(',') || `${config.conflict.split(',')[0]}=excluded.${config.conflict.split(',')[0]}`}${updateWhere}`;
-    if (changed) statements.push(db.prepare(sql).bind(...cols.map(k=>row[k])));
-  }
-  // çµæœãƒ»æ‰•æˆ»ã®å…¥ã£ãŸãƒ¬ãƒ¼ã‚¹ã‚’ç¢ºå®šã«ã™ã‚‹ï¼ˆD1 ã®æ›¸ãè¾¼ã¿è¡Œæ•°ã‚’æŠ‘ãˆã‚‹ãŸã‚ãƒ¬ãƒ¼ã‚¹å˜ä½ã§1å›ã€æœªç¢ºå®šã®ã‚‚ã®ã ã‘ï¼‰
-  if (name === 'payouts' || name === 'results') {
-    for (const id of new Set(rows.map(r => String(r.race_id)))) {
-      const race = await first<any>(db, "SELECT 1 FROM races WHERE id=? AND status NOT IN ('finished','cancelled')", id);
-      if (race) { statements.push(db.prepare("UPDATE races SET status='finished' WHERE id=? AND status NOT IN ('finished','cancelled')").bind(id));
-        const category = rowCategory.get(rows.find(r => String(r.race_id) === id)!) === 'essential' ? 'essential' : 'optional';
-        sideEffectsByCategory[category]++; }
-    }
-  }
-  const changedRows = (Object.values(changedByCategory.essential).reduce((sum, count) => sum + (count ?? 0), 0) +
-    Object.values(changedByCategory.collection).reduce((sum, count) => sum + (count ?? 0), 0) +
-    Object.values(changedByCategory.optional).reduce((sum, count) => sum + (count ?? 0), 0) + sideEffectsByCategory.essential + sideEffectsByCategory.optional);
-  const reservations = (['essential','collection','optional'] as const).flatMap(category => {
-    const counts = changedByCategory[category], sideEffects = sideEffectsByCategory[category];
-    const rowsInCategory = Object.values(counts).reduce((sum, count) => sum + (count ?? 0), 0) + sideEffects;
-    return rowsInCategory > 0 ? [{ units: estimateIngestWriteUnits(counts, sideEffects), category }] : [];
-  });
-  if (reservations.length && !await reserveWriteBudgets(db, utcDate(), reservations)) {
-    const budget = await readWriteBudget(db);
-    return c.json({ error: 'daily D1 write budget unavailable or exhausted', code: budget.state === 'missing' || budget.state === 'invalid' ? 'd1_write_budget_unavailable' : 'd1_write_budget_exhausted', budget }, 429);
-  }
-  // D1 batch ã¯1ãƒˆãƒ©ãƒ³ã‚¶ã‚¯ã‚·ãƒ§ãƒ³ã§å®Ÿè¡Œã•ã‚Œã‚‹ï¼ˆè¡Œã”ã¨ã®å¾€å¾©ã‚’é¿ã‘ã‚‹ï¼‰
-  if (statements.length) {
-    if (db.batch) await db.batch(statements); else for (const s of statements) await s.run();
-  }
-  return c.json({ upserted: rows.length, changed: changedRows });
-}
-async function settleOpen(db: Db) {
-  const bets = await all<any>(db, `SELECT b.*, r.status AS race_status, r.data_origin AS race_origin FROM bets b JOIN races r ON r.id=b.race_id WHERE b.status='open' AND r.status IN ('finished','cancelled') AND b.data_origin=r.data_origin AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) AND ${nonQuarantinedBet()}`);
-  let settled = 0;
-  for (const b of bets) {
-    if (b.race_status === 'cancelled') {
-      if (!await reserveWorkerWrites(db, 1)) break;
-      const result = await run(db, `UPDATE bets SET status='void',payout=0,profit=0,settled_at=? WHERE id=? AND status='open'`, now(), b.id);
-      settled += Number(result.meta?.changes ?? 0); continue;
-    }
-    const integrity = await first<any>(db, `SELECT
-      (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin=?) entry_count,
-      (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin=? AND ${terminalFinishCodeSql}) terminal_entry_count,
-      (SELECT COUNT(*) FROM results res WHERE res.race_id=? AND res.data_origin=?) result_count,
-      (SELECT COUNT(DISTINCT res.number) FROM results res WHERE res.race_id=? AND res.data_origin=?) distinct_result_count,
-      (SELECT COUNT(*) FROM results res WHERE res.race_id=? AND res.data_origin=? AND EXISTS(
-        SELECT 1 FROM entries e WHERE e.race_id=res.race_id AND e.number=res.number AND e.data_origin=res.data_origin
-      )) matched_result_count,
-      (SELECT COUNT(*) FROM results res WHERE res.race_id=? AND res.data_origin=? AND res.finish_order=1) winner_count,
-      (SELECT COUNT(*) FROM results res JOIN payouts p ON p.race_id=res.race_id
-        AND p.data_origin=res.data_origin AND p.bet_type='win'
-        AND p.selection=CAST(res.number AS TEXT) AND p.payout>0
-        WHERE res.race_id=? AND res.data_origin=? AND res.finish_order=1) paid_winner_count,
-      (SELECT COUNT(*) FROM payouts p WHERE p.race_id=? AND p.data_origin=? AND p.bet_type=? AND p.payout>0) ticket_payout_count,
-      (SELECT COUNT(*) FROM payouts p WHERE p.race_id=? AND p.data_origin=? AND p.bet_type='win' AND p.payout>0 AND NOT EXISTS(
-        SELECT 1 FROM results res WHERE res.race_id=p.race_id AND res.data_origin=p.data_origin AND res.finish_order=1 AND p.selection=CAST(res.number AS TEXT))) nonwinner_win_payout_count,
-      (SELECT CASE WHEN json_valid(e.features_json) THEN json_extract(e.features_json,'$.finish_code') END FROM entries e WHERE e.race_id=? AND e.data_origin=? AND CAST(e.number AS TEXT)=? LIMIT 1) selected_finish_code`,
-      b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,
-      b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.bet_type,b.race_id,b.data_origin,b.race_id,b.data_origin,b.selection);
-    if (!integrity || integrity.entry_count <= 0
-        || integrity.result_count + integrity.terminal_entry_count !== integrity.entry_count
-        || integrity.distinct_result_count !== integrity.result_count
-        || integrity.matched_result_count !== integrity.result_count
-        || integrity.winner_count <= 0
-        || (b.bet_type === 'win' && integrity.nonwinner_win_payout_count > 0)
-        || (b.bet_type === 'win' ? integrity.paid_winner_count !== integrity.winner_count : integrity.ticket_payout_count <= 0)) continue;
-    if (b.bet_type === 'trifecta') {
-      const fullOrder = await all<any>(db, 'SELECT number,finish_order FROM results WHERE race_id=? AND data_origin=? ORDER BY finish_order,number', b.race_id, b.data_origin);
-      if (integrity.entry_count !== 6 || integrity.winner_count !== 1 || fullOrder.length !== 6
-          || fullOrder.some((x: any, i: number) => x.finish_order !== i + 1)) continue;
-      const winningSelection = fullOrder.slice(0,3).map((x: any) => String(x.number)).join('-');
-      const trifectaPayouts = await all<any>(db, "SELECT selection,payout FROM payouts WHERE race_id=? AND data_origin=? AND bet_type='trifecta' AND payout>0", b.race_id, b.data_origin);
-      if (trifectaPayouts.length !== 1 || trifectaPayouts[0].selection !== winningSelection) continue;
-    } else if (b.bet_type !== 'win') {
-      // Other ticket settlement semantics require their own exact outcome
-      // contract; leave historical/manual rows open rather than guessing.
-      continue;
-    }
-    const pay = await first<any>(db, 'SELECT payout FROM payouts WHERE race_id=? AND data_origin=? AND bet_type=? AND selection=? AND payout>0', b.race_id, b.data_origin, b.bet_type, b.selection);
-    // A recorded false-start / disqualification does not establish whether
-    // this exact ticket was refunded. Do not turn missing refund evidence into
-    // a loss; keep that bet open while other, fully evidenced picks can settle.
-    if (b.bet_type === 'win' && isTerminalFinishCode(integrity.selected_finish_code) && !pay) continue;
-    const values = settleValues(b.stake, pay?.payout ?? null, !!pay);
-    const evLost = b.expected_roi > 0 && values.finalOdds !== null && b.predicted_prob * values.finalOdds - 1 <= 0;
-    if (!await reserveWorkerWrites(db, evLost ? 2 : 1)) break;
-    const result = await run(db, `UPDATE bets SET status=?,payout=?,profit=?,final_odds=?,settled_at=? WHERE id=? AND status='open'`, pay ? 'won' : 'lost', values.payout, values.profit, values.finalOdds, now(), b.id);
-    if (Number(result.meta?.changes ?? 0) > 0) {
-      if (evLost) await run(db, `UPDATE bets SET ev_lost=1 WHERE id=? AND ev_lost<>1`, b.id);
-      settled++;
-    }
-  }
-  return settled;
-}
-function primaryPaperTiming(cutoffAt: string | null | undefined, decisionAt: number, cutoffSource?: string | null, cutoffObservedAt?: string | null) {
-  const cutoffMs = cutoffAt ? Date.parse(cutoffAt) : Number.NaN;
-  const observedMs = cutoffObservedAt ? Date.parse(cutoffObservedAt) : Number.NaN;
-  if (cutoffSource !== TRUSTED_CUTOFF_SOURCE || !Number.isFinite(cutoffMs) || !Number.isFinite(observedMs)) return { eligible: false, reason: 'missing_or_invalid_cutoff', cutoffMs: null, targetMs: null, secondsBeforeCutoff: null, targetDeltaSeconds: null };
-  if (observedMs > decisionAt + 5_000) return { eligible: false, reason: 'future_cutoff_observation', cutoffMs, targetMs: cutoffMs - PRIMARY_PAPER_OFFSET_MS, secondsBeforeCutoff: null, targetDeltaSeconds: null };
-  if (decisionAt - observedMs > BOATRACE_CUTOFF_MAX_AGE_MS) return { eligible: false, reason: 'stale_cutoff_evidence', cutoffMs, targetMs: cutoffMs - PRIMARY_PAPER_OFFSET_MS, secondsBeforeCutoff: null, targetDeltaSeconds: null };
-  const targetMs = cutoffMs - PRIMARY_PAPER_OFFSET_MS;
-  const delta = decisionAt - targetMs;
-  const secondsBeforeCutoff = (cutoffMs - decisionAt) / 1000;
-  const targetDeltaSeconds = delta / 1000;
-  if (Math.abs(delta) <= PRIMARY_PAPER_TOLERANCE_MS) return { eligible: true, reason: null, cutoffMs, targetMs, secondsBeforeCutoff, targetDeltaSeconds };
-  return { eligible: false, reason: delta > PRIMARY_PAPER_TOLERANCE_MS ? 'missed_timing' : 'not_due', cutoffMs, targetMs, secondsBeforeCutoff, targetDeltaSeconds };
-}
-function validProbability(value: unknown): boolean {
-  return value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 1;
-}
-function validUncertainty(value: unknown): boolean {
-  return value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) >= 0;
-}
-function paperAbstentionReason(rows: any[]): string {
-  if (!rows.length) return 'active_model_prediction_unavailable';
-  if (rows.some(row => !validProbability(row.probability))) return 'invalid_probability';
-  if (rows.some(row => !validUncertainty(row.prob_std))) return 'invalid_prediction_uncertainty';
-  if (!rows.some(row => Number.isFinite(Number(row.odds)) && Number(row.odds) > 0 && Number.isFinite(Date.parse(row.odds_captured_at)))) return 'odds_missing_or_stale';
-  return 'no_qualifying_edge';
-}
-async function recordPaperAbstention(db: Db, raceId: string, cutoffAt: string | null, cutoffSource: string | null, cutoffObservedAt: string | null, inputAsOfAt: number, reason: string, writeReserved = false) {
-  if (!writeReserved && !await reserveWorkerWrites(db, 1)) return 'budget_unavailable' as const;
-  const cutoffMs = cutoffAt ? Date.parse(cutoffAt) : Number.NaN;
-  const trustedCutoff = cutoffSource === TRUSTED_CUTOFF_SOURCE && Number.isFinite(cutoffMs);
-  const targetAt = trustedCutoff ? isoJstAt(cutoffMs - PRIMARY_PAPER_OFFSET_MS) : null;
-  const result = await run(db, `INSERT INTO paper_decisions(race_id,phase,cutoff_at,target_at,cutoff_observed_at,input_as_of_at,decided_at,outcome,reason,cutoff_source)
-    SELECT ?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),'abstained',
-      CASE WHEN ?<>'missing_or_invalid_cutoff' AND ? IS NOT NULL AND (julianday(?) - julianday('now'))*86400<50 THEN 'missed_timing' ELSE ? END,?
-    WHERE NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=? AND b.mode='auto')
-    ON CONFLICT(race_id,phase) DO NOTHING`, raceId, PRIMARY_PAPER_PHASE,
-    trustedCutoff ? cutoffAt : null, targetAt, trustedCutoff && cutoffObservedAt && Number.isFinite(Date.parse(cutoffObservedAt)) ? cutoffObservedAt : null,
-    isoJstAt(inputAsOfAt), reason, trustedCutoff ? cutoffAt : null,
-    trustedCutoff ? cutoffAt : null, reason, trustedCutoff ? cutoffSource : null, raceId);
-  return Number(result.meta?.changes ?? 0) > 0 ? 'recorded' as const : 'duplicate' as const;
-}
-type AutoBetTimingReport = {
-  phase: typeof PRIMARY_PAPER_PHASE;
-  targetOffsetSeconds: number;
-  toleranceSeconds: number;
-  acceptedSecondsBeforeCutoff: { min: number; max: number };
-  evaluatedRaceCount: number;
-  purchasedRaceCount: number;
-  boughtBetCount: number;
-  abstainedByReason: Record<string, number>;
-  unrecordedAbstentionCount: number;
-  comparisons: typeof PAPER_COMPARISON_PHASES;
-};
-async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now()) {
-  const report: AutoBetTimingReport = { phase: PRIMARY_PAPER_PHASE, targetOffsetSeconds: 60, toleranceSeconds: 10,
-    acceptedSecondsBeforeCutoff: { min: 50, max: 70 },
-    evaluatedRaceCount: 0, purchasedRaceCount: 0, boughtBetCount: 0, abstainedByReason: {}, unrecordedAbstentionCount: 0,
-    comparisons: PAPER_COMPARISON_PHASES };
-  if (!enabled || (await setting(db, 'auto_bet_paused', 'false')) === 'true' || !Number.isFinite(decisionAt)) {
-    return { bought: 0, report };
-  }
-  const inputAsOfAt = decisionAt;
-  const inputAsOfAtIso = isoJstAt(inputAsOfAt), freshAfter = oddsFreshAfter(inputAsOfAt), raceDate = jstRaceDate(new Date(inputAsOfAt));
-  const nextRaceDate = jstRaceDate(new Date(decisionAt + 24 * 60 * 60_000));
-  const noteAbstention = async (race: any, reason: string, writeReserved = false) => {
-    const timing = primaryPaperTiming(race.betting_cutoff_at, Date.now(), race.betting_cutoff_source, race.betting_cutoff_observed_at);
-    const finalReason = reason !== 'missing_or_invalid_cutoff' && timing.reason === 'missed_timing' ? 'missed_timing' : reason;
-    report.abstainedByReason[finalReason] = (report.abstainedByReason[finalReason] ?? 0) + 1;
-    const saved = await recordPaperAbstention(db, race.id, race.betting_cutoff_at ?? null, race.betting_cutoff_source ?? null,
-      race.betting_cutoff_observed_at ?? null, inputAsOfAt, finalReason, writeReserved);
-    if (saved === 'budget_unavailable') report.unrecordedAbstentionCount++;
-  };
-  // The legacy B-file post_time is only a bounded discovery window for an
-  // explicit abstention. It is never substituted for the official cutoff.
-  const missingCutoffs = await all<any>(db, `SELECT r.id,r.post_time,r.betting_cutoff_at,r.betting_cutoff_source,r.betting_cutoff_observed_at FROM races r WHERE r.race_date=? AND r.status='scheduled'
-    AND julianday(r.post_time)>=julianday(?) AND julianday(r.post_time)<=julianday(?)
-    AND (r.betting_cutoff_at IS NULL OR julianday(r.betting_cutoff_at) IS NULL OR r.betting_cutoff_source IS NULL OR r.betting_cutoff_source<>?
-      OR r.betting_cutoff_observed_at IS NULL OR julianday(r.betting_cutoff_observed_at) IS NULL
-      OR julianday(r.betting_cutoff_observed_at)<julianday(?) OR julianday(r.betting_cutoff_observed_at)>julianday(?))
-    AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')
-    AND NOT EXISTS(SELECT 1 FROM paper_decisions d WHERE d.race_id=r.id AND d.phase='primary_t60')
-    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) ORDER BY julianday(r.post_time),r.id LIMIT 20`, raceDate,
-    isoJstAt(inputAsOfAt - MISSING_CUTOFF_PROBE_BEFORE_POST_MS),isoJstAt(inputAsOfAt + MISSING_CUTOFF_PROBE_AFTER_POST_MS),TRUSTED_CUTOFF_SOURCE,
-    isoJstAt(inputAsOfAt - BOATRACE_CUTOFF_MAX_AGE_MS),isoJstAt(inputAsOfAt + 5_000));
-  for (const race of missingCutoffs) {
-    const timing=primaryPaperTiming(race.betting_cutoff_at,inputAsOfAt,race.betting_cutoff_source,race.betting_cutoff_observed_at);
-    await noteAbstention(race,timing.reason==='stale_cutoff_evidence'||timing.reason==='future_cutoff_observation'?timing.reason:'missing_or_invalid_cutoff');
-  }
-
-  // Minute cron evaluates the target window and catches only recent misses.
-  // The short bounded lookback is enough to record a missed minute without
-  // scanning historical races or allowing a late purchase.
-  const recentRaces = await all<any>(db, `SELECT r.*,v.name venue_name FROM races r JOIN venues v ON v.id=r.venue_id WHERE r.race_date IN (?,?)
-    AND r.betting_cutoff_source=? AND r.betting_cutoff_at IS NOT NULL
-    AND julianday(r.betting_cutoff_at)>=julianday(?) AND julianday(r.betting_cutoff_at)<=julianday(?)
-    AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')
-    AND NOT EXISTS(SELECT 1 FROM paper_decisions d WHERE d.race_id=r.id AND d.phase='primary_t60')
-    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-    ORDER BY julianday(r.betting_cutoff_at),r.id LIMIT 100`, raceDate,nextRaceDate,TRUSTED_CUTOFF_SOURCE,
-    isoJstAt(inputAsOfAt - 2 * 60_000),isoJstAt(inputAsOfAt + PRIMARY_PAPER_OFFSET_MS + PRIMARY_PAPER_TOLERANCE_MS));
-  const dueRaces: any[] = [];
-  for (const race of recentRaces) {
-    const result = primaryPaperTiming(race.betting_cutoff_at, inputAsOfAt, race.betting_cutoff_source, race.betting_cutoff_observed_at);
-    if (result.eligible && race.status === 'scheduled') dueRaces.push(race);
-    else if (result.eligible) await noteAbstention(race, 'race_not_scheduled');
-    else if (result.reason === 'missed_timing') await noteAbstention(race, 'missed_timing');
-    else if (result.reason === 'stale_cutoff_evidence' || result.reason === 'future_cutoff_observation' || result.reason === 'missing_or_invalid_cutoff') await noteAbstention(race, result.reason);
-  }
-  report.evaluatedRaceCount = dueRaces.length;
-  if (!dueRaces.length) return { bought: 0, report };
-
-  const cfg = Number(await setting(db, 'unit_stake', '100')), minRoi = Number(await setting(db, 'min_expected_roi', '0.05')), maxStd = Number(await setting(db, 'max_prob_std', '0.05'));
-  const maxPicks = Math.min(6, Math.max(1, Math.floor(Number(await setting(db, 'auto_bet_max_picks', '1')) || 1)));
-  const raceBudget=Number(await setting(db,'auto_bet_race_budget',String(cfg)));
-  if (!Number.isSafeInteger(cfg) || cfg <= 0 || !Number.isSafeInteger(raceBudget) || raceBudget <= 0 || raceBudget > 2_147_483_647) {
-    for (const race of dueRaces) await noteAbstention(race, 'invalid_paper_budget');
-    return { bought: 0, report };
-  }
-  const candidates = await all<any>(db, `SELECT r.id race_id,r.sport,r.data_origin,e.number,p.probability,p.prob_std,p.model_id,p.predicted_at,m.status model_status,
-    (SELECT o.odds FROM odds_snapshots o WHERE o.race_id=r.id AND o.data_origin=r.data_origin AND o.bet_type='win' AND o.selection=CAST(e.number AS TEXT) AND julianday(o.captured_at)<=julianday(?) AND julianday(o.captured_at)>=julianday(?) AND julianday(o.captured_at)<=julianday(r.betting_cutoff_at) ORDER BY julianday(o.captured_at) DESC LIMIT 1) odds,
-    (SELECT o.captured_at FROM odds_snapshots o WHERE o.race_id=r.id AND o.data_origin=r.data_origin AND o.bet_type='win' AND o.selection=CAST(e.number AS TEXT) AND julianday(o.captured_at)<=julianday(?) AND julianday(o.captured_at)>=julianday(?) AND julianday(o.captured_at)<=julianday(r.betting_cutoff_at) ORDER BY julianday(o.captured_at) DESC LIMIT 1) odds_captured_at
-    FROM races r JOIN entries e ON e.race_id=r.id AND e.data_origin=r.data_origin JOIN predictions p ON p.race_id=r.id AND p.number=e.number AND p.data_origin=r.data_origin
-    JOIN models m ON m.id=p.model_id AND m.status='active' AND m.sport=r.sport AND m.bet_type='win'
-      AND (r.sport<>'boat' OR CASE WHEN json_valid(m.metrics_json) THEN (json_type(m.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END)
-    WHERE r.race_date IN (?,?) AND r.status='scheduled' AND r.betting_cutoff_source=? AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-    AND p.predicted_at=(SELECT p2.predicted_at FROM predictions p2 WHERE p2.race_id=r.id AND p2.model_id=m.id AND p2.number=e.number AND p2.data_origin=r.data_origin AND julianday(p2.predicted_at)<=julianday(?) AND julianday(p2.predicted_at)<=julianday(r.betting_cutoff_at) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1)
-    AND julianday(r.betting_cutoff_at)>=julianday(?) AND julianday(r.betting_cutoff_at)<=julianday(?)
-    AND julianday(p.predicted_at)<=julianday(?) AND julianday(p.predicted_at)<=julianday(r.betting_cutoff_at)
-    AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')
-    AND NOT EXISTS(SELECT 1 FROM paper_decisions d WHERE d.race_id=r.id AND d.phase='primary_t60')`,
-    inputAsOfAtIso, freshAfter, inputAsOfAtIso, freshAfter, raceDate,nextRaceDate,TRUSTED_CUTOFF_SOURCE,inputAsOfAtIso,
-    isoJstAt(inputAsOfAt + PRIMARY_PAPER_OFFSET_MS - PRIMARY_PAPER_TOLERANCE_MS),
-    isoJstAt(inputAsOfAt + PRIMARY_PAPER_OFFSET_MS + PRIMARY_PAPER_TOLERANCE_MS), inputAsOfAtIso);
-  const grouped = new Map<string, any[]>();
-  for (const row of candidates) { const list=grouped.get(row.race_id)??[]; list.push(row); grouped.set(row.race_id,list); }
-  for (const race of dueRaces) {
-    for (const t of await ticketCandidatesForRace(db, race, maxStd, inputAsOfAt, race.betting_cutoff_at)) {
-      if (!t.buyEligible || t.expectedRoi < minRoi) continue;
-      const list=grouped.get(race.id)??[];
-      list.push({race_id:race.id,sport:race.sport,data_origin:race.data_origin,bet_type:t.betType,selection:t.selection,probability:t.probability,prob_std:t.probStd,model_id:t.modelId,model_status:'active',odds:t.odds,odds_captured_at:t.oddsCapturedAt,predicted_at:t.predictedAt});
-      grouped.set(race.id,list);
-    }
-  }
-  let n=0;
-  for (const race of dueRaces) {
-    const rows=grouped.get(race.id)??[];
-    const bestTicket=rows.filter(row=>row.bet_type==='trifecta' && validProbability(row.probability) && validUncertainty(row.prob_std) && Number.isFinite(Number(row.odds)) && Number(row.odds)>0)
-      .sort((a,b)=>(candidate(Number(b.probability),Number(b.odds),Number(b.prob_std),'active',maxStd).conservativeRoi??-Infinity)-(candidate(Number(a.probability),Number(a.odds),Number(a.prob_std),'active',maxStd).conservativeRoi??-Infinity))[0];
-    const bestWinConservative=Math.max(-Infinity,...rows.filter(row=>!row.bet_type && validProbability(row.probability) && validUncertainty(row.prob_std) && Number.isFinite(Number(row.odds)) && Number(row.odds)>0)
-      .map(row=>candidate(Number(row.probability),Number(row.odds),Number(row.prob_std),row.model_status,maxStd).conservativeRoi??-Infinity));
-    const ticketWins=bestTicket&&(candidate(Number(bestTicket.probability),Number(bestTicket.odds),Number(bestTicket.prob_std),'active',maxStd).conservativeRoi??-Infinity)>bestWinConservative;
-    const ranked=(ticketWins?[bestTicket]:rows.filter(row=>!row.bet_type)).map(row=>({...row,edgeData:candidate(Number(row.probability),Number(row.odds),Number(row.prob_std),row.model_status,maxStd)}))
-      .filter(row=>validProbability(row.probability) && validUncertainty(row.prob_std) && Number.isFinite(Number(row.odds)) && Number(row.odds)>0
-        && Number.isFinite(Date.parse(row.predicted_at)) && Date.parse(row.predicted_at)<=inputAsOfAt
-        && Number.isFinite(Date.parse(row.odds_captured_at)) && Date.parse(row.odds_captured_at)<=inputAsOfAt
-        && row.edgeData.expectedRoi!==null && Number.isFinite(row.edgeData.expectedRoi))
-      .sort((a,b)=>b.edgeData.expectedRoi-a.edgeData.expectedRoi || Number(a.number)-Number(b.number));
-    const selected=ranked.map((row,index)=>({...row,candidateRank:index+1,candidateCount:ranked.length}))
-      .filter(row=>row.edgeData.expectedRoi>=minRoi && ['HIGH_EDGE','POSITIVE_EDGE'].includes(row.edgeData.edge)).slice(0,Math.min(maxPicks,6,raceBudget));
-    if (!selected.length) {
-      await noteAbstention(race, paperAbstentionReason(rows));
-      continue;
-    }
-    const groupId=betId(), totalStake=raceBudget,baseStake=Math.floor(raceBudget/selected.length),remainder=raceBudget%selected.length;
-    if (!await reserveWorkerWrites(db, selected.length * 2 + 1)) {
-      report.abstainedByReason.d1_write_budget_unavailable = (report.abstainedByReason.d1_write_budget_unavailable ?? 0) + 1;
-      report.unrecordedAbstentionCount++;
-      continue;
-    }
-    // Candidate inputs remain frozen at inputAsOfAt. Recheck the wall clock
-    // after all reads and the budget reservation, immediately before the D1
-    // transaction, so a slow evaluation cannot place late and claim T-60.
-    const committedAt = Date.now();
-    const commitTiming = primaryPaperTiming(race.betting_cutoff_at, committedAt, race.betting_cutoff_source, race.betting_cutoff_observed_at);
-    if (!commitTiming.eligible) {
-      await noteAbstention(race, commitTiming.reason === 'missed_timing' ? 'missed_timing' : 'timing_window_elapsed', true);
-      continue;
-    }
-    const payload=selected.map((row,index)=>({id:betId(),race_id:row.race_id,sport:row.sport,bet_type:row.bet_type??'win',selection:row.selection??String(row.number),stake:baseStake+(index<remainder?1:0),
-      predicted_prob:Number(row.probability),odds_at_bet:Number(row.odds),expected_roi:row.edgeData.expectedRoi,edge_label:row.edgeData.edge,
-      model_id:row.model_id,data_origin:row.data_origin,candidate_rank:row.candidateRank,
-      candidate_count:row.candidateCount,odds_captured_at:row.odds_captured_at,predicted_at_at_bet:row.predicted_at,decision_phase:PRIMARY_PAPER_PHASE}));
-    const betInsert=db.prepare(`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin,bet_group_id,candidate_rank,candidate_count,odds_captured_at,predicted_at_at_bet,decision_phase)
-      SELECT json_extract(value,'$.id'),json_extract(value,'$.race_id'),json_extract(value,'$.sport'),json_extract(value,'$.bet_type'),json_extract(value,'$.selection'),json_extract(value,'$.stake'),'auto',json_extract(value,'$.predicted_prob'),json_extract(value,'$.odds_at_bet'),json_extract(value,'$.expected_roi'),json_extract(value,'$.edge_label'),json_extract(value,'$.model_id'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),'open',json_extract(value,'$.data_origin'),?,json_extract(value,'$.candidate_rank'),json_extract(value,'$.candidate_count'),json_extract(value,'$.odds_captured_at'),json_extract(value,'$.predicted_at_at_bet'),json_extract(value,'$.decision_phase')
-      FROM json_each(?) WHERE ${availableBankrollSql}>=? AND NOT EXISTS(SELECT 1 FROM bets WHERE race_id=? AND mode='auto')
-        AND NOT EXISTS(SELECT 1 FROM paper_decisions WHERE race_id=? AND phase='primary_t60')
-        AND EXISTS(SELECT 1 FROM races rr WHERE rr.id=? AND rr.status='scheduled' AND rr.betting_cutoff_at=? AND rr.betting_cutoff_source=? AND rr.betting_cutoff_observed_at=?
-          AND julianday(rr.betting_cutoff_observed_at)<=julianday(?) AND julianday(rr.betting_cutoff_observed_at)>=julianday(?)
-          AND julianday(rr.betting_cutoff_observed_at)>=julianday(strftime('%Y-%m-%dT%H:%M:%fZ','now','-10 minutes'))
-          AND ABS((julianday(rr.betting_cutoff_at)-julianday(?))*86400-60)<=10
-          AND ABS((julianday(rr.betting_cutoff_at)-julianday('now'))*86400-60)<=10)
-      ON CONFLICT(race_id,bet_type,selection) WHERE mode='auto' DO NOTHING`).bind(groupId,JSON.stringify(payload),totalStake,race.id,race.id,race.id,race.betting_cutoff_at,TRUSTED_CUTOFF_SOURCE,race.betting_cutoff_observed_at,inputAsOfAtIso,isoJstAt(inputAsOfAt - BOATRACE_CUTOFF_MAX_AGE_MS),isoJstAt(committedAt));
-    const snapshotJson=JSON.stringify({phase:PRIMARY_PAPER_PHASE,cutoffAt:race.betting_cutoff_at,cutoffSource:race.betting_cutoff_source,cutoffObservedAt:race.betting_cutoff_observed_at,targetAt:isoJstAt(Date.parse(race.betting_cutoff_at)-PRIMARY_PAPER_OFFSET_MS),inputAsOfAt:inputAsOfAtIso,
-      selections:selected.map(row=>({betType:row.bet_type??'win',selection:row.selection??String(row.number),probability:Number(row.probability),probStd:Number(row.prob_std),odds:Number(row.odds),oddsCapturedAt:row.odds_captured_at,predictedAt:row.predicted_at,modelId:row.model_id}))});
-    const decisionInsert=db.prepare(`INSERT INTO paper_decisions(race_id,phase,cutoff_at,target_at,cutoff_observed_at,input_as_of_at,decided_at,outcome,reason,bet_group_id,snapshot_json,cutoff_source)
-      SELECT ?,? ,?,?,?,?,(SELECT MIN(placed_at) FROM bets WHERE bet_group_id=? AND mode='auto' AND decision_phase='primary_t60'),'placed',NULL,?,?,?
-        WHERE EXISTS(SELECT 1 FROM bets WHERE bet_group_id=? AND mode='auto' AND decision_phase='primary_t60')
-        AND NOT EXISTS(SELECT 1 FROM paper_decisions WHERE race_id=? AND phase='primary_t60')
-      ON CONFLICT(race_id,phase) DO NOTHING`).bind(race.id,PRIMARY_PAPER_PHASE,race.betting_cutoff_at,isoJstAt(Date.parse(race.betting_cutoff_at)-PRIMARY_PAPER_OFFSET_MS),race.betting_cutoff_observed_at,inputAsOfAtIso,groupId,groupId,snapshotJson,TRUSTED_CUTOFF_SOURCE,groupId,race.id);
-    let insertedCount=0;
-    if (db.batch) {
-      const results=await db.batch([betInsert,decisionInsert]) as any[];
-      insertedCount=Number(results?.[0]?.meta?.changes??0);
-    } else {
-      const inserted=await betInsert.run(); insertedCount=Number(inserted.meta?.changes??0);
-      if(insertedCount>0)await decisionInsert.run();
-    }
-    if (insertedCount>0) { n+=insertedCount; report.purchasedRaceCount++; }
-    else {
-      const frozen=await first<any>(db,'SELECT outcome FROM paper_decisions WHERE race_id=? AND phase=?',race.id,PRIMARY_PAPER_PHASE);
-      const existingAuto=await first<any>(db,"SELECT id FROM bets WHERE race_id=? AND mode='auto'",race.id);
-      if(!frozen&&!existingAuto)await noteAbstention(race,'insufficient_bankroll',true);
-    }
-  }
-  report.boughtBetCount=n;
-  return { bought: n, report };
-}
-async function autoBet(db: Db, enabled: boolean, decisionAt = Date.now()) {
-  return (await autoBetWithReport(db, enabled, decisionAt)).bought;
-}
-async function collectScheduledOdds(db: Db, oddsEnabled: boolean, trifectaOddsEnabled: boolean, requestBudget={used:0,max:49}) {
-  if (trifectaOddsEnabled) {
-    // Reserve a small bounded slice for the opt-in parser before legacy win
-    // collection; both collectors share the existing per-run 49-fetch cap.
-    requestBudget.max=Math.min(49,requestBudget.used+20);
-    await collectTrifectaOdds(db,new Date(),{maxRequests:10,requestBudget});
-  }
-  requestBudget.max=49;
-  if (oddsEnabled) await collectOdds(db, new Date(),{requestBudget});
-}
-async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false, trifectaOddsEnabled = false) {
-  // Evaluate against observations already available at decision time. A
-  // collection pass in this invocation must not make a late snapshot eligible.
-  const paper=await autoBetWithReport(db,autoEnabled);
-  await collectScheduledOdds(db, oddsEnabled, trifectaOddsEnabled);
-  const settled=await settleOpen(db);
-  const cutoff=new Date(Date.now()-30*86400000).toISOString();
-  const oldRows=await first<any>(db, `SELECT COUNT(*) count FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at)`, cutoff);
-  const cleanupCount=Math.min(10,Number(oldRows?.count??0));
-  if(cleanupCount>0&&await reserveOptionalWorkerWrites(db,cleanupCount)) await run(db, `DELETE FROM odds_snapshots WHERE rowid IN (SELECT rowid FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at) LIMIT 10)`, cutoff).catch(()=>{});
-  await cleanupOldQualityRuns(db);
-  return {settled,bought:paper.bought,paperTiming:paper.report};
-}
-
-// Quality-only collector telemetry is short-lived. Preserve mixed runs and
-// anything that also saved records; delete at most ten rows per 10-minute cron.
-async function cleanupOldQualityRuns(db: Db, now = Date.now()) {
-  const cutoff = new Date(now - 60 * 60_000).toISOString();
-  const candidates = await all<any>(db, `SELECT id,started_at,records,error,reason FROM collection_runs
-    WHERE source IN ('boatrace-odds-worker','boatrace-trifecta-odds-worker')
-      AND records=0 AND julianday(started_at) < julianday(?)
-      AND (error LIKE '%odds pool not stable (overround out of range)%' OR reason LIKE 'quality_excluded: %')
-    ORDER BY julianday(started_at) ASC LIMIT 100`, cutoff);
-  const ids = candidates.filter(row => {
-    const issues = collectionIssues(row);
-    return Number.isFinite(Date.parse(row.started_at)) && issues.quality.length > 0 && !issues.error && Number(row.records ?? 0) === 0;
-  }).slice(0, 10).map(row => row.id);
-  if (!ids.length || !await reserveOptionalWorkerWrites(db, ids.length)) return 0;
-  const placeholders = ids.map(() => '?').join(',');
-  await run(db, `DELETE FROM collection_runs WHERE id IN (${placeholders})`, ...ids);
-  return ids.length;
-}
-app.get('/health', async c=>c.json({ok:true,service:'edgelab-api',d1WriteBudget:await readWriteBudget(c.env.DB)}));
-app.get('/ingest/write-budget', async c=>{
-  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
-  return c.json(await readWriteBudget(c.env.DB));
-});
-app.post('/ingest/write-budget/seed', async c=>{
-  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
-  const body = await c.req.json().catch(()=>null) as any;
-  if (!body || body.date !== utcDate() || body.confirmed !== true) return jsonError(c, 'explicit current-UTC-day budget seed confirmation is required');
-  const inserted = await seedUnknownWriteBudget(c.env.DB, body.date);
-  if (!inserted) return c.json({ error:'budget seed already exists or could not be written', code:'d1_write_budget_seed_conflict', budget:await readWriteBudget(c.env.DB) }, 409);
-  return c.json(await readWriteBudget(c.env.DB), 201);
-});
-app.post('/ingest/write-budget/allowance', async c=>{
-  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
-  const body = await c.req.json().catch(()=>null) as any;
-  const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body).sort() : [];
-  const expectedKeys = ['confirmed','date','essentialLimit','limit','optionalLimit'];
-  if (!body || keys.length !== expectedKeys.length || keys.some((key, i)=>key !== expectedKeys[i]) ||
-      body.date !== utcDate() || body.confirmed !== true || body.limit !== ONE_DAY_ALLOWANCE.limit ||
-      body.essentialLimit !== ONE_DAY_ALLOWANCE.essentialLimit || body.optionalLimit !== ONE_DAY_ALLOWANCE.optionalLimit) {
-    return jsonError(c, 'explicit current-UTC-day one-day allowance confirmation and whitelisted limits are required');
-  }
-  const applied = await allowOneDayWriteBudget(c.env.DB, body.date);
-  if (!applied) return c.json({ error:'allowance requires a valid current-day ledger and may be applied only once', code:'d1_write_budget_allowance_conflict', budget:await readWriteBudget(c.env.DB) }, 409);
-  return c.json(await readWriteBudget(c.env.DB), 200);
-});
-// Narrow, authenticated read surface for a one-shot same-day forecast. It
-// returns only raw boat inputs available by a recent, caller-supplied cutoff;
-// the Python model remains the sole inference implementation.
-app.get('/ingest/today-boat-forecast-inputs', async c=>{
-  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
-  const day=c.req.query('date'), cutoff=c.req.query('cutoff'), nowMs=Date.now();
-  const parsed=cutoff ? Date.parse(cutoff) : NaN;
-  if (!day || day!==jstRaceDate() || !cutoff || !Number.isFinite(parsed) ||
-      parsed>nowMs || nowMs-parsed>5*60_000 || !/(Z|[+-]\d{2}:\d{2})$/i.test(cutoff))
-    return jsonError(c, 'current JST race date and recent non-future ISO cutoff are required');
-  const races=await all<any>(c.env.DB,`SELECT r.id,r.sport,r.venue_id,r.race_date,r.race_no,r.post_time,r.status,
-      r.wind_speed,r.wave_height,r.data_origin
-    FROM races r
-    WHERE r.sport='boat' AND r.race_date=? AND r.data_origin='real' AND r.status='scheduled'
-      AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?)
-      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-    ORDER BY julianday(r.post_time),r.race_no`,day,cutoff);
-  if(races.length>180)return jsonError(c,'eligible race input exceeds the one-day operator response bound',413);
-  const entries=races.length ? await all<any>(c.env.DB,`SELECT e.id,e.race_id,e.number,e.frame,e.name,e.jockey,e.trainer,
-      e.weight_carried,e.horse_weight,e.racer_class,e.national_win_rate,e.local_win_rate,
-      e.motor_no,e.motor_2rate,e.boat_no,e.boat_2rate,e.exhibition_time,e.start_exhibition,
-      e.features_json,e.available_at,e.data_origin
-    FROM entries e JOIN races r ON r.id=e.race_id
-    WHERE r.sport='boat' AND r.race_date=? AND r.data_origin='real' AND r.status='scheduled'
-      AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?)
-      AND e.data_origin='real' AND julianday(e.available_at)<=julianday(?)
-      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-    ORDER BY r.race_no,e.number`,day,cutoff,cutoff) : [];
-  if(entries.length>1_000)return jsonError(c,'eligible entry input exceeds the one-day operator response bound',413);
-  return c.json({date:day,cutoff,races,entries});
-});
-app.get('/ingest/today-boat-forecast-status', async c=>{
-  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
-  const day=c.req.query('date'), modelId=c.req.query('model_id');
-  if(!day||day!==jstRaceDate()||modelId!=='boat-win-lgbm-20261010-14b4a90a')
-    return jsonError(c,'approved current-day model and race date are required');
-  const db=c.env.DB, cutoff=now(), freshAfter=oddsFreshAfter();
-  const model=await first<any>(db,'SELECT id,status FROM models WHERE id=? AND sport=\'boat\' AND bet_type=\'win\'',modelId);
-  const coverage=await first<any>(db,`SELECT COUNT(DISTINCT r.id) race_count,COUNT(e.id) entry_count
-    FROM races r LEFT JOIN entries e ON e.race_id=r.id AND e.data_origin='real' AND julianday(e.available_at)<=julianday(?)
-    WHERE r.sport='boat' AND r.race_date=? AND r.data_origin='real' AND r.status='scheduled'
-      AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?)
-      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,cutoff,day,cutoff);
-  const predictions=await first<any>(db,`SELECT COUNT(*) row_count,COUNT(DISTINCT p.race_id) race_count
-    FROM predictions p JOIN races r ON r.id=p.race_id JOIN entries e ON e.race_id=p.race_id AND e.number=p.number AND e.data_origin='real'
-    WHERE p.model_id=? AND p.data_origin='real' AND r.sport='boat' AND r.race_date=? AND r.status='scheduled'
-      AND r.data_origin='real' AND julianday(r.post_time)>julianday(?) AND julianday(p.predicted_at)<=julianday(?)
-      AND julianday(p.predicted_at)<=julianday(r.post_time)
-      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,modelId,day,cutoff,cutoff);
-  const odds=await first<any>(db,`SELECT COUNT(*) row_count,COUNT(DISTINCT race_id) race_count
-    FROM odds_snapshots o JOIN races r ON r.id=o.race_id
-    WHERE o.data_origin='real' AND r.data_origin='real' AND r.sport='boat' AND r.race_date=? AND r.status='scheduled'
-      AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?)
-      AND o.bet_type='win' AND o.source IN ('boatrace-odds-tf','boatrace-odds-tf-final')
-      AND julianday(o.captured_at)<=julianday(?) AND julianday(o.captured_at)>=julianday(?)
-      AND julianday(o.captured_at)<=julianday(r.post_time)
-      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,day,cutoff,cutoff,freshAfter);
-  return c.json({date:day,cutoff,model:model??null,eligible:coverage??{race_count:0,entry_count:0},predictions:predictions??{row_count:0,race_count:0},freshOfficialWinOdds:odds??{row_count:0,race_count:0},autoBetEnabled:await setting(db,'auto_bet_enabled','false'),autoBetPaused:await setting(db,'auto_bet_paused','true'),writeBudget:await readWriteBudget(db)});
-});
-// One explicit operator call may invoke only the existing bounded win-odds
-// collector. It cannot settle bets, run auto-bet, or enable either feature.
-app.post('/ingest/collect-win-odds', async c=>{
-  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
-  const body=await c.req.json().catch(()=>null) as any;
-  const keys=body&&typeof body==='object'&&!Array.isArray(body)?Object.keys(body).sort():[];
-  if(keys.length!==2||keys[0]!=='confirmed'||keys[1]!=='date'||body.confirmed!==true||body.date!==utcDate())
-    return jsonError(c,'explicit current-UTC-day win-odds collection confirmation is required');
-  if(c.env.ENABLE_BOATRACE_ODDS_SCRAPE!=='true')return jsonError(c,'official win-odds collector is disabled',409);
-  const approved=await first<any>(c.env.DB,"SELECT status FROM models WHERE id='boat-win-lgbm-20261010-14b4a90a' AND sport='boat' AND bet_type='win'");
-  if(approved?.status!=='active')return jsonError(c,'approved boat-win baseline must be active before operator odds collection',409);
-  const outcome=await collectOdds(c.env.DB,new Date(),{maxRequests:30});
-  return c.json(outcome);
-});
-app.get('/races', async c=>{
-  const db=c.env.DB, sport=c.req.query('sport'), date=c.req.query('date'), origin=originFilter(c.req.query('origin'));
-  if (sport && !validSport(sport)) return jsonError(c,'invalid sport');
-  if (!date) return jsonError(c,'date is required');
-  const rows=await all<any>(db,`SELECT r.*,v.name venue_name,(SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id) entry_count FROM races r JOIN venues v ON v.id=r.venue_id WHERE r.race_date=? AND (? IS NULL OR r.sport=?) AND (? IS NULL OR r.data_origin=?) AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) ORDER BY r.sport,v.name,r.race_no`,date,sport||null,sport||null,origin,origin);
-  const out=[];
-  const maxStd=Number(await setting(db,'max_prob_std','0.05'));
-  for(const r of rows){
-    const candidates=await all<any>(db,`SELECT p.probability,p.prob_std,o.odds,m.status FROM predictions p JOIN races r ON r.id=p.race_id JOIN models m ON m.id=p.model_id AND m.status='active' AND m.sport=r.sport AND m.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(m.metrics_json) THEN (json_type(m.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) JOIN entries e ON e.race_id=p.race_id AND e.number=p.number JOIN odds_snapshots o ON o.race_id=p.race_id AND o.data_origin=r.data_origin AND o.selection=CAST(e.number AS TEXT) AND o.bet_type='win' AND o.captured_at=(SELECT o2.captured_at FROM odds_snapshots o2 WHERE o2.race_id=p.race_id AND o2.data_origin=r.data_origin AND o2.bet_type='win' AND o2.selection=CAST(e.number AS TEXT) AND julianday(o2.captured_at)<=julianday(?) AND julianday(o2.captured_at)>=julianday(?) AND julianday(o2.captured_at)<=julianday(r.post_time) ORDER BY julianday(o2.captured_at) DESC LIMIT 1) WHERE p.race_id=? AND r.status='scheduled' AND e.data_origin=r.data_origin AND p.data_origin=r.data_origin AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?) AND julianday(p.predicted_at)<=julianday(r.post_time) AND julianday(p.predicted_at)<=julianday(?)`,now(),oddsFreshAfter(),r.id,now(),now());
-    const choices=candidates.map(b=>candidate(b.probability,b.odds,b.prob_std,b.status,maxStd)).sort((a,b)=>(b.expectedRoi??-Infinity)-(a.expectedRoi??-Infinity));
-    const best=choices[0]; out.push({id:r.id,sport:r.sport,venueId:r.venue_id,venueName:r.venue_name,raceDate:r.race_date,raceNo:r.race_no,name:r.name,distance:r.distance,surface:r.surface,trackCondition:r.track_condition,weather:r.weather,postTime:r.post_time,status:r.status,dataOrigin:r.data_origin,entryCount:r.entry_count,topEdge:best?.edge??'INSUFFICIENT_DATA',bestExpectedRoi:best?.expectedRoi??null});
-  }
-  return c.json(out);
-});
-app.get('/races/:id', async c=>{
- const db=c.env.DB,r=await first<any>(db,'SELECT r.*,v.name venue_name FROM races r JOIN venues v ON v.id=r.venue_id WHERE r.id=? AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)',c.req.param('id')); if(!r)return jsonError(c,'not found',404);
- const maxStd=Number(await setting(db,'max_prob_std','0.05'));
- const entries=await all<any>(db,`SELECT e.*,o.odds,o.captured_at,p.probability,p.prob_std,p.predicted_at,m.id model_id,m.status model_status,res.finish_order FROM entries e JOIN races r ON r.id=e.race_id
- LEFT JOIN odds_snapshots o ON o.id=(SELECT o2.id FROM odds_snapshots o2 WHERE o2.race_id=e.race_id AND o2.data_origin=r.data_origin AND o2.bet_type='win' AND o2.selection=CAST(e.number AS TEXT) AND julianday(o2.captured_at)<=julianday(?) AND julianday(o2.captured_at)>=julianday(?) AND julianday(o2.captured_at)<=julianday(r.post_time) AND r.status='scheduled' AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?) ORDER BY julianday(o2.captured_at) DESC LIMIT 1)
-  LEFT JOIN predictions p ON p.id=(SELECT p2.id FROM predictions p2 JOIN models pm ON pm.id=p2.model_id AND pm.status='active' AND pm.sport=r.sport AND pm.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(pm.metrics_json) THEN (json_type(pm.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(pm.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(pm.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(pm.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(pm.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(pm.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) WHERE p2.race_id=e.race_id AND p2.number=e.number AND p2.data_origin=r.data_origin AND julianday(p2.predicted_at)<=julianday(?) AND julianday(p2.predicted_at)<=julianday(r.post_time) AND r.status='scheduled' AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1)
- LEFT JOIN models m ON m.id=p.model_id LEFT JOIN results res ON res.race_id=e.race_id AND res.number=e.number AND res.data_origin=r.data_origin WHERE e.race_id=? AND e.data_origin=r.data_origin ORDER BY e.number`,now(),oddsFreshAfter(),now(),now(),now(),r.id);
- const model=entries.find(x=>x.model_id)?.model_id; const modelRow=model?await first<any>(db,'SELECT * FROM models WHERE id=?',model):null;
- const payouts=(await all<any>(db,`SELECT bet_type,selection,payout,popularity FROM payouts WHERE race_id=? ORDER BY CASE bet_type WHEN 'win' THEN 1 WHEN 'place' THEN 2 WHEN 'exacta' THEN 3 WHEN 'quinella' THEN 4 WHEN 'wide' THEN 5 WHEN 'trifecta' THEN 6 WHEN 'trio' THEN 7 ELSE 8 END,selection`,r.id)).map(p=>({betType:p.bet_type,selection:p.selection,payout:p.payout,popularity:p.popularity}));
- const entryViews=entries.map(x=>{const a=candidate(x.probability,x.odds,x.prob_std,x.model_status,maxStd);return {number:x.number,frame:x.frame,name:x.name,jockey:x.jockey,trainer:x.trainer,weightCarried:x.weight_carried,horseWeight:x.horse_weight,racerClass:x.racer_class,nationalWinRate:x.national_win_rate,localWinRate:x.local_win_rate,motorNo:x.motor_no,motor2Rate:x.motor_2rate,boatNo:x.boat_no,boat2Rate:x.boat_2rate,exhibitionTime:x.exhibition_time,startExhibition:x.start_exhibition,odds:x.odds,oddsCapturedAt:x.captured_at,probability:x.probability,probStd:x.prob_std,breakEvenProb:x.odds?1/x.odds:null,expectedRoi:a.expectedRoi,conservativeRoi:a.conservativeRoi,edge:a.edge,finishOrder:x.finish_order??null}});
- const best=entryViews.filter(x=>x.expectedRoi!==null).sort((a,b)=>(b.expectedRoi??-Infinity)-(a.expectedRoi??-Infinity))[0];
- const tickets=await ticketCandidatesForRace(db,r,maxStd);
- return c.json({id:r.id,sport:r.sport,venueId:r.venue_id,venueName:r.venue_name,raceDate:r.race_date,raceNo:r.race_no,name:r.name,distance:r.distance,surface:r.surface,trackCondition:r.track_condition,weather:r.weather,windSpeed:r.wind_speed,waveHeight:r.wave_height,postTime:r.post_time,status:r.status,dataOrigin:r.data_origin,entryCount:entries.length,topEdge:best?.edge??'INSUFFICIENT_DATA',bestExpectedRoi:best?.expectedRoi??null,model:modelRow?mapModel(modelRow):null,predictedAt:entries.find(x=>x.predicted_at)?.predicted_at??null,dataFreshnessMinutes:entries.find(x=>x.captured_at)?Math.max(0,(Date.now()-Date.parse(entries.find(x=>x.captured_at).captured_at))/60000):null,entries:entryViews,tickets,payouts});
-});
-function mapModel(m:any){return {id:m.id,sport:m.sport,betType:m.bet_type,version:m.version,algorithm:m.algorithm,status:m.status,trainFrom:m.train_from,trainTo:m.train_to,validFrom:m.valid_from,validTo:m.valid_to,testFrom:m.test_from,testTo:m.test_to,nTrain:m.n_train,metrics:JSON.parse(m.metrics_json||'{}'),trainedAt:m.trained_at,notes:m.notes};}
-// Read-only historical evidence view. Unlike /races/:id, this route does not
-// apply live candidate eligibility, active-model gates, or scheduled-race
-// filtering. It reads one exact real boat race and at most one 121-row batch
-// for each evidence table so stored history can be inspected without changing
-// what can be bought or inferred from the live candidate endpoints.
-app.get('/shadow/races/:id', async c=>{
- const id=c.req.param('id');
- if(!/^boat-\d{8}-\d{2}-\d{2}$/.test(id))return jsonError(c,'invalid real boat race id');
- const db=c.env.DB;
- const race=await first<any>(db,`SELECT r.id,r.sport,r.venue_id venueId,v.name venueName,r.race_date raceDate,r.race_no raceNo,
-   r.post_time postTime,r.status,r.data_origin dataOrigin,(SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real') entryCount
-   FROM races r JOIN venues v ON v.id=r.venue_id
-   WHERE r.id=? AND r.sport='boat' AND r.data_origin='real'
-     AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,id);
- if(!race)return jsonError(c,'not found',404);
-
- const predictionHeader=await first<any>(db,`SELECT p.model_id modelId,p.predicted_at predictedAt,m.version modelVersion,m.status modelStatus
-   FROM ticket_predictions p LEFT JOIN models m ON m.id=p.model_id
-   WHERE p.race_id=? AND p.bet_type='trifecta' AND p.data_origin='real'
-   ORDER BY julianday(p.predicted_at) DESC,p.model_id LIMIT 1`,id);
- let predictionBatch=null;
- if(predictionHeader){
-   const rows=await all<any>(db,`SELECT selection,probability,prob_std probStd,feature_schema_version featureSchemaVersion,artifact_sha256 artifactSha256
-     FROM ticket_predictions
-     WHERE race_id=? AND model_id=? AND bet_type='trifecta' AND data_origin='real' AND predicted_at=?
-     ORDER BY selection LIMIT 121`,id,predictionHeader.modelId,predictionHeader.predictedAt);
-   predictionBatch={...predictionHeader,rowCount:rows.length,rows};
- }
-
- const oddsHeader=await first<any>(db,`SELECT captured_at capturedAt,source,source_url sourceUrl,source_sha256 sourceSha256,quality_status qualityStatus
-   FROM odds_snapshots
-   WHERE race_id=? AND bet_type='trifecta' AND data_origin='real'
-   ORDER BY julianday(captured_at) DESC LIMIT 1`,id);
- let oddsSnapshot=null;
- if(oddsHeader){
-   const rows=await all<any>(db,`SELECT selection,odds FROM odds_snapshots
-     WHERE race_id=? AND bet_type='trifecta' AND data_origin='real' AND captured_at=?
-       AND source IS ? AND source_url IS ? AND source_sha256 IS ? AND quality_status IS ?
-     ORDER BY selection LIMIT 121`,id,oddsHeader.capturedAt,oddsHeader.source,oddsHeader.sourceUrl,oddsHeader.sourceSha256,oddsHeader.qualityStatus);
-   oddsSnapshot={...oddsHeader,rowCount:rows.length,rows};
- }
- c.header('Cache-Control','private, no-store');
- return c.json({race,predictionBatch,oddsSnapshot,pointInTimeAvailability:'not-recorded'});
-});
-app.get('/rankings',async c=>{
- const db=c.env.DB,sport=c.req.query('sport'),date=c.req.query('date'),origin=originFilter(c.req.query('origin')); if(sport&&!validSport(sport))return jsonError(c,'invalid sport'); if(!date)return jsonError(c,'date is required');
- const rows=await all<any>(db,`SELECT r.id race_id,r.sport,r.data_origin,r.race_no,r.post_time,v.name venue_name,e.number,e.name,p.probability,p.prob_std,p.model_id,m.status model_status,o.odds,o.captured_at,p.predicted_at FROM races r JOIN venues v ON v.id=r.venue_id JOIN entries e ON e.race_id=r.id AND e.data_origin=r.data_origin JOIN predictions p ON p.id=(SELECT p2.id FROM predictions p2 JOIN models pm ON pm.id=p2.model_id AND pm.status='active' AND pm.sport=r.sport AND pm.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(pm.metrics_json) THEN (json_type(pm.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(pm.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(pm.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(pm.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(pm.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(pm.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) WHERE p2.race_id=r.id AND p2.number=e.number AND p2.data_origin=r.data_origin AND julianday(p2.predicted_at)<=julianday(?) AND julianday(p2.predicted_at)<=julianday(r.post_time) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1) JOIN models m ON m.id=p.model_id AND m.status='active' AND m.sport=r.sport AND m.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(m.metrics_json) THEN (json_type(m.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) JOIN odds_snapshots o ON o.race_id=r.id AND o.data_origin=r.data_origin AND o.bet_type='win' AND o.selection=CAST(e.number AS TEXT) AND o.captured_at=(SELECT o2.captured_at FROM odds_snapshots o2 WHERE o2.race_id=r.id AND o2.data_origin=r.data_origin AND o2.bet_type='win' AND o2.selection=CAST(e.number AS TEXT) AND julianday(o2.captured_at)<=julianday(?) AND julianday(o2.captured_at)>=julianday(?) AND julianday(o2.captured_at)<=julianday(r.post_time) ORDER BY julianday(o2.captured_at) DESC LIMIT 1) WHERE julianday(p.predicted_at)<=julianday(?) AND r.race_date=? AND r.status='scheduled' AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?) AND (? IS NULL OR r.sport=?) AND (? IS NULL OR r.data_origin=?) AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,now(),now(),oddsFreshAfter(),now(),date,now(),sport||null,sport||null,origin,origin);
- const maxStd=Number(await setting(db,'max_prob_std','0.05'));
- const winCandidates=rows.map(x=>({...candidate(x.probability,x.odds,x.prob_std,x.model_status,maxStd),raceId:x.race_id,sport:x.sport,venueName:x.venue_name,raceNo:x.race_no,postTime:x.post_time,number:x.number,name:x.name,probability:x.probability,probStd:x.prob_std,odds:x.odds,breakEvenProb:1/x.odds,modelId:x.model_id,dataFreshnessMinutes:Math.max(0,(Date.now()-Date.parse(x.captured_at))/60000),dataOrigin:x.data_origin}));
- const ticketRaces=await all<any>(db,`SELECT r.*,v.name venue_name FROM races r JOIN venues v ON v.id=r.venue_id WHERE r.race_date=? AND r.status='scheduled' AND (? IS NULL OR r.sport=?) AND (? IS NULL OR r.data_origin=?) AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,date,sport||null,sport||null,origin,origin);
- const tickets=(await Promise.all(ticketRaces.map((race:any)=>ticketCandidatesForRace(db,race,maxStd)))).flat();
- return c.json([...winCandidates,...tickets].sort((a,b)=>(b.expectedRoi??-Infinity)-(a.expectedRoi??-Infinity)));
-});
-app.post('/bets',async c=>{
- const db=c.env.DB, body=await c.req.json().catch(()=>null) as any;
- if(body?.betType==='trifecta'){
-   if(typeof body.raceId!=='string'||typeof body.selection!=='string'||!validateYenStake(body.stake))return jsonError(c,'invalid request');
-   const race=await first<any>(db,'SELECT * FROM races WHERE id=? AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=races.id)',body.raceId);
-   if(!race)return jsonError(c,'race not found',404);
-   if(race.status!=='scheduled'||!race.post_time||Date.parse(race.post_time)<=Date.now())return jsonError(c,'race is not scheduled');
-   const venue=await first<any>(db,'SELECT name venue_name FROM venues WHERE id=?',race.venue_id);
-   const maxStd=Number(await setting(db,'max_prob_std','0.05'));
-   const ticket=(await ticketCandidatesForRace(db,{...race,venue_name:venue?.venue_name},maxStd)).find(x=>x.selection===body.selection);
-   if(!ticket?.buyEligible)return jsonError(c,'ticket model or audited fresh odds are unavailable');
-   const bet={id:betId(),race_id:race.id,sport:race.sport,bet_type:'trifecta',selection:ticket.selection,stake:body.stake,mode:'manual',predicted_prob:ticket.probability,odds_at_bet:ticket.odds,expected_roi:ticket.expectedRoi,edge_label:ticket.edge,model_id:ticket.modelId,placed_at:now(),status:'open',data_origin:'real',odds_captured_at:ticket.oddsCapturedAt};
-   if(!await reserveWorkerWrites(db,1))return c.json({error:'daily D1 write budget unavailable or exhausted',budget:await readWriteBudget(db)},429);
-   const inserted=await run(db,`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin,odds_captured_at)
-   SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${availableBankrollSql} >= ?`,...Object.values(bet),body.stake);
-   if(!inserted.meta?.changes)return jsonError(c,'insufficient bankroll');
-   return c.json(mapBet(bet),201);
- }
- const legacyRequest=!!body&&Array.isArray(body.selections)===false&&typeof body.selection==='string';
- const rawSelections=Array.isArray(body?.selections)?body.selections:(legacyRequest?[{selection:body.selection,stake:body.stake}]:null);
- if(!body||typeof body.raceId!=='string'||body.betType!=='win'||!rawSelections||rawSelections.length<1||rawSelections.length>6)return jsonError(c,'invalid request');
- if(body.requestId!==undefined&&(typeof body.requestId!=='string'||! /^[A-Za-z0-9_-]{1,64}$/.test(body.requestId)))return jsonError(c,'requestId must be 1-64 letters, numbers, hyphens, or underscores');
- const selections=rawSelections.map((x:any)=>({selection:x?.selection,stake:x?.stake}));
- if(selections.some((x:any)=>typeof x.selection!=='string'||!validateYenStake(x.stake))||new Set(selections.map((x:any)=>x.selection)).size!==selections.length)return jsonError(c,'selections require unique entries and positive integer yen stakes');
- const totalStake=selections.reduce((sum:number,x:any)=>sum+x.stake,0); if(!Number.isSafeInteger(totalStake)||totalStake>2_147_483_647)return jsonError(c,'total stake is too large');
- const groupId=body.requestId??betId();
- const existing=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY selection',groupId);
- if(existing.length){
-   const requested=[...selections].sort((a:any,b:any)=>a.selection.localeCompare(b.selection));
-   if(existing.length!==requested.length||existing.some((b:any,i:number)=>b.race_id!==body.raceId||b.mode!=='manual'||b.selection!==requested[i].selection||b.stake!==requested[i].stake))return jsonError(c,'requestId was already used for a different bet group',409);
-   return c.json({groupId,bets:existing.map(mapBet)});
- }
- const race=await first<any>(db,'SELECT * FROM races WHERE id=? AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=races.id)',body.raceId); if(!race)return jsonError(c,'race not found',404); if(race.status!=='scheduled')return jsonError(c,'race is not scheduled');
- if(!race.post_time||!Number.isFinite(Date.parse(race.post_time))||Date.parse(race.post_time)<=Date.now())return jsonError(c,'race has started or start time is unavailable');
- const timestamp=now(), oddsCutoff=oddsFreshAfter();
- const rankedRows=await all<any>(db,`SELECT e.number,p.probability,p.prob_std,p.model_id,p.predicted_at,m.status model_status,o.odds,o.captured_at odds_captured_at
-   FROM entries e JOIN predictions p ON p.id=(SELECT p2.id FROM predictions p2 JOIN models pm ON pm.id=p2.model_id AND pm.status='active' AND pm.sport=? AND pm.bet_type='win' AND (?<>'boat' OR CASE WHEN json_valid(pm.metrics_json) THEN (json_type(pm.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(pm.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(pm.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(pm.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(pm.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(pm.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) WHERE p2.race_id=e.race_id AND p2.number=e.number AND p2.data_origin=e.data_origin AND julianday(p2.predicted_at)<=julianday(?) AND julianday(p2.predicted_at)<=julianday(?) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1)
-   JOIN models m ON m.id=p.model_id JOIN odds_snapshots o ON o.id=(SELECT o2.id FROM odds_snapshots o2 WHERE o2.race_id=e.race_id AND o2.data_origin=e.data_origin AND o2.bet_type='win' AND o2.selection=CAST(e.number AS TEXT) AND julianday(o2.captured_at)<=julianday(?) AND julianday(o2.captured_at)>=julianday(?) AND julianday(o2.captured_at)<=julianday(?) ORDER BY julianday(o2.captured_at) DESC LIMIT 1)
-   WHERE e.race_id=? AND e.data_origin=? AND p.data_origin=e.data_origin AND o.data_origin=e.data_origin`,race.sport,race.sport,timestamp,race.post_time,timestamp,oddsCutoff,race.post_time,body.raceId,race.data_origin);
- const maxStd=Number(await setting(db,'max_prob_std','0.05'));
- const ranked=rankedRows.map(row=>({...row,rankData:candidate(row.probability,row.odds,row.prob_std,row.model_status,maxStd)}))
-   .filter(row=>row.rankData.expectedRoi!==null).sort((a,b)=>b.rankData.expectedRoi-a.rankData.expectedRoi||Number(a.number)-Number(b.number))
-   .map((row,index)=>({...row,candidateRank:index+1,candidateCount:0}));
- for(const row of ranked)row.candidateCount=ranked.length;
- const picks=[];
- for(const input of selections){
-   const row=ranked.find(x=>String(x.number)===input.selection);
-   if(!row){
-     const entry=await first<any>(db,'SELECT number FROM entries WHERE race_id=? AND data_origin=? AND CAST(number AS TEXT)=?',body.raceId,race.data_origin,input.selection);
-     if(!entry)return jsonError(c,'selection not found');
-     const pred=await first<any>(db,`SELECT p.id FROM predictions p JOIN models m ON m.id=p.model_id AND m.status='active' AND m.sport=? AND m.bet_type='win' AND (?<>'boat' OR CASE WHEN json_valid(m.metrics_json) THEN (json_type(m.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) WHERE p.race_id=? AND p.data_origin=? AND p.number=? AND julianday(p.predicted_at)<=julianday(?) AND julianday(p.predicted_at)<=julianday(?) ORDER BY julianday(p.predicted_at) DESC LIMIT 1`,race.sport,race.sport,body.raceId,race.data_origin,entry.number,timestamp,race.post_time);
-     return jsonError(c,pred?'odds are unavailable':'active model prediction is unavailable');
-   }
-   picks.push({...row,selection:input.selection,stake:input.stake});
- }
- const placedAt=now(), payload=picks.map(row=>({id:betId(),race_id:race.id,sport:race.sport,selection:row.selection,stake:row.stake,
-   predicted_prob:row.probability,odds_at_bet:row.odds,expected_roi:row.rankData.expectedRoi,edge_label:row.rankData.edge,model_id:row.model_id,
-   placed_at:placedAt,data_origin:race.data_origin,candidate_rank:row.candidateRank,candidate_count:row.candidateCount,
-   odds_captured_at:row.odds_captured_at,predicted_at_at_bet:row.predicted_at}));
- if(!await reserveWorkerWrites(db,payload.length*2)){
-   const repeated=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY selection',groupId);
-   const requested=[...selections].sort((a:any,b:any)=>a.selection.localeCompare(b.selection));
-   if(repeated.length){
-     if(repeated.length===requested.length&&repeated.every((b:any,i:number)=>b.race_id===body.raceId&&b.mode==='manual'&&b.selection===requested[i].selection&&b.stake===requested[i].stake))return c.json({groupId,bets:repeated.map(mapBet)});
-     return jsonError(c,'requestId was already used for a different bet group',409);
-   }
-   const available=await first<any>(db,`SELECT ${availableBankrollSql} available`);
-   if(Number(available?.available??0)<totalStake)return jsonError(c,'insufficient bankroll');
-   const budget=await readWriteBudget(db);
-   return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);
- }
- const inserted=await run(db,`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin,bet_group_id,candidate_rank,candidate_count,odds_captured_at,predicted_at_at_bet)
-   SELECT json_extract(value,'$.id'),json_extract(value,'$.race_id'),json_extract(value,'$.sport'),'win',json_extract(value,'$.selection'),json_extract(value,'$.stake'),'manual',json_extract(value,'$.predicted_prob'),json_extract(value,'$.odds_at_bet'),json_extract(value,'$.expected_roi'),json_extract(value,'$.edge_label'),json_extract(value,'$.model_id'),json_extract(value,'$.placed_at'),'open',json_extract(value,'$.data_origin'),?,json_extract(value,'$.candidate_rank'),json_extract(value,'$.candidate_count'),json_extract(value,'$.odds_captured_at'),json_extract(value,'$.predicted_at_at_bet')
-   FROM json_each(?) WHERE ${availableBankrollSql}>=? AND NOT EXISTS(SELECT 1 FROM bets WHERE bet_group_id=?)
-   ON CONFLICT(bet_group_id,bet_type,selection) WHERE bet_group_id IS NOT NULL DO NOTHING`,groupId,JSON.stringify(payload),totalStake,groupId);
- if(!inserted.meta?.changes){
-   const repeated=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY selection',groupId);
-   const requested=[...selections].sort((a:any,b:any)=>a.selection.localeCompare(b.selection));
-   if(repeated.length===requested.length&&repeated.every((b:any,i:number)=>b.race_id===body.raceId&&b.mode==='manual'&&b.selection===requested[i].selection&&b.stake===requested[i].stake))return c.json({groupId,bets:repeated.map(mapBet)});
-   return jsonError(c,repeated.length?'requestId was already used for a different bet group':'insufficient bankroll',repeated.length?409:400);
- }
- const bets=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY candidate_rank',groupId);
- return c.json(legacyRequest?mapBet(bets[0]):{groupId,bets:bets.map(mapBet)},201);
-});
-const SHA256 = /^[a-f0-9]{64}$/;
-function ticketMetadata(metrics: any, betType: string): boolean {
-  return metrics?.ticketModelSchemaVersion === TICKET_MODEL_SCHEMA
-    && metrics?.ticketPredictionSemantics === TICKET_PROBABILITY_SEMANTICS
-    && metrics?.ticketBetType === betType
-    && typeof metrics?.ticketArtifactSha256 === 'string' && SHA256.test(metrics.ticketArtifactSha256);
-}
-function ticketValidationEvidence(metrics: any, betType: string): boolean {
-  const v = metrics?.ticketValidation;
-  const validatedAt = typeof v?.validatedAt === 'string' ? Date.parse(v.validatedAt) : NaN;
-  return ticketMetadata(metrics, betType) && metrics.promotionEligible === true && v?.status === 'independently_validated'
-    && v?.policyVersion === TICKET_MODEL_SCHEMA && v?.betType === betType
-    && v?.artifactSha256 === metrics.ticketArtifactSha256 && typeof v?.reportSha256 === 'string' && SHA256.test(v.reportSha256)
-    && typeof v?.independentReviewId === 'string' && v.independentReviewId.length > 0
-    && v?.dataOrigin === 'real' && v?.completeCombinationCoverage === true
-    && v?.probabilitiesNormalized === true && v?.outOfSampleValidated === true && v?.pointInTimeSafe === true
-    && Number.isFinite(validatedAt) && validatedAt <= Date.now() && Date.now() - validatedAt <= 30 * 86400_000;
-}
-function validatedTicketModel(model: any, betType: string): boolean {
-  let metrics: any;
-  try { metrics = JSON.parse(model?.metrics_json || '{}'); } catch { return false; }
-  return model?.status === 'active' && model?.bet_type === betType && ticketValidationEvidence(metrics, betType);
-}
-function officialTrifectaUrl(sourceUrl: unknown, race: any): boolean {
-  if (typeof sourceUrl !== 'string') return false;
-  try {
-    const u = new URL(sourceUrl);
-    return u.protocol === 'https:' && u.hostname === 'www.boatrace.jp' && u.pathname === '/owpc/pc/race/odds3t'
-      && u.searchParams.get('jcd') === String(race.venue_id)
-      && u.searchParams.get('rno') === String(race.race_no)
-      && u.searchParams.get('hd') === String(race.race_date).replaceAll('-', '');
-  } catch { return false; }
-}
-async function ticketCandidatesForRace(db: Db, race: any, maxStd: number, decisionAt = Date.now(), cutoffAtOverride?: string | null): Promise<TicketCandidate[]> {
-  // Initial support is exact-order trifecta only. Other ticket types stay absent
-  // until a compatible model and audited odds source are registered.
-  if (await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',race.id)) return [];
-  const cutoffAt = cutoffAtOverride ?? race.post_time;
-  if (race.sport !== 'boat' || race.data_origin !== 'real' || race.status !== 'scheduled'
-      || !cutoffAt || !Number.isFinite(Date.parse(cutoffAt)) || Date.parse(cutoffAt) <= decisionAt) return [];
-  const decisionAtIso=isoJstAt(decisionAt), freshAfter=oddsFreshAfter(decisionAt);
-  const runners = await all<any>(db, 'SELECT number FROM entries WHERE race_id=? AND data_origin=? ORDER BY number', race.id, race.data_origin);
-  const numbers = runners.map((x: any) => Number(x.number));
-  if (numbers.length !== 6 || new Set(numbers).size !== 6 || numbers.some((n: number) => !Number.isInteger(n) || n < 1 || n > 6)) return [];
-  const models = await all<any>(db, "SELECT * FROM models WHERE sport='boat' AND bet_type='trifecta' AND status='active'");
-  const output: TicketCandidate[] = [];
-  for (const model of models) {
-    if (!validatedTicketModel(model, 'trifecta')) continue;
-    const latest = await first<any>(db, `SELECT MAX(predicted_at) predicted_at FROM ticket_predictions WHERE race_id=? AND model_id=? AND bet_type='trifecta' AND data_origin='real' AND julianday(predicted_at)<=julianday(?) AND julianday(predicted_at)<=julianday(?)`, race.id, model.id, decisionAtIso, cutoffAt);
-    if (!latest?.predicted_at) continue;
-    const predictions = await all<any>(db, `SELECT * FROM ticket_predictions WHERE race_id=? AND model_id=? AND bet_type='trifecta' AND data_origin='real' AND predicted_at=?`, race.id, model.id, latest.predicted_at);
-    let metrics: any; try { metrics = JSON.parse(model.metrics_json || '{}'); } catch { continue; }
-    if (!model.trained_at || !Number.isFinite(Date.parse(model.trained_at)) || Date.parse(model.trained_at) >= Date.parse(latest.predicted_at)) continue;
-    if (predictions.some((p: any) => p.feature_schema_version !== TICKET_MODEL_SCHEMA || p.artifact_sha256 !== metrics.ticketArtifactSha256 || p.prob_std === null || p.prob_std === undefined)) continue;
-    if (predictions.some((p: any) => p.probability === null || p.probability === undefined || !Number.isFinite(p.probability))) continue;
-    if (!isCompleteTicketDistribution('trifecta', numbers, predictions.map((p: any) => p.selection), predictions.map((p: any) => Number(p.probability)))) continue;
-    const latestOdds = await first<any>(db, `SELECT captured_at,source_url,source_sha256 FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND source_sha256 IS NOT NULL AND julianday(captured_at)>=julianday(?) AND julianday(captured_at)<=julianday(?) AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1`, race.id, freshAfter, decisionAtIso, cutoffAt);
-    if (!latestOdds || !SHA256.test(latestOdds.source_sha256) || !officialTrifectaUrl(latestOdds.source_url, race)) continue;
-    const oddsRows = await all<any>(db, `SELECT selection,odds FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND captured_at=? AND source_url=? AND source_sha256=?`, race.id, latestOdds.captured_at, latestOdds.source_url, latestOdds.source_sha256);
-    if (oddsRows.some((o: any) => o.odds === null || !Number.isFinite(o.odds) || o.odds <= 0)
-        || !isCompleteTicketDistribution('trifecta', numbers, oddsRows.map((x: any) => x.selection), oddsRows.map(() => 1 / oddsRows.length))) continue;
-    const oddsBySelection = new Map(oddsRows.map((o: any) => [o.selection, Number(o.odds)]));
-    const predictionBySelection = new Map(predictions.map((p: any) => [p.selection, p]));
-    for (const selection of [...predictionBySelection.keys()].sort()) {
-      const p: any = predictionBySelection.get(selection), odds = oddsBySelection.get(selection);
-      if (odds === undefined) continue;
-      const score = candidate(p.probability, odds, p.prob_std, 'active', maxStd);
-    output.push({ raceId: race.id, sport: race.sport, venueName: race.venue_name, raceNo: race.race_no, postTime: race.post_time,
-        betType: 'trifecta', selection, probability: p.probability, probStd: p.prob_std, odds, oddsCapturedAt: latestOdds.captured_at,
-        breakEvenProb: 1 / odds, expectedRoi: score.expectedRoi!, conservativeRoi: score.conservativeRoi!, edge: score.edge,
-        modelId: model.id, modelVersion: model.version, modelArtifactSha256: metrics.ticketArtifactSha256,
-        predictedAt: latest.predicted_at, oddsSource: 'boatrace-trifecta-official-v1', oddsSourceUrl: latestOdds.source_url,
-        oddsSourceSha256: latestOdds.source_sha256,
-        dataFreshnessMinutes: Math.max(0, (decisionAt - Date.parse(latestOdds.captured_at)) / 60000),
-        dataOrigin: 'real', buyEligible: score.edge === 'HIGH_EDGE' || score.edge === 'POSITIVE_EDGE' });
-    }
-  }
-  return output;
-}
-function resultWaitReason(b:any){
- if(b.data_origin==='sample')return 'sampledata';
- if(b.race_status==='cancelled')return 'cancelled';
- if(b.status!=='open')return null;
- if(b.finish_code==='F'||b.finish_code==='L')return 'refundmissing';
- if(b.finish_code==='å¤±æ ¼'||b.finish_code==='è»¢è¦†'||b.finish_code==='å¦¨å®³'||b.finish_code==='è½æ°´'||b.finish_code==='ã‚¨ãƒ³ã‚¹ãƒˆ'||b.finish_code==='ä¸å®Œèµ°')return 'disqualified';
- if(b.finish_code==='æ¬ å ´'||b.finish_code==='æ¬ ')return 'withdrawn';
- const postTime=b.post_time?Date.parse(b.post_time):Number.NaN;
- if(Number.isFinite(postTime)&&postTime>Date.now())return 'notstarted';
- if(!Number.isFinite(postTime)&&(b.race_status==='scheduled'||b.race_status==='closed'))return 'unknown';
- if(!b.entry_count||b.result_count+(b.terminal_entry_count??0)!==b.entry_count||b.distinct_result_count!==b.result_count||b.matched_result_count!==b.result_count||!b.winner_count){
-   return b.result_collection_status==='failed'||b.result_collection_status==='partial'?'collectionfailed':'officialresultmissing';
- }
- if(b.paid_winner_count!==b.winner_count)return 'payoutmissing';
- return 'settlementpending';
-}
-function mapBet(b:any){return {id:b.id,raceId:b.race_id,sport:b.sport,betType:b.bet_type,selection:b.selection,stake:b.stake,mode:b.mode,predictedProb:b.predicted_prob,oddsAtBet:b.odds_at_bet,expectedRoi:b.expected_roi,edgeLabel:b.edge_label,modelId:b.model_id,placedAt:b.placed_at,status:b.status,payout:b.payout??null,profit:b.profit??null,finalOdds:b.final_odds??null,settledAt:b.settled_at??null,dataOrigin:b.data_origin,groupId:b.bet_group_id??null,candidateRank:b.candidate_rank??null,candidateCount:b.candidate_count??null,oddsCapturedAt:b.odds_captured_at??null,predictedAtAtBet:b.predicted_at_at_bet??null,decisionPhase:b.decision_phase??null,resultWaitReason:b.race_status==null?undefined:resultWaitReason(b),resultCollectionSource:b.result_collection_source??null,resultCollectionStatus:b.result_collection_status??null,resultCollectionLastAttemptAt:b.result_collection_last_attempt_at??null,resultCollectionLastSuccessAt:b.result_collection_last_success_at??null};}
-async function quarantineSummary(db: Db, sport: string | null, origin: string | null) {
- return await first<any>(db, `SELECT COUNT(*) count,COALESCE(SUM(b.stake),0) stake,COALESCE(SUM(b.payout),0) payout,COALESCE(SUM(b.profit),0) profit FROM bets b WHERE EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=b.id) AND (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?)`, sport, sport, origin, origin) ?? {count:0,stake:0,payout:0,profit:0};
-}
-app.get('/bets/quarantine-summary',async c=>{const sport=c.req.query('sport'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');return c.json(await quarantineSummary(c.env.DB,sport||null,origin));});
-app.get('/paper/decisions',async c=>{
- const date=c.req.query('date')??jstRaceDate();
- if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return jsonError(c,'date must be YYYY-MM-DD');
- const rows=await all<any>(c.env.DB,`SELECT d.race_id,d.phase,d.cutoff_at,d.cutoff_source,d.cutoff_observed_at,d.target_at,d.input_as_of_at,d.decided_at,d.outcome,d.reason,d.bet_group_id,d.snapshot_json
-   FROM paper_decisions d JOIN races r ON r.id=d.race_id WHERE r.race_date=? ORDER BY julianday(d.decided_at),d.race_id,d.phase LIMIT 500`,date);
- return c.json({date,timing:{primary:{phase:PRIMARY_PAPER_PHASE,cutoffSource:TRUSTED_CUTOFF_SOURCE,targetOffsetSeconds:60,toleranceSeconds:10,
-   acceptedSecondsBeforeCutoff:{min:50,max:70}},comparisons:PAPER_COMPARISON_PHASES},
-   decisions:rows.map(row=>{let snapshot=null;try{snapshot=row.snapshot_json?JSON.parse(row.snapshot_json):null;}catch{}
-    const cutoffMs=row.cutoff_at?Date.parse(row.cutoff_at):Number.NaN,decidedMs=Date.parse(row.decided_at),actualSecondsBeforeCutoff=Number.isFinite(cutoffMs)&&Number.isFinite(decidedMs)?(cutoffMs-decidedMs)/1000:null;
-    return {raceId:row.race_id,phase:row.phase,cutoffAt:row.cutoff_at??null,cutoffSource:row.cutoff_source??null,cutoffObservedAt:row.cutoff_observed_at??null,targetAt:row.target_at??null,inputAsOfAt:row.input_as_of_at??null,decidedAt:row.decided_at,
-      actualSecondsBeforeCutoff,targetDeltaSeconds:actualSecondsBeforeCutoff===null?null:60-actualSecondsBeforeCutoff,outcome:row.outcome,reason:row.reason??null,betGroupId:row.bet_group_id??null,snapshot};})});
-});
-app.get('/bets',async c=>{const sport=c.req.query('sport'),status=c.req.query('status'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');const rows=await all<any>(c.env.DB,`SELECT b.*,v.name venue_name,r.race_no,r.status race_status,r.post_time,r.race_date,
- (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin) entry_count,
- (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin AND ${terminalFinishCodeSql}) terminal_entry_count,
- (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin) result_count,
- (SELECT COUNT(DISTINCT x.number) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin) distinct_result_count,
- (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin AND EXISTS(SELECT 1 FROM entries e WHERE e.race_id=x.race_id AND e.number=x.number AND e.data_origin=x.data_origin)) matched_result_count,
- (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin AND x.finish_order=1) winner_count,
- (SELECT COUNT(*) FROM results x JOIN payouts p ON p.race_id=x.race_id AND p.data_origin=x.data_origin AND p.bet_type='win' AND p.selection=CAST(x.number AS TEXT) AND p.payout>0 WHERE x.race_id=r.id AND x.data_origin=r.data_origin AND x.finish_order=1) paid_winner_count,
- (SELECT CASE WHEN json_valid(e.features_json) THEN json_extract(e.features_json,'$.finish_code') END FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin AND CAST(e.number AS TEXT)=b.selection LIMIT 1) finish_code,
- (SELECT cr.source FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND (cr.source='mbrace-boat' OR (cr.source='boatrace-results-worker-v1' AND cr.id='boat-result:'||r.id)) AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_source,
- (SELECT cr.status FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND (cr.source='mbrace-boat' OR (cr.source='boatrace-results-worker-v1' AND cr.id='boat-result:'||r.id)) AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_status,
- (SELECT cr.started_at FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND (cr.source='mbrace-boat' OR (cr.source='boatrace-results-worker-v1' AND cr.id='boat-result:'||r.id)) AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_attempt_at,
- (SELECT COALESCE(cr.finished_at,cr.started_at) FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND (cr.source='mbrace-boat' OR (cr.source='boatrace-results-worker-v1' AND cr.id='boat-result:'||r.id)) AND cr.sport=r.sport AND cr.target_date=r.race_date AND cr.status='success' AND julianday(COALESCE(cr.finished_at,cr.started_at))<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_success_at
-FROM bets b JOIN races r ON r.id=b.race_id JOIN venues v ON v.id=r.venue_id WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.status=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at DESC`,sport||null,sport||null,status||null,status||null,origin,origin);return c.json(rows.map(b=>({...mapBet(b),venueName:b.venue_name,raceNo:b.race_no,raceDate:b.race_date})));});
-app.get('/performance/rank-comparison',async c=>{
- const db=c.env.DB,origin=originFilter(c.req.query('origin'));
- const rows=await all<any>(db,`SELECT b.* FROM bets b JOIN races r ON r.id=b.race_id AND r.data_origin=b.data_origin
-   WHERE b.bet_group_id IS NOT NULL AND b.candidate_rank IS NOT NULL AND b.candidate_count IS NOT NULL
-   AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet('b')}
-   AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=b.race_id)
-   ORDER BY b.bet_group_id,b.candidate_rank`,origin,origin);
- const groups=new Map<string,any[]>(); for(const row of rows){const list=groups.get(row.bet_group_id)??[];list.push(row);groups.set(row.bet_group_id,list);}
- let comparedGroupCount=0,totalStake=0,multiplePayout=0,firstOnlyPayout=0;
- let excludedPendingGroupCount=0,excludedMissingRankOneGroupCount=0,excludedUnknownRankBetCount=0;
- const comparedRaces=new Set<string>();
- for(const group of groups.values()){
-   if(group.length<2)continue;
-   if(!group.some((b:any)=>b.candidate_rank===1)){excludedMissingRankOneGroupCount++;continue;}
-   if(group.some((b:any)=>!['won','lost'].includes(b.status))){excludedPendingGroupCount++;continue;}
-   const origins=new Set(group.map((b:any)=>b.data_origin)),races=new Set(group.map((b:any)=>b.race_id));
-   if(origins.size!==1||races.size!==1)continue;
-   const rankOne=group.find((b:any)=>b.candidate_rank===1);
-   // Settlement only marks the race complete after the official result and winner payout are present.
-   // A losing rank-1 selection has a known zero payout; a winning one carries the official payout.
-   if(rankOne.status==='won'&&rankOne.final_odds===null)continue;
-   const stake=group.reduce((sum:number,b:any)=>sum+b.stake,0);
-   comparedGroupCount++;comparedRaces.add(rankOne.race_id);totalStake+=stake;
-   multiplePayout+=group.reduce((sum:number,b:any)=>sum+(b.payout??0),0);
-   firstOnlyPayout+=rankOne.status==='won'?payoutYen(stake,Math.round(rankOne.final_odds*100)):0;
- }
- excludedUnknownRankBetCount=Number((await first<any>(db,`SELECT COUNT(*) count FROM bets b JOIN races r ON r.id=b.race_id AND r.data_origin=b.data_origin
-   WHERE (b.bet_group_id IS NULL OR b.candidate_rank IS NULL) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet('b')}
-   AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=b.race_id)`,origin,origin))?.count??0);
- const measure=(stake:number,payout:number)=>({stake,payout,profit:payout-stake,roi:stake?payout/stake:null});
- return c.json({comparedGroupCount,comparedRaceCount:comparedRaces.size,totalStake,excludedPendingGroupCount,excludedMissingRankOneGroupCount,excludedUnknownRankBetCount,multiple:measure(totalStake,multiplePayout),firstOnly:measure(totalStake,firstOnlyPayout),
-   note:'åŒã˜æ¯”è¼ƒå¯¾è±¡ãƒ¬ãƒ¼ã‚¹ãƒ»åŒã˜ç·è³­ã‘é‡‘ã§æ¯”è¼ƒã€‚rank 1ã‚’å«ã‚€è¤‡æ•°é¸æŠã‚°ãƒ«ãƒ¼ãƒ—ã®å…¨åˆ¸ãŒç¢ºå®šã—ãŸãƒ¬ãƒ¼ã‚¹ã ã‘ã‚’å¯¾è±¡ã¨ã—ã€å˜ç‹¬è³¼å…¥ã¯rank 1ã®å®Ÿéš›ã®çµæœãƒ»å…¬å¼æ‰•æˆ»ã§å†è¨ˆç®—ã€‚rank 1ã®ã¿ã¸ç·é¡ã‚’é…åˆ†ã™ã‚‹ä»®æƒ³æ‰•æˆ»ã¯1å††æœªæº€åˆ‡ã‚Šæ¨ã¦ã€‚æ—§è¨˜éŒ²ã®é †ä½ä¸æ˜ãƒ»æœªç¢ºå®šãƒ»å–æ¶ˆã¯é™¤å¤–ã€‚åˆ©ç›Šã‚„å°†æ¥æˆç¸¾ã‚’ä¿è¨¼ã—ãªã„ã€‚'});
-});
-app.get('/performance/overview',async c=>{const sport=c.req.query('sport'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');const db=c.env.DB, initial=Number(await setting(db,'initial_bankroll','100000')), bets=await all<any>(db,`SELECT * FROM bets b WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at,b.id`,sport||null,sport||null,origin,origin);let bankroll=initial;const equity=[{at:bets[0]?.placed_at??now(),bankroll}];let settled=0,hits=0,stake=0,payout=0;for(const b of bets){if(b.status==='won'||b.status==='lost'||b.status==='void'){bankroll+=b.profit??0;settled++;stake+=b.stake;payout+=b.payout??0;if(b.status==='won')hits++;equity.push({at:b.settled_at??b.placed_at,bankroll});}}let peak=initial,dd=0,ddPct=0;for(const e of equity){peak=Math.max(peak,e.bankroll);dd=Math.max(dd,peak-e.bankroll);if(peak>0)ddPct=Math.max(ddPct,(peak-e.bankroll)/peak);}return c.json({initialBankroll:initial,bankroll,totalProfit:bankroll-initial,roi:stake?payout/stake:null,betCount:bets.length,settledCount:settled,hitRate:settled?hits/settled:null,maxDrawdown:dd,maxDrawdownPct:ddPct,equityCurve:equity,quarantined:await quarantineSummary(db,sport||null,origin)});});
-app.get('/performance/breakdown',async c=>{const db=c.env.DB,origin=originFilter(c.req.query('origin'));
- const O=`(? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet('b')}`;
- const bySport=await all<any>(db,`SELECT sport,COUNT(*) bets,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,SUM(COALESCE(profit,0)) profit,CASE WHEN SUM(stake)>0 THEN 1.0*SUM(COALESCE(payout,0))/SUM(stake) END roi,CASE WHEN SUM(CASE WHEN status IN ('won','lost') THEN 1 ELSE 0 END)>0 THEN 1.0*SUM(CASE WHEN status='won' THEN 1 ELSE 0 END)/SUM(CASE WHEN status IN ('won','lost') THEN 1 ELSE 0 END) END hitRate FROM bets b WHERE ${O} GROUP BY sport`,origin,origin);
- const byMonth=await all<any>(db,`SELECT substr(placed_at,1,7) month,sport,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,SUM(COALESCE(profit,0)) profit FROM bets b WHERE ${O} GROUP BY month,sport ORDER BY month`,origin,origin);
- const byEdge=await all<any>(db,`SELECT CASE
-   WHEN expected_roi IS NULL THEN 'ä¸æ˜'
-   WHEN expected_roi >= 0.20 THEN '20%ä»¥ä¸Š'
-   WHEN expected_roi >= 0.05 THEN '5ã€œ20%'
-   WHEN expected_roi >= 0 THEN '0ã€œ5%'
-   ELSE '< 0%'
-  END bucket,COUNT(*) bets,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,CASE WHEN SUM(stake)>0 THEN 1.0*SUM(COALESCE(payout,0))/SUM(stake) END roi
-  FROM bets b WHERE ${O} GROUP BY bucket ORDER BY CASE bucket WHEN '20%ä»¥ä¸Š' THEN 1 WHEN '5ã€œ20%' THEN 2 WHEN '0ã€œ5%' THEN 3 WHEN '< 0%' THEN 4 ELSE 5 END`,origin,origin);
- const byModel=await all<any>(db,`SELECT COALESCE(model_id,'unknown') modelId,COUNT(*) bets,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,CASE WHEN SUM(stake)>0 THEN 1.0*SUM(COALESCE(payout,0))/SUM(stake) END roi FROM bets b WHERE ${O} GROUP BY model_id`,origin,origin);
- const calibration=await all<any>(db,`SELECT r.sport,CAST(p.probability*10 AS INT) bin,AVG(p.probability) predicted,AVG(CASE WHEN res.finish_order=1 THEN 1.0 ELSE 0.0 END) actual,COUNT(*) count FROM predictions p JOIN races r ON r.id=p.race_id AND p.data_origin=r.data_origin JOIN models m ON m.id=p.model_id AND m.sport=r.sport AND m.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(m.metrics_json) THEN (json_type(m.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) JOIN results res ON res.race_id=p.race_id AND res.number=p.number AND res.data_origin=r.data_origin WHERE NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='prediction' AND q.record_id=p.id) AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races qr WHERE qr.race_id=r.id) AND r.status='finished' AND r.post_time IS NOT NULL AND julianday(p.predicted_at)<=julianday(r.post_time) AND (? IS NULL OR r.data_origin=?) AND p.predicted_at=(SELECT p2.predicted_at FROM predictions p2 WHERE p2.race_id=p.race_id AND p2.model_id=p.model_id AND p2.number=p.number AND p2.data_origin=r.data_origin AND julianday(p2.predicted_at)<=julianday(r.post_time) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1) GROUP BY r.sport,bin ORDER BY r.sport,bin`,origin,origin);
- const oddsDrift=await first<any>(db,`SELECT COUNT(*) bets,AVG(odds_at_bet) avgOddsAtBet,AVG(final_odds) avgFinalOdds,COALESCE(SUM(ev_lost),0) evLostCount FROM bets b WHERE status IN ('won','lost') AND ${O}`,origin,origin);
- return c.json({bySport,byMonth,byEdge,byModel,calibration,oddsDrift,quarantined:await quarantineSummary(db,null,origin)});
-});
-function isRecord(value: unknown): value is Record<string, any> { return !!value && typeof value === 'object' && !Array.isArray(value); }
-function isSha256(value: unknown): value is string { return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value); }
-function finite(...values: unknown[]): boolean { return values.every(v => typeof v === 'number' && Number.isFinite(v)); }
-function canonicalJson(value: any): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (isRecord(value)) return `{${Object.keys(value).sort().map(k=>`${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
-  return JSON.stringify(value) ?? 'null';
-}
-async function sha256Json(value: unknown): Promise<string> {
-  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonicalJson(value)));
-  return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
-}
-async function sha256Text(value: string): Promise<string> {
-  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
-}
-function hasSafeBoatRuntime(model: any) {
-  if (model.sport !== 'boat') return true;
-  try { const metrics=JSON.parse(model.metrics_json || '{}'); return metrics.boatVenueSchemaVersion === SAFE_BOAT_SCHEMA && isSha256(metrics.correctedTrainingDataSha256) && isSha256(metrics.boatArtifactSha256); }
-  catch { return false; }
-}
-async function initialBaselineValidationError(model: any, metrics: Record<string, any>, body: any, nowMs: number) {
-  if (model.sport !== 'boat' || model.bet_type !== 'win') return 'initial-baseline approval is only supported for boat win models';
-  if (model.status !== 'candidate') return 'only a candidate model can receive initial-baseline approval';
-  if (body?.confirmed !== true) return 'explicit initial-baseline confirmation is required';
-  if (!isSha256(body?.validationFingerprint)) return 'validation fingerprint must be a SHA-256 digest';
-  if (metrics.initialBaselineEligible !== true) return typeof metrics.initialBaselineReason === 'string' ? metrics.initialBaselineReason : 'initial-baseline validation is not eligible';
-  const v = metrics.initialBaselineValidation;
-  if (!isRecord(v) || v.policyVersion !== 'initial-baseline-v1' || v.fingerprint !== body.validationFingerprint) return 'initial-baseline validation fingerprint does not match';
-  const fingerprintPayload={...v}; delete fingerprintPayload.fingerprint; delete fingerprintPayload.validatedAt;
-  delete fingerprintPayload.initialBaselineEligible; delete fingerprintPayload.initialBaselineReason;
-  if (await sha256Json(fingerprintPayload)!==v.fingerprint) return 'initial-baseline validation contents do not match their fingerprint';
-  if (v.status!=='evaluated' || v.initialBaselineEligible!==true || v.candidateModelId !== model.id || v.sport !== model.sport || v.betType !== model.bet_type || v.dataOrigin !== 'real') return 'initial-baseline validation identity or eligibility does not match this real boat model';
-  if (v.validatedAt == null || !Number.isFinite(Date.parse(v.validatedAt)) || Date.parse(v.validatedAt) > nowMs + 5 * 60_000 || nowMs - Date.parse(v.validatedAt) > 24 * 60 * 60_000) return 'initial-baseline validation is stale or has an invalid timestamp';
-  const a=v.artifact, cohort=v.cohort, temporal=v.temporal, checks=v.checks, paired=v.pairedComparison;
-  if (!isRecord(a) || a.version !== model.version || !isSha256(a.jsonSha256) || !isSha256(a.pickleSha256) || metrics.boatVenueSchemaVersion!==SAFE_BOAT_SCHEMA || !isSha256(metrics.correctedTrainingDataSha256) || v.boatVenueSchemaVersion!==SAFE_BOAT_SCHEMA || !isSha256(v.correctedTrainingDataSha256) || v.correctedTrainingDataSha256!==metrics.correctedTrainingDataSha256 || metrics.boatArtifactSha256!==a.pickleSha256 || !Array.isArray(a.featureColumns) || a.featureColumns.length === 0 || a.featureColumns.some((x:unknown)=>typeof x!=='string'||!x)) return 'validated artifact identity is incomplete';
-  if (!isRecord(cohort) || !finite(cohort.raceCount,cohort.dayCount) || cohort.raceCount < 1 || cohort.dayCount < 1 || !isSha256(cohort.raceSetSha256) || !Number.isFinite(Date.parse(cohort.from)) || !Number.isFinite(Date.parse(cohort.to)) || Date.parse(cohort.from)>Date.parse(cohort.to)) return 'validated real cohort counts or dates are invalid';
-  if (!isRecord(temporal) || !finite(temporal.trainRaceCount,temporal.validRaceCount,temporal.testRaceCount) || temporal.trainRaceCount<1 || temporal.validRaceCount<1 || temporal.testRaceCount<1 || temporal.disjointRaceIds!==true || temporal.fitAndValidationPrecedeHoldout!==true || temporal.splitMatchesArtifactMetadata!==true) return 'temporal validation evidence is incomplete';
-  const dates=[temporal.trainFrom,temporal.trainTo,temporal.validFrom,temporal.validTo,temporal.testFrom,temporal.testTo].map(Date.parse);
-  if (dates.some(d=>!Number.isFinite(d)) || !(dates[0]<=dates[1]&&dates[1]<dates[2]&&dates[2]<=dates[3]&&dates[3]<dates[4]&&dates[4]<=dates[5]) || Date.parse(cohort.from)!==dates[4] || Date.parse(cohort.to)!==dates[5]) return 'temporal split dates do not match the held-out cohort';
-  const requiredChecks=['safeFeatureSchema','realOnly','completeFullRaceCohorts','probabilitiesFiniteNormalized','storedMetricsReproduced','temporalSplitMatchesArtifact','disjointRaceIds','fitAndValidationPrecedeHoldout','minHeldoutRaceCount','minHeldoutDateCount','pairedLogLossImprovement','pairedBrierImprovement','pairedLogLossDateClusterImprovement','pairedBrierDateClusterImprovement','eceWithinThreshold','noGrossDateSliceReversal','authenticatedRegistrySnapshot','candidateRegisteredAsCandidate','noCompatibleActiveModels'];
-  if (!isRecord(checks) || requiredChecks.some(k=>checks[k]!==true)) return 'initial-baseline evidence checks did not all pass';
-  const cm=v.candidateMetrics, bm=v.laneBaselineMetrics;
-  if (!isRecord(v.candidateRegistryIdentity) || v.candidateRegistryIdentity.id!==model.id || v.candidateRegistryIdentity.version!==model.version || v.candidateRegistryIdentity.status!=='candidate') return 'candidate registry identity is incomplete or stale';
-  if (!isRecord(cm) || !isRecord(bm) || !finite(cm.nRaces,cm.logLoss,cm.brier,cm.ece,bm.nRaces,bm.logLoss,bm.brier,bm.ece) || cm.nRaces!==cohort.raceCount || bm.nRaces!==cohort.raceCount) return 'candidate and lane-baseline metrics do not cover the same complete cohort';
-  if (!isRecord(paired) || paired.method!=='paired bootstrap by race; separate date-cluster bootstrap' || !finite(paired.raceCount,paired.logLossDelta,paired.brierDelta) || paired.raceCount!==cohort.raceCount || !Array.isArray(paired.logLossCI95) || paired.logLossCI95.length!==2 || !finite(...paired.logLossCI95) || !Array.isArray(paired.brierCI95) || paired.brierCI95.length!==2 || !finite(...paired.brierCI95) || !Array.isArray(paired.dateClusterLogLossCI95) || paired.dateClusterLogLossCI95.length!==2 || !finite(...paired.dateClusterLogLossCI95) || !Array.isArray(paired.dateClusterBrierCI95) || paired.dateClusterBrierCI95.length!==2 || !finite(...paired.dateClusterBrierCI95) || paired.logLossCI95[1]>=0 || paired.brierCI95[1]>=0 || paired.dateClusterLogLossCI95[1]>=0 || paired.dateClusterBrierCI95[1]>=0) return 'paired baseline comparison is incomplete or does not show required improvement';
-  if (!Array.isArray(v.dateSlices) || v.dateSlices.length===0 || v.dateSlices.some((x:any)=>!isRecord(x)||!finite(x.raceCount,x.logLoss,x.brier,x.ece,x.deltaLogLossVsLane,x.deltaBrierVsLane)||x.raceCount<1)) return 'date-slice validation evidence is incomplete';
-  if (v.sourceAvailability!=='assumed_from_B_prerace_content_not_recorded' || v.historyFeatures!=='not_observed_or_used') return 'source-availability or history-feature limitations are missing';
-  if (!isRecord(v.profitability) || !['counterfactual_replay_unproven','counterfactual_replay_positive_evidence_not_profitability_proof'].includes(v.profitability.status)) return 'profitability evidence must remain explicitly unproven or counterfactual';
-  const snapshot=v.activeModelSnapshot;
-  if (!isRecord(snapshot) || snapshot.source!=='authenticated_registry' || !isSha256(snapshot.snapshotSha256) || !Array.isArray(snapshot.models) || snapshot.models.some((x:any)=>!isRecord(x)||typeof x.id!=='string'||typeof x.version!=='string'||!isSha256(x.metricsSha256)||!['untrained','candidate','active','retired'].includes(x.status)||!['compatible','incompatible','unknown'].includes(x.artifactCompatibility)||x.id===model.id)) return 'authenticated model registry snapshot is invalid';
-  if (snapshot.models.some((x:any)=>x.status==='active'&&x.artifactCompatibility!=='incompatible')) return 'an active compatible or unverified model prevents initial-baseline approval';
-  if (await sha256Json(snapshot.models)!==snapshot.snapshotSha256) return 'authenticated model registry snapshot digest is invalid';
-  return null;
-}
-async function registrySnapshotMatches(db: Db, model: any, validation: any) {
-  const current=await all<any>(db,'SELECT id,version,status,metrics_json FROM models WHERE sport=? AND bet_type=? AND id<>? ORDER BY id,version,status',model.sport,model.bet_type,model.id);
-  const order=(a:any,b:any)=>a.id<b.id?-1:a.id>b.id?1:a.version<b.version?-1:a.version>b.version?1:a.status<b.status?-1:a.status>b.status?1:0;
-  const expected=(validation.activeModelSnapshot.models as any[]).map(x=>({id:x.id,version:x.version,status:x.status,metricsSha256:x.metricsSha256})).sort(order);
-  const actual=await Promise.all(current.sort(order).map(async x=>({id:x.id,version:x.version,status:x.status,metricsSha256:await sha256Text(x.metrics_json??'')})));
-  return JSON.stringify(actual)===JSON.stringify(expected);
-}
-app.get('/models',async c=>{const rows=await all<any>(c.env.DB,'SELECT * FROM models ORDER BY sport,status,id');return c.json(rows.map(mapModel));});
-app.post('/models/:id/promote',async c=>{
- const db=c.env.DB,id=c.req.param('id'),m=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!m)return jsonError(c,'model not found',404);if(m.status==='untrained')return jsonError(c,'untrained model cannot be promoted');
- let metrics:Record<string,any>;try{metrics=JSON.parse(m.metrics_json||'{}');}catch{return jsonError(c,'model metrics are invalid');}
- const body=await c.req.json().catch(()=>({})) as any, initial=body?.mode==='initial_baseline';
- if(body?.mode!==undefined&&!initial)return jsonError(c,'unsupported promotion mode');
- if(initial){
-   const error=await initialBaselineValidationError(m,metrics,body,Date.now());if(error)return jsonError(c,error);
-   if(!hasSafeBoatRuntime(m)||metrics.boatVenueSchemaVersion!==SAFE_BOAT_SCHEMA||!isSha256(metrics.correctedTrainingDataSha256))return jsonError(c,'validated safe boat runtime schema is required');
-   if(!await registrySnapshotMatches(db,m,metrics.initialBaselineValidation))return jsonError(c,'model registry changed since initial-baseline validation; validate again');
- } else {
-   if(metrics.promotionEligible===false)return jsonError(c,typeof metrics.promotionReason==='string'?metrics.promotionReason:'candidate failed same-holdout promotion criteria');
-   if(m.sport==='boat'&&metrics.promotionEligible!==true)return jsonError(c,'boat candidates require an eligible same-holdout comparison or explicit initial-baseline approval');
-   if(m.bet_type!=='win'&&!ticketValidationEvidence(metrics,m.bet_type))return jsonError(c,'ticket model requires a recent artifact-bound validation and explicit complete-ticket quality gate');
-   if(m.bet_type==='win'&&!hasSafeBoatRuntime(m))return jsonError(c,'validated safe boat runtime schema is required before boat win promotion');
- }
- if(!await reserveWorkerWrites(db,2)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}
- if(db.batch){
-   await db.batch([
-     db.prepare("UPDATE models SET status='retired' WHERE sport=? AND bet_type=? AND status='active' AND id<>? AND EXISTS(SELECT 1 FROM models WHERE id=? AND status=? AND version=? AND metrics_json IS ?)").bind(m.sport,m.bet_type,id,id,m.status,m.version,m.metrics_json),
-     db.prepare("UPDATE models SET status='active' WHERE id=? AND status=? AND version=? AND metrics_json IS ?").bind(id,m.status,m.version,m.metrics_json),
-   ]);
- } else {
-   const activation=await run(db,"UPDATE models SET status='active' WHERE id=? AND status=? AND version=? AND metrics_json IS ?",id,m.status,m.version,m.metrics_json);
-   if(!activation.meta?.changes)return jsonError(c,'model changed during promotion; review again',409);
-   await run(db,"UPDATE models SET status='retired' WHERE sport=? AND bet_type=? AND status='active' AND id<>?",m.sport,m.bet_type,id);
- }
- const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!updated||updated.status!=='active')return jsonError(c,'model promotion state changed; retry after review',409);
- return c.json(mapModel(updated));
-});
-// The operator alias is INGEST_TOKEN-scoped because Actions cannot hold the
-// web Worker proxy token. It accepts only this approved same-day baseline and
-// delegates to the ordinary promotion route, preserving every existing gate.
-app.post('/ingest/approved-boat-baseline/promote',async c=>{
-  if(!auth(c))return jsonError(c,'unauthorized',401);
-  const body=await c.req.json().catch(()=>null) as any;
-  const keys=body&&typeof body==='object'&&!Array.isArray(body)?Object.keys(body).sort():[];
-  if(keys.length!==3||keys[0]!=='confirmed'||keys[1]!=='date'||keys[2]!=='validationFingerprint'||
-     body.confirmed!==true||body.date!==utcDate()||body.validationFingerprint!=='a5596554c3def74853149fdaba5b54557473459ba12ffb717d2d6ad805e0acec')
-    return jsonError(c,'explicit current-UTC-day confirmation for the approved initial baseline is required');
-  const headers=new Headers({'Authorization':`Bearer ${c.env.INGEST_TOKEN}`,'Content-Type':'application/json'});
-  if(c.env.PROXY_TOKEN)headers.set('X-ROI-Proxy',c.env.PROXY_TOKEN);
-  const delegated=await app.request('/api/models/boat-win-lgbm-20261010-14b4a90a/promote',{
-    method:'POST',headers,body:JSON.stringify({mode:'initial_baseline',confirmed:true,validationFingerprint:body.validationFingerprint}),
-  },c.env);
-  return new Response(delegated.body,{status:delegated.status,statusText:delegated.statusText,headers:delegated.headers});
-});
-app.post('/models/:id/rollback',async c=>{const db=c.env.DB,id=c.req.param('id'),m=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!m)return jsonError(c,'model not found',404);if(m.status!=='active')return jsonError(c,'model is not active');const old=await first<any>(db,"SELECT * FROM models WHERE sport=? AND bet_type=? AND status='retired' ORDER BY rowid DESC LIMIT 1",m.sport,m.bet_type);if(!old)return jsonError(c,'no retired model to rollback');if(m.bet_type!=='win'){let metrics:any;try{metrics=JSON.parse(old.metrics_json||'{}')}catch{return jsonError(c,'rollback ticket model metadata is invalid')}if(!ticketValidationEvidence(metrics,m.bet_type))return jsonError(c,'rollback target lacks current validated ticket quality evidence')}if(m.bet_type==='win'&&!hasSafeBoatRuntime(old))return jsonError(c,'rollback target lacks validated safe boat runtime schema');if(!await reserveWorkerWrites(db,2)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}if(db.batch){await db.batch([db.prepare("UPDATE models SET status='retired' WHERE id=? AND status='active'").bind(id),db.prepare("UPDATE models SET status='active' WHERE id=? AND status='retired'").bind(old.id)]);}else{await run(db,"UPDATE models SET status='retired' WHERE id=? AND status='active'",id);await run(db,"UPDATE models SET status='active' WHERE id=? AND status='retired'",old.id);}const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',old.id);if(!updated||updated.status!=='active')return jsonError(c,'rollback state changed; retry after review',409);return c.json(mapModel(updated));});
-app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,'SELECT * FROM collection_runs ORDER BY started_at DESC'), tables=['venues','races','entries','odds_snapshots','results','payouts','models','predictions','ticket_predictions','bets','collection_runs','daily_summaries','settings'], tableCounts:Record<string,number>={};for(const t of tables)tableCounts[t]=(await first<any>(db,`SELECT COUNT(*) n FROM ${t}`))?.n??0;
- const classified=runs.map(r=>({...r,...collectionIssues(r)}));
- const keys=[...new Set(runs.map(r=>`${r.source}\n${r.sport}`))];
- const sources=keys.map(key=>{
-  const group=classified.filter(r=>`${r.source}\n${r.sport}`===key),latest=group[0];
-  const attempts=group.filter(r=>r.status!=='skipped' && !(r.quality.length && !r.error && !r.records));
-  const successes=attempts.filter(r=>r.status==='success' || (r.quality.length && !r.error && r.records>0));
-  const lastSuccessAt=successes[0]?.started_at??null;
-  // A quality skip is still an enabled collector, not a feature-flag shutdown.
-  const enabled=latest.source!=='jra' && (latest.status!=='skipped'||latest.quality.length>0);
-  return {source:latest.source,sport:latest.sport,enabled,lastRunAt:latest.started_at,lastSuccessAt,successRate:attempts.length?successes.length/attempts.length:null,runs:group.length,records:group.reduce((n,r)=>n+(r.records??0),0),qualityExclusions:group.reduce((n,r)=>n+r.quality.length,0),freshnessMinutes:latest.started_at?Math.max(0,(Date.now()-Date.parse(latest.started_at))/60000):null,note:latest.source==='jra'?'è¦ç´„ä¸Šè‡ªå‹•å–å¾—ä¸å¯':null};
- });
- const errors=classified.filter(r=>(r.status==='failed'||r.status==='partial') && (r.error||!r.quality.length)).slice(0,50).map(r=>({at:r.started_at,source:r.source,error:r.error??r.reason??r.status}));
- const recentQualityCutoff=Date.now()-60*60_000;
- const qualityExclusions=classified.filter(r=>r.quality.length && Date.parse(r.started_at)>=recentQualityCutoff).slice(0,50).map(r=>({at:r.started_at,source:r.source,count:r.quality.length,reason:r.quality.join(' | ')}));
- return c.json({sources,errors,qualityExclusions,tableCounts,d1WriteBudget:await readWriteBudget(db),freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowsNote:'åˆè¨ˆã¯ä¿å­˜ä¸­ã®ãƒ†ãƒ¼ãƒ–ãƒ«è¡Œæ•°ã®æ¦‚ç®—ã§ã€Cloudflareã‚¢ã‚«ã‚¦ãƒ³ãƒˆå…¨ä½“ã®quotaä½¿ç”¨é‡ã§ã¯ã‚ã‚Šã¾ã›ã‚“ã€‚'}});
-});
-for(const route of Object.keys(ingestTables)) app.post(`/ingest/${route}` as any,c=>ingest(c,route));
-app.get('/ingest/models',async c=>{
- if(!auth(c))return jsonError(c,'unauthorized',401);
- const models=await all<any>(c.env.DB,'SELECT id,sport,bet_type,version,algorithm,status,train_from,train_to,valid_from,valid_to,test_from,test_to,n_train,metrics_json,trained_at,notes FROM models ORDER BY sport,status,id');
- return c.json({models});
-});
-app.post('/admin/collect-boat-results',async c=>{
- if(!auth(c)&&!proxyAuth(c))return jsonError(c,'unauthorized',401);
- if(c.env.ENABLE_BOATRACE_RESULTS_SCRAPE!=='true')return c.json({error:'result collection disabled',code:'results_collection_disabled'},403);
- const body=await c.req.json().catch(()=>null) as {confirmed?:unknown}|null;
- if(body?.confirmed!==true)return c.json({error:'explicit confirmation required',code:'confirmation_required'},400);
- try {
-   const result=await collectResults(c.env.DB,new Date(),{mode:'manual',requestBudget:{used:0,max:49}});
-   console.info(JSON.stringify({event:'boat-manual-results',status:result.status,targets:result.targets,verified:result.verified,records:result.records,attempted:result.attempted,reason:'reason' in result?result.reason:null,fetchFailures:'fetchFailures' in result?result.fetchFailures:[]}));
-   return c.json(result);
- } catch {return c.json({error:'manual result pass failed',code:'manual_results_failed'},503);}
-});
-app.post('/admin/settle',async c=>{
- if(!auth(c)){
-   if(!proxyAuth(c))return jsonError(c,'unauthorized',401);
-   const body=await c.req.json().catch(()=>null) as {confirmed?:unknown}|null;
-   if(body?.confirmed!==true)return c.json({error:'explicit confirmation required',code:'confirmation_required'},400);
- }
- return c.json({settled:await settleOpen(c.env.DB)});
-});
-export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env) => {
-  if (event.cron !== '* * * * *') return;
-  const requestBudget={used:0,max:49};
-  const paperEnabled=env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true';
-  if (paperEnabled) {
-    // Every existing minute tick evaluates the bounded T-60 window before
-    // collector work and before the special :05 early return.
-    const paper=await autoBetWithReport(env.DB,true);
-    console.info(JSON.stringify({event:'paper-decision-timing',...paper.report}));
-  }
-  const paperBoundary = Math.floor(event.scheduledTime / 60_000) % 10 === 0;
-  // Reserve minute :05 for the hourly result pass. This is not a ten-minute
-  // maintenance boundary; isolating it avoids consuming the 50-query free
-  // D1 allowance needed by odds + settlement in the same invocation.
-  if (env.ENABLE_BOATRACE_RESULTS_SCRAPE === 'true' && Math.floor(event.scheduledTime/60_000)%60===5) {
-    try {
-      const result=await collectResults(env.DB,new Date(),{requestBudget});
-      console.info(JSON.stringify({event:'boat-hourly-results',status:result.status,targets:result.targets,verified:result.verified,records:result.records,attempted:result.attempted,reason:'reason' in result?result.reason:null,fetchFailures:'fetchFailures' in result?result.fetchFailures:[]}));
-    } catch {
-      console.info(JSON.stringify({event:'boat-hourly-results',status:'failed',reason:'hourly-pass-failed'}));
-    }
-    return;
-  }
-  if (paperBoundary) {
-    // The minute-level paper decision already ran above. Keep settlement and
-    // maintenance on their existing ten-minute cadence without a second buy pass.
-    await cron(env.DB, false);
-  }
-  if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true' || env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE === 'true') {
-    // A collection quota/write failure must not block ten-minute settlement.
-    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true', env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true',requestBudget).catch(() => undefined);
-  }
-  return;
-} };
-export { app, cron, settleOpen, autoBet, autoBetWithReport, primaryPaperTiming, recordPaperAbstention };
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíã½é:-jZ.¶›­–)Ş³V–×÷'B²6öÆÆV7F–öä—77VW2Òg&öÒrâ÷6W'f–6W2ö6öÆÆV7F–öä—77VW2æ§2s°¦–×÷'B²†öæòÒg&öÒv†öæòs°¦–×÷'B²6÷'2Òg&öÒv†öæòö6÷'2s°¦–×÷'B²ÆÂÂf—'7BÂ'VâÂG—RF"ÂG—R7FFVÖVçBÒg&öÒrâ÷&WòöF"æ§2s°¦–×÷'B²6æF–FFRÂ&WD–BÂ–÷WE–VâÂ6WGFÆUfÇVW2ÂfÆ–FFU–Vå7F¶RÒg&öÒrâ÷6W'f–6W2öÆöv–2æ§2s°¦–×÷'B²6öÆÆV7DöFG2Òg&öÒrâ÷6W'f–6W2ö6öÆÆV7D&öG&6TöFG2æ§2s°¦–×÷'B²6öÆÆV7EG&–fV7FöFG2Òg&öÒrâ÷6W'f–6W2ö6öÆÆV7D&öG&6UG&–fV7FöFG2æ§2s°¦–×÷'B²6öÆÆV7E&W7VÇG2Òg&öÒrâ÷6W'f–6W2ö6öÆÆV7D&öG&6U&W7VÇG2æ§2s°¦–×÷'B²$ôE$4Uô5UDôdeôÔ…ôtUôÕ2Òg&öÒrâ÷6W'f–6W2ö&öG&6T7WFöfbæ§2s°¦–×÷'B²6æöæ–6ÅF–6¶WE6VÆV7F–öâÂ—46ö×ÆWFUF–6¶WDF—7G&–'WF–öâÒg&öÒtVFvVÆ"÷6†&VBs°¦–×÷'B²W7F–ÖFT–ævW7Ew&—FUVæ—G2ÂW7F–ÖFUv÷&¶W%w&—FUVæ—G2Â&VEw&—FT'VFvWBÂ&W6W'fUw&—FT'VFvWBÂ&W6W'fUw&—FT'VFvWG2Â6VVEVæ¶æ÷våw&—FT'VFvWBÂÆÆ÷töæTF•w&—FT'VFvWBÂôäUôD•ôÄÄõtä4RÂWF4FFRÂG—R–ævW7EF&ÆRÂG—Rw&—FT6FVv÷'’Òg&öÒrâ÷6W'f–6W2÷w&—FT'VFvWBæ§2s°¦–×÷'BG—R²7÷'BÂFF÷&–v–âÂ&WEG—RÂF–6¶WD6æF–FFRÒg&öÒtVFvVÆ"÷6†&VBs° ¦–çFW&f6RVçb²D#¢F#²”ätU5EõDô´Tãó¢7G&–æs²Tä$ÄUôUDõô$UCó¢7G&–æs²Tä$ÄUô$ôE$4UôôDE5õ45$Só¢7G&–æs²Tä$ÄUô$ôE$4UõE$”dT5DôôDE5õ45$Só¢7G&–æs²Tä$ÄUô$ôE$4Uõ$U5TÅE5õ45$Só¢7G&–æs²$õ…•õDô´Tãó¢7G&–æs²Ğ§G—R7G‚Ò²&–æF–æw3¢VçbÓ°¦6öç7B4dUô$ôEõ44„TÔÒv&öB×fVçVR×c"s°¦6öç7BD”4´UEôÔôDTÅõ44„TÔÒwF–6¶WB×6VÆV7F–öâ×cs°¦6öç7BD”4´UEõ$ô$$”Ä•E•õ4TÔåD”52ÒvW†7B×6VÆV7F–öâ×&ö&&–Æ—G’×cs°¦6öç7B$”Ô%•õU%õ„4RÒw&–Ö'•÷Ccr26öç7C°¦6öç7B$”Ô%•õU%ôôde4UEôÕ2Òcó°¦6öç7B$”Ô%•õU%õDôÄU$ä4UôÕ2Òó°¦6öç7BE%U5DTEô5UDôdeõ4õU$4RÒv&öG&6R×&6VÆ—7BÖ7WFöfb×cr26öç7C°¦6öç7BÔ•54”äuô5UDôdeõ$ô$Uô$Tdõ$Uõõ5EôÕ2Ò"¢có°¦6öç7BÔ•54”äuô5UDôdeõ$ô$UôeDU%õõ5EôÕ2Ò2¢có°¦6öç7BU%ô4ôÕ$•4ôåõ„4U2Ò°¢C3¢²†6S¢v6ö×&—6öå÷C3rÂ7FGW3¢wVæf–Æ&ÆRrÂ&V6öã¢vÖ–çWFRÖÆWfVÂ6öÆÆV7F–öâæBFVâÖÖ–çWFRFV6—6–öç26ææ÷Bö'6W'fR6V6öæBöfg6WG2rÒÀ¢C¢²†6S¢v6ö×&—6öå÷CrÂ7FGW3¢wVæf–Æ&ÆRrÂ&V6öã¢vÖ–çWFRÖÆWfVÂ6öÆÆV7F–öâæBFVâÖÖ–çWFRFV6—6–öç26ææ÷Bö'6W'fR6V6öæBöfg6WG2rÒÀ§Ò26öç7C°¢òògVÆÂf–VÆB—2&W&W6VçFVB'’V—F†W"âöff–6–ÂçVÖW&–2f–æ—6‚÷"à¢òòW‡Æ–6—BæöâÖf–æ—6†W"6öFR'6VBg&öÒF†Röff–6–Â²&W7VÇBf–ÆRà¦6öç7BFW&Ö–æÄf–æ—6„6öFU7ÂÒ†§6öå÷fÆ–B†RæfVGW&W5ö§6öâ’äB€¢§6öåöW‡G&7B†RæfVGW&W5ö§6öâÂrBæf–æ—6…ö6öFRr’”â‚tbrÂtÂrÂt²rÂ~jÊZBrÂ~jÊrÂ~ZKjÂrÂ~‹º.ŠhbrÂ~ZjZë2rÂ~‰ŞkBrÂ~8*8;>8+88‚rÂ~KˆŞZèÎ‹[r¢õ"§6öåöW‡G&7B†RæfVGW&W5ö§6öâÂrBæf–æ—6…ö6öFRr’tÄô"tµ³Ó•Òr’–°¦6öç7B—5FW&Ö–æÄf–æ—6„6öFRÒ‡fÇVS¢Væ¶æ÷vâ“¢&ööÆVâÓà¢G—VöbfÇVRÓÓÒw7G&–ærrbb…²tbrÂtÂrÂt²rÂ~jÊZBrÂ~jÊrÂ~ZKjÂrÂ~‹º.ŠhbrÂ~ZjZë2rÂ~‰ŞkBrÂ~8*8;>8+88‚rÂ~KˆŞZèÎ‹[uÒæ–æ6ÇVFW2‡fÇVR¢ÇÂõäµÆBBòçFW7B‡fÇVR’“°¦6öç7BÒæWr†öæóÄ7Gƒâ‚’æ&6UF‚‚rö’r“°¦çW6R‚r¢rÂ6÷'2‡²÷&–v–ã¢r¢rÂÆÆ÷tÖWF†öG3¢²ttUBrÂuõ5BrÂtõD”ôå2uÒÂÆÆ÷t†VFW'3¢²t6öçFVçBÕG—RrÂtWF†÷&—¦F–öâuÒÒ’“°¢òòiÊÎyZ®8~8ş™k.Šj~{;²’8).86Æ÷VFfÆ&R66W728~KùŞŠÛ~8^8(Î8şyK¾™Ú"v÷&¶W.ûÈ…6W'f–6R&–æF–æ~ûÈ{XÎyK8¾™™Zé®88(¾8 ¢òò$õ…•õDô´TâiÊ®ŠŠŞZé®ûÈ8:Ş8;Î8*¾8:¾™h¾y›®8;¾88n8+88ûÈ8~8şX‹n™™8~8®8N8&–ævW7B8ş[é>iÚ^88®8(¢”ätU5EõDô´Tâ8~Š¨ŞŠ‹Î8 ¦çW6R‚r¢rÂ7–æ2†2ÂæW‡B’Óâ°¢6öç7B&÷‡’Ò2æVçbå$õ…•õDô´Tã°¢6öç7BF‚ÒæWrU$Â†2ç&WçW&Â’çF†æÖS°¢–b‚&÷‡’ÇÂF‚ÓÓÒrö’ö†VÇF‚rÇÂF‚ç7F'G5v—F‚‚rö’ö–ævW7Bòr’ÇÂF‚ÓÓÒrö’öFÖ–â÷6WGFÆRrÇÂF‚ÓÓÒrö’öFÖ–âö6öÆÆV7BÖ&öB×&W7VÇG2r’&WGW&âæW‡B‚“°¢–b†2ç&Wæ†VFW"‚u‚Õ$ô’Õ&÷‡’r’ÓÒ&÷‡’’&WGW&â2æ§6öâ‡²W'&÷#¢vf÷&&–FFVârÒÂC2“°¢&WGW&âæW‡B‚“°§Ò“°¢òò66†RöæÇ’WF†VçF–6FVBÂ&VBÖöæÇ’F6†&ö&BFFâ¶VWU$Ç2†–æ6ÇVF–ærF†P¢òò6ö×ÆWFRVW'’7G&–ær’2¶W—3²×WF&ÆRÆVFvW'2æBW&6†6R×6Vç6—F—fRf–Ww0¢òò–çFVçF–öæÆÇ’'—72F†—266†Râ66†R’f–ÇW&W2×W7BæWfW"f–Â&VBà¦6öç7B$TEô44„UõEDÅõ4T4ôäE2Ò°¦gVæ7F–öâ66†V&ÆU&VEF‚‡Fƒ¢7G&–ær“¢&ööÆVâ°¢&WGW&âF‚ÓÓÒrö’÷&6W2rÇÂF‚ÓÓÒrö’÷&æ¶–æw2rÇÂF‚ÓÓÒrö’öÖöFVÇ2p¢ÇÂF‚ÓÓÒrö’ö6öÆÆV7F–öâ÷7FGW2rÇÂõåÂö•Â÷&6W5ÂõµâõÒ²BòçFW7B‡F‚“°§Ğ¦çW6R‚r¢rÂ7–æ2†2ÂæW‡B’Óâ°¢–b†2ç&WæÖWF†öBÓÒttUBrÇÂ2æVçbå$õ…•õDô´TâÇÂ66†V&ÆU&VEF‚†æWrU$Â†2ç&WçW&Â’çF†æÖR’’&WGW&âæW‡B‚“°¢6öç7B¶W•W&ÂÒæWrU$Â†2ç&WçW&Â“°¢¶W•W&ÂçF†æÖRÒõõ÷&ö•÷&VEö66†U÷cG¶¶W•W&ÂçF†æÖWÖ°¢6öç7B¶W’ÒæWr&WVW7B†¶W•W&ÂçFõ7G&–ær‚’Â²ÖWF†öC¢ttUBrÒ“°¢ÆWB66†S¢66†RÂVæFVf–æVC°¢ÆWB66†VC¢&W7öç6RÂVæFVf–æVC°¢G'’°¢66†RÒ†vÆö&ÅF†—2æ66†W2266†U7F÷&vRb²FVfVÇCó¢66†RÒÂVæFVf–æVB“òæFVfVÇC°¢66†VBÒv—B66†SòæÖF6‚†¶W’“°¢Ò6F6‚²ò¢66†R—2â÷F–Ö—¦F–öâöæÇ’â¢òĞ¢–b†66†VB’°¢6öç7B†VFW'2ÒæWr†VFW'2†66†VBæ†VFW'2“°¢†VFW'2ç6WB‚t66†RÔ6öçG&öÂrÂw&—fFRÂæò×7F÷&Rr“°¢&WGW&âæWr&W7öç6R†66†VBæ&öG’Â²7FGW3¢66†VBç7FGW2Â7FGW5FW‡C¢66†VBç7FGW5FW‡BÂ†VFW'2Ò“°¢Ğ ¢òòFòæ÷Bw&æW‡B‚’–â66†RÖW'&÷"†æFÆW#¢Æ–6F–öâf–ÇW&W2×W7@¢òò&÷vFRæ÷&ÖÆÇ’æB×W7BæWfW"6W6RF†R&÷WFRFò&RW†V7WFVBGv–6Rà¢v—BæW‡B‚“°¢6öç7B&W7öç6T†VFW'2ÒæWr†VFW'2†2ç&W2æ†VFW'2“°¢&W7öç6T†VFW'2ç6WB‚t66†RÔ6öçG&öÂrÂw&—fFRÂæò×7F÷&Rr“°¢2ç&W2ÒæWr&W7öç6R†2ç&W2æ&öG’Â²7FGW3¢2ç&W2ç7FGW2Â7FGW5FW‡C¢2ç&W2ç7FGW5FW‡BÂ†VFW'3¢&W7öç6T†VFW'2Ò“°¢–b†2ç&W2ç7FGW2ÓÒ#ÇÂ2ç&W2æ†VFW'2ævWB‚v6öçFVçB×G—Rr“òæ–æ6ÇVFW2‚vÆ–6F–öâö§6öâr’’&WGW&ã°¢6öç7B7F÷&T†VFW'2ÒæWr†VFW'2†2ç&W2æ†VFW'2“°¢7F÷&T†VFW'2ç6WB‚t66†RÔ6öçG&öÂrÂV&Æ–2ÂÖ‚ÖvSÒGµ$TEô44„UõEDÅõ4T4ôäE7Ö“°¢G'’°¢v—B66†SòçWB†¶W’ÂæWr&W7öç6R†2ç&W2æ6ÆöæR‚’æ&öG’Â²7FGW3¢2ç&W2ç7FGW2Â7FGW5FW‡C¢2ç&W2ç7FGW5FW‡BÂ†VFW'3¢7F÷&T†VFW'2Ò’“°¢Ò6F6‚²ò¢–væ÷&R66†Rw&—FRW'&÷'3²&WGW&âF†Rg&W6‚C&W7öç6Râ¢òĞ§Ò“°¢òòW'6—7BF–ÖW7F×2v—F‚6öç6—7FVçB¥5Böfg6WC²6VÆV7F–öâVW&–W2W6P¢òò§VÆ–æF’‚’6ò6ö×&—6öç2&VÖ–â6÷'&V7Bv†Vâ–×÷'FVB•4òöfg6WG2F–ffW"à¦6öç7B—6ô§7DBÒ‡F–ÖW7F×¢çVÖ&W"’ÓâæWrFFR‡F–ÖW7F×²’¢c¢c¢’çFô•4õ7G&–ær‚’ç&WÆ6R‚u¢rÂr³“£r“°¦6öç7Bæ÷rÒ‚’Óâ—6ô§7DB„FFRææ÷r‚’“°¦6öç7BôDE5ôÔ…ôtUôÕ2Ò¢c¢°¦6öç7BöFG4g&W6„gFW"Ò‡F–ÖW7F×ÒFFRææ÷r‚’’Óâ—6ô§7DB‡F–ÖW7F×ÒôDE5ôÔ…ôtUôÕ2“°¦6öç7B&W6W'fUv÷&¶W%w&—FW2Ò†F#¢F"Â&÷w3¢çVÖ&W"’Óâ&W6W'fUw&—FT'VFvWB†F"ÂWF4FFR‚’ÂW7F–ÖFUv÷&¶W%w&—FUVæ—G2‡&÷w2’ÂvW76VçF–Âr“°¦6öç7B&W6W'fT÷F–öæÅv÷&¶W%w&—FW2Ò†F#¢F"Â&÷w3¢çVÖ&W"’Óâ&W6W'fUw&—FT'VFvWB†F"ÂWF4FFR‚’ÂW7F–ÖFUv÷&¶W%w&—FUVæ—G2‡&÷w2’Âv÷F–öæÂr“°¦6öç7BfÆ–E7÷'BÒ‡c¢7G&–ærÂçVÆÂ“¢b—27÷'BÓâbÓÓÒv†÷'6RrÇÂbÓÓÒv&öBs°¦6öç7B÷&–v–äf–ÇFW"Ò‡c¢7G&–ærÂçVÆÂÂVæFVf–æVB’ÓâbÓÓÒw6×ÆRrÇÂbÓÓÒw&VÂròb¢çVÆÃ°¦6öç7B§6öäW'&÷"Ò†3¢ç’ÂÖW76vS¢7G&–ærÂ7FGW2ÒC’Óâ2æ§6öâ‡²W'&÷#¢ÖW76vRÒÂ7FGW2“°¦7–æ2gVæ7F–öâ6WGF–ær†F#¢F"Â¶W“¢7G&–ærÂfÆÆ&6³¢7G&–ær“¢&öÖ—6SÇ7G&–æsâ°¢&WGW&â†v—Bf—'7CÇ·fÇVS§7G&–æwÓâ†F"Âu4TÄT5BfÇVRe$ôÒ6WGF–æw2t„U$R¶W“ÓòrÂ¶W’’“òçfÇVRóòfÆÆ&6³°§Ğ¦6öç7Bf–Æ&ÆT&æ·&öÆÅ7ÂÒ„4ôÄU44R‚…4TÄT5B45B‡fÇVR2$TÂ’e$ôÒ6WGF–æw2t„U$R¶W“Òv–æ—F–Åö&æ·&öÆÂr’Â¢²4ôÄU44R‚…4TÄT5B5TÒ„44Rt„Tâ"ç7FGW2”â‚wvöârÂvÆ÷7Br’D„Tâ"ç&öf—BTÅ4RTäB’e$ôÒ&WG2"t„U$RäõBU„•5E2…4TÄT5Be$ôÒFF÷&W—%öVF—EöÖ&·2t„U$Rç&V6÷&E÷G—SÒv&WBräBç&V6÷&Eö–CÖ"æ–B’’Â¢Ò4ôÄU44R‚…4TÄT5B5TÒ„44Rt„Tâ"ç7FGW3Òv÷VârD„Tâ"ç7F¶RTÅ4RTäB’e$ôÒ&WG2"t„U$RäõBU„•5E2…4TÄT5Be$ôÒFF÷&W—%öVF—EöÖ&·2t„U$Rç&V6÷&E÷G—SÒv&WBräBç&V6÷&Eö–CÖ"æ–B’’Â’–°¦6öç7BæöåV&çF–æVD&WBÒ†Æ–2Òv"r’ÓâäõBU„•5E2…4TÄT5Be$ôÒFF÷&W—%öVF—EöÖ&·2t„U$Rç&V6÷&E÷G—SÒv&WBräBç&V6÷&Eö–CÒG¶Æ–7Òæ–B–°¦gVæ7F–öâWF‚†3¢ç’’²6öç7BFö¶VâÒ2æVçbä”ätU5EõDô´Tã²&WGW&âFö¶Vâbb2ç&Wæ†VFW"‚tWF†÷&—¦F–öâr’ÓÓÒ&V&W"G·Fö¶VçÖ²Ğ¢òòG'W7FVBg&öçFVæB6W'f–6R&–æF–ærFG2F†—26V7&WB†VFW#²æWfW"66WB¢òòÖ—76–æröV×G’Fö¶Vâ2WF†VçF–6FVBæBFòæ÷BvV¶Vâ–ævW7B&V&W"WF‚à¦gVæ7F–öâ&÷‡”WF‚†3¢ç’’²6öç7BFö¶VãÖ2æVçbå$õ…•õDô´Tã·&WGW&âFö¶Vâbf2ç&Wæ†VFW"‚u‚Õ$ô’Õ&÷‡’r“ÓÓ×Fö¶Vã²Ğ¦gVæ7F–öâ'6TÆ—7B†&öG“¢Væ¶æ÷vâ“¢&V6÷&CÇ7G&–ærÂVæ¶æ÷vãåµÒÂçVÆÂ°¢6öç7B&÷w2Ò'&’æ—4'&’†&öG’’ò&öG’¢&öG’bbG—Vöb&öG’ÓÓÒvö&¦V7Brbb'&’æ—4'&’‚†&öG’2ç’’æ—FV×2’ò†&öG’2ç’’æ—FV×2¢çVÆÃ°¢&WGW&â&÷w2bb&÷w2æWfW'’‚‡ƒ¢Væ¶æ÷vâ’Óâ‚bbG—Vöb‚ÓÓÒvö&¦V7Brbb'&’æ—4'&’‡‚’’ò&÷w22&V6÷&CÇ7G&–ærÂVæ¶æ÷vãåµÒ¢çVÆÃ°§Ğ¦6öç7B§7E&6TFFRÒ†FFRÒæWrFFR‚’’ÓâæWr–çFÂäFFUF–ÖTf÷&ÖB‚vVâÔ4rÂ²F–ÖU¦öæS¢t6–õFö·–òrÂ–V#¢vçVÖW&–2rÂÖöçFƒ¢s"ÖF–v—BrÂF“¢s"ÖF–v—BrÒ’æf÷&ÖB†FFR“°¦gVæ7F–öâ&6TFFUv–æF÷r‚’°¢6öç7BFöF’Ò§7E&6TFFR‚’Â–W7FW&F’ÒæWrFFR†G·FöF—ÕC££³“£“°¢–W7FW&F’ç6WEUD4FFR‡–W7FW&F’ævWEUD4FFR‚’Ò“°¢&WGW&âæWr6WB…·FöF’Â§7E&6TFFR‡–W7FW&F’•Ò“°§Ğ¦6öç7B–ævW7EF&ÆW3¢&V6÷&CÇ7G&–ærÇ·F&ÆS§7G&–æs²&WV—&VC§7G&–æuµÓ²6öæfÆ–7C§7G&–æwÓâÒ°¢fVçVW3§·F&ÆS¢wfVçVW2rÇ&WV—&VC¥²v–BrÂw7÷'BrÂvæÖRuÒÆ6öæfÆ–7C¢v–BwÒÀ¢&6W3§·F&ÆS¢w&6W2rÇ&WV—&VC¥²v–BrÂw7÷'BrÂwfVçVUö–BrÂw&6UöFFRrÂw&6UöæòrÂw7FGW2rÂvFFö÷&–v–âuÒÆ6öæfÆ–7C¢v–BwÒÀ¢VçG&–W3§·F&ÆS¢vVçG&–W2rÇ&WV—&VC¥²v–BrÂw&6Uö–BrÂvçVÖ&W"rÂvæÖRrÂvf–Æ&ÆUöBrÂvFFö÷&–v–âuÒÆ6öæfÆ–7C¢w&6Uö–BÆçVÖ&W"wÒÀ¢öFG3§·F&ÆS¢vöFG5÷6æ6†÷G2rÇ&WV—&VC¥²v–BrÂw&6Uö–BrÂv&WE÷G—RrÂw6VÆV7F–öârÂv6GW&VEöBrÂvFFö÷&–v–âuÒÆ6öæfÆ–7C¢w&6Uö–BÆ&WE÷G—RÇ6VÆV7F–öâÆ6GW&VEöBwÒÀ¢&W7VÇG3§·F&ÆS¢w&W7VÇG2rÇ&WV—&VC¥²w&6Uö–BrÂvf–æ—6…ö÷&FW"rÂvçVÖ&W"rÂvFFö÷&–v–âuÒÆ6öæfÆ–7C¢w&6Uö–BÆçVÖ&W"wÒÀ¢–÷WG3§·F&ÆS¢w–÷WG2rÇ&WV—&VC¥²w&6Uö–BrÂv&WE÷G—RrÂw6VÆV7F–öârÂw–÷WBrÂvFFö÷&–v–âuÒÆ6öæfÆ–7C¢w&6Uö–BÆ&WE÷G—RÇ6VÆV7F–öâwÒÀ¢&VF–7F–öç3§·F&ÆS¢w&VF–7F–öç2rÇ&WV—&VC¥²v–BrÂw&6Uö–BrÂvÖöFVÅö–BrÂvçVÖ&W"rÂw&ö&&–Æ—G’rÂw&VF–7FVEöBrÂvFFö÷&–v–âuÒÆ6öæfÆ–7C¢w&6Uö–BÆÖöFVÅö–BÆçVÖ&W"Ç&VF–7FVEöBwÒÀ¢wF–6¶WB×&VF–7F–öç2s§·F&ÆS¢wF–6¶WE÷&VF–7F–öç2rÇ&WV—&VC¥²v–BrÂw&6Uö–BrÂvÖöFVÅö–BrÂv&WE÷G—RrÂw6VÆV7F–öârÂw&ö&&–Æ—G’rÂw&VF–7FVEöBrÂvFFö÷&–v–ârÂvfVGW&U÷66†VÖ÷fW'6–öârÂv'F–f7E÷6†#SbuÒÆ6öæfÆ–7C¢w&6Uö–BÆÖöFVÅö–BÆ&WE÷G—RÇ6VÆV7F–öâÇ&VF–7FVEöBwÒÀ¢w&W&6RÖö'6W'fF–öç2s§·F&ÆS¢v&öG&6U÷&W&6Uöö'6W'fF–öç2rÇ&WV—&VC¥²v–BrÂw&6Uö–BrÂv¶–æBrÂvVçG'•öçVÖ&W"rÂw6÷W&6U÷W&ÂrÂw6÷W&6U÷6†#SbrÂvfWF6†VEöBrÂvf–Æ&ÆUöBrÂwfÇVW5ö§6öârÂvFFö÷&–v–âuÒÆ6öæfÆ–7C¢w&6Uö–BÆ¶–æBÆVçG'•öçVÖ&W"ÆfWF6†VEöBwÒÀ¢ÖöFVÇ3§·F&ÆS¢vÖöFVÇ2rÇ&WV—&VC¥²v–BrÂw7÷'BrÂv&WE÷G—RrÂwfW'6–öârÂvÆv÷&—F†ÒrÂw7FGW2uÒÆ6öæfÆ–7C¢v–BwÒÀ¢v6öÆÆV7F–öâ×'Vç2s§·F&ÆS¢v6öÆÆV7F–öå÷'Vç2rÇ&WV—&VC¥²v–BrÂw6÷W&6RrÂw7÷'BrÂwF&vWEöFFRrÂw7F'FVEöBrÂw7FGW2uÒÆ6öæfÆ–7C¢v–BwÒÀ§Ó°¦6öç7BÆÆ÷vVD6öÇVÖç3¢&V6÷&CÇ7G&–ærÇ7G&–æuµÓâÒ°¢fVçVW3¢v–B7÷'BæÖRrç7Æ—B‚rr’À¢&6W3¢v–B7÷'BfVçVUö–B&6UöFFR&6UöæòæÖRF—7Fæ6R7W&f6RG&6µö6öæF—F–öâvVF†W"v–æE÷7VVBvfUö†V–v‡B÷7E÷F–ÖR&WGF–æuö7WFöfeöB&WGF–æuö7WFöfe÷6÷W&6R&WGF–æuö7WFöfeöö'6W'fVEöB7FGW2FFö÷&–v–âWFFVEöBrç7Æ—B‚rr’À¢VçG&–W3¢v–B&6Uö–BçVÖ&W"g&ÖRæÖR¦ö6¶W’G&–æW"vV–v‡Eö6'&–VB†÷'6U÷vV–v‡B&6W%ö6Æ72æF–öæÅ÷v–å÷&FRÆö6Å÷v–å÷&FRÖ÷F÷%öæòÖ÷F÷%ó'&FR&öEöæò&öEó'&FRW††–&—F–öå÷F–ÖR7F'EöW††–&—F–öâfVGW&W5ö§6öâf–Æ&ÆUöBFFö÷&–v–ârç7Æ—B‚rr’À¢öFG5÷6æ6†÷G3¢v–B&6Uö–B&WE÷G—R6VÆV7F–öâöFG26GW&VEöB6÷W&6RFFö÷&–v–â6÷W&6U÷W&Â6÷W&6U÷6†#SbVÆ—G•÷7FGW2rç7Æ—B‚rr’À¢&W7VÇG3¢w&6Uö–Bf–æ—6…ö÷&FW"çVÖ&W"FFö÷&–v–ârç7Æ—B‚rr’À¢–÷WG3¢w&6Uö–B&WE÷G—R6VÆV7F–öâ–÷WB÷VÆ&—G’FFö÷&–v–ârç7Æ—B‚rr’À¢&VF–7F–öç3¢v–B&6Uö–BÖöFVÅö–BçVÖ&W"&ö&&–Æ—G’&ö%÷7FB&VF–7FVEöBFFö÷&–v–ârç7Æ—B‚rr’À¢F–6¶WE÷&VF–7F–öç3¢v–B&6Uö–BÖöFVÅö–B&WE÷G—R6VÆV7F–öâ&ö&&–Æ—G’&ö%÷7FB&VF–7FVEöBFFö÷&–v–âfVGW&U÷66†VÖ÷fW'6–öâ'F–f7E÷6†#Sbrç7Æ—B‚rr’À¢&öG&6U÷&W&6Uöö'6W'fF–öç3¢v–B&6Uö–B¶–æBVçG'•öçVÖ&W"6÷W&6U÷W&Â6÷W&6U÷6†#Sb6÷W&6Uöö'6W'fVEöB6÷W&6Uöö'6W'fF–öåöÆ&VÂfWF6†VEöBf–Æ&ÆUöBfÇVW5ö§6öâFFö÷&–v–ârç7Æ—B‚rr’À¢ÖöFVÇ3¢v–B7÷'B&WE÷G—RfW'6–öâÆv÷&—F†Ò7FGW2G&–åög&öÒG&–å÷FòfÆ–Eög&öÒfÆ–E÷FòFW7Eög&öÒFW7E÷Fòå÷G&–âÖWG&–75ö§6öâG&–æVEöBæ÷FW2rç7Æ—B‚rr’À¢6öÆÆV7F–öå÷'Vç3¢v–B6÷W&6R7÷'BF&vWEöFFR7F'FVEöBf–æ—6†VEöB7FGW2&V6÷&G2W'&÷"&V6öârç7Æ—B‚rr’À§Ó°¦6öç7BWFFT6öÇVÖç3¢&V6÷&CÇ7G&–ærÇ7G&–æuµÓâÒ°¢fVçVW3¥²w7÷'BrÂvæÖRuÒÀ¢&6W3¢w7÷'BfVçVUö–B&6UöFFR&6UöæòæÖRF—7Fæ6R7W&f6RG&6µö6öæF—F–öâvVF†W"v–æE÷7VVBvfUö†V–v‡B÷7E÷F–ÖR&WGF–æuö7WFöfeöB&WGF–æuö7WFöfe÷6÷W&6R&WGF–æuö7WFöfeöö'6W'fVEöB7FGW2FFö÷&–v–âWFFVEöBrç7Æ—B‚rr’À¢VçG&–W3¢vg&ÖRæÖR¦ö6¶W’G&–æW"vV–v‡Eö6'&–VB†÷'6U÷vV–v‡B&6W%ö6Æ72æF–öæÅ÷v–å÷&FRÆö6Å÷v–å÷&FRÖ÷F÷%öæòÖ÷F÷%ó'&FR&öEöæò&öEó'&FRW††–&—F–öå÷F–ÖR7F'EöW††–&—F–öâfVGW&W5ö§6öâf–Æ&ÆUöBFFö÷&–v–ârç7Æ—B‚rr’À¢öFG5÷6æ6†÷G3¢vöFG26÷W&6RFFö÷&–v–â6÷W&6U÷W&Â6÷W&6U÷6†#SbVÆ—G•÷7FGW2rç7Æ—B‚rr’Â&W7VÇG3¥²vf–æ—6…ö÷&FW"rÂvFFö÷&–v–âuÒÂ&VF–7F–öç3¢w&ö&&–Æ—G’&ö%÷7FBFFö÷&–v–ârç7Æ—B‚rr’À¢F–6¶WE÷&VF–7F–öç3¢w&ö&&–Æ—G’&ö%÷7FBFFö÷&–v–âfVGW&U÷66†VÖ÷fW'6–öâ'F–f7E÷6†#Sbrç7Æ—B‚rr’À¢&öG&6U÷&W&6Uöö'6W'fF–öç3¢w6÷W&6U÷6†#Sb6÷W&6Uöö'6W'fVEöB6÷W&6Uöö'6W'fF–öåöÆ&VÂf–Æ&ÆUöBfÇVW5ö§6öârç7Æ—B‚rr’À¢–÷WG3¢w–÷WB÷VÆ&—G’FFö÷&–v–ârç7Æ—B‚rr’À¢ÖöFVÇ3¢w7÷'B&WE÷G—RfW'6–öâÆv÷&—F†Ò7FGW2G&–åög&öÒG&–å÷FòfÆ–Eög&öÒfÆ–E÷FòFW7Eög&öÒFW7E÷Fòå÷G&–âÖWG&–75ö§6öâG&–æVEöBæ÷FW2rç7Æ—B‚rr’À¢6öÆÆV7F–öå÷'Vç3¢w6÷W&6R7÷'BF&vWEöFFR7F'FVEöBf–æ—6†VEöB7FGW2&V6÷&G2W'&÷"&V6öârç7Æ—B‚rr’À§Ó°¦7–æ2gVæ7F–öâ–ævW7B†3¢ç’ÂæÖS¢7G&–ær’°¢–b‚WF‚†2’’&WGW&â§6öäW'&÷"†2ÂwVæWF†÷&—¦VBrÂC“°¢6öç7B6öæf–rÒ–ævW7EF&ÆW5¶æÖUÒÂ&÷w2Ò'6TÆ—7B†v—B2ç&Wæ§6öâ‚’æ6F6‚‚‚“ÓæçVÆÂ’“°¢–b‚6öæf–rÇÂ&÷w2ÇÂ&÷w2æÆVæwF‚âSÇÂ&÷w2ç6öÖR‡"Óâ6öæf–rç&WV—&VBç6öÖR†²Óâ%¶µÒÓÓÒVæFVf–æVB’’’&WGW&â§6öäW'&÷"†2Âv–çfÆ–B–ÆöB†Ö†–×VÒS&÷w2’r“°¢–b‚†æÖRÓÓÒwfVçVW2rbb&÷w2æÆVæwF‚âS’ÇÂ†æÖRÓÓÒvÖöFVÇ2rbb&÷w2æÆVæwF‚â#’’&WGW&â§6öäW'&÷"†2Âw6ÖÆÂ&VfW&Væ6RöÖöFVÂ&F6†W2öæÇ’r“°¢6öç7BF&ÆRÒ6öæf–rçF&ÆRÂÆÆ÷vVBÒÆÆ÷vVD6öÇVÖç5·F&ÆUÒÂWFFW2ÒWFFT6öÇVÖç5·F&ÆUÓ°¢6öç7BF#¢F"Ò2æVçbäD"Â7FFVÖVçG3¢7FFVÖVçEµÒÒµÓ°¢–b…²vVçG&–W2rÂvöFG5÷6æ6†÷G2rÂw&W7VÇG2rÂw–÷WG2rÂw&VF–7F–öç2rÂwF–6¶WE÷&VF–7F–öç2rÂv&öG&6U÷&W&6Uöö'6W'fF–öç2uÒæ–æ6ÇVFW2‡F&ÆR’’°¢6öç7B&6T–G3Õ²ââææWr6WB‡&÷w2æÖ‡#ÓçG—Vöb"ç&6Uö–CÓÓÒw7G&–ærs÷"ç&6Uö–C¦çVÆÂ’æf–ÇFW"‚‡‚“§‚—27G&–æsÓâ‚’•Ó°¢–b‡&6T–G2æÆVæwF‚’°¢6öç7BV&çF–æVCÖv—Bf—'7CÆç“â†F"Âu4TÄT5B4õTåB‚¢’6÷VçBe$ôÒFF÷&W—%÷V&çF–æVE÷&6W2¤ô”â§6öåöV6‚ƒò’–G2ôâ–G2çfÇVS×ç&6Uö–BrÄ¥4ôâç7G&–æv–g’‡&6T–G2’“°¢–b„çVÖ&W"‡V&çF–æVCòæ6÷VçCóó“ã’&WGW&â§6öäW'&÷"†2Âw6÷W&6RFFf÷"V&çF–æVB&6R6ææ÷B&R–ævW7FVBr“°¢Ğ¢Ğ¢6öç7B7W'&VçEv–æF÷rÒ&6TFFUv–æF÷r‚“°¢6öç7B&÷t6FVv÷'’ÒæWrÖÅ&V6÷&CÇ7G&–ærÂVæ¶æ÷vãâÂw&—FT6FVv÷'“â‚“°¢òò†—7F÷&–6Â&6¶f–ÆÂ—2F—6&ÆVBBF†R’&÷VæF'’âFFR6Æ76–f–6F–öà¢òò6öÖW2g&öÒF†RW'6—7FVB&6R&÷rv†W&Rf–Æ&ÆRÂæWfW"6Æ–VçB&–÷&—G’6Æ–Òà¢f÷"†6öç7B&÷röb&÷w2’°¢ÆWB&6TFFS¢7G&–ærÂçVÆÂÒçVÆÃ°¢ÆWB&6T–C¢7G&–ærÂçVÆÂÒçVÆÃ°¢–b‡F&ÆRÓÓÒw&6W2r’°¢&6T–BÒG—Vöb&÷ræ–BÓÓÒw7G&–ærrò&÷ræ–B¢çVÆÃ°¢6öç7BW†—7F–ærÒ&6T–Bòv—Bf—'7CÆç“â†F"Âu4TÄT5B&6UöFFRÆFFö÷&–v–âe$ôÒ&6W2t„U$R–CÓòrÂ&6T–B’¢çVÆÃ°¢–b‡&6T–Bbbv—Bf—'7CÆç“â†F"Âu4TÄT5B&6Uö–Be$ôÒFF÷&W—%÷V&çF–æVE÷&6W2t„U$R&6Uö–CÓòrÇ&6T–B’’&WGW&â§6öäW'&÷"†2Âw&6R—2V&çF–æVB'’6÷W&6R×&W—"VF—Br“°¢–b†W†—7F–ærbb&÷rç&6UöFFRÓÒVæFVf–æVBbb&÷rç&6UöFFRÓÒW†—7F–ærç&6UöFFR’&WGW&â§6öäW'&÷"†2Âw&6RFFR6ææ÷B&R6†ævVBf÷"âW†—7F–ær&6RrÂC’“°¢–b†W†—7F–ærbb&÷ræFFö÷&–v–âÓÒW†—7F–æræFFö÷&–v–â’&WGW&â§6öäW'&÷"†2Âv–ævW7BFF÷&–v–â×W7BÖF6‚F†RW'6—7FVB&6RrÂC’“°¢6öç7B†47WFöfbÒ&÷ræ&WGF–æuö7WFöfeöBÓÒVæFVf–æVBbb&÷ræ&WGF–æuö7WFöfeöBÓÒçVÆÃ°¢6öç7B†47WFöfe6÷W&6RÒ&÷ræ&WGF–æuö7WFöfe÷6÷W&6RÓÒVæFVf–æVBbb&÷ræ&WGF–æuö7WFöfe÷6÷W&6RÓÒçVÆÃ°¢6öç7B†47WFöfdö'6W'fVDBÒ&÷ræ&WGF–æuö7WFöfeöö'6W'fVEöBÓÒVæFVf–æVBbb&÷ræ&WGF–æuö7WFöfeöö'6W'fVEöBÓÒçVÆÃ°¢–b‚††47WFöfbÇÂ†47WFöfe6÷W&6RÇÂ†47WFöfdö'6W'fVDB’bb‡&÷rç7÷'BÓÒv&öBrÇÂ†47WFöfbÇÂ†47WFöfe6÷W&6RÇÂ†47WFöfdö'6W'fVD@¢ÇÂ&÷ræ&WGF–æuö7WFöfe÷6÷W&6RÓÒE%U5DTEô5UDôdeõ4õU$4P¢ÇÂG—Vöb&÷ræ&WGF–æuö7WFöfeöBÓÒw7G&–ærrÇÂçVÖ&W"æ—4f–æ—FR„FFRç'6R‡&÷ræ&WGF–æuö7WFöfeöB’¢ÇÂG—Vöb&÷ræ&WGF–æuö7WFöfeöö'6W'fVEöBÓÒw7G&–ærrÇÂçVÖ&W"æ—4f–æ—FR„FFRç'6R‡&÷ræ&WGF–æuö7WFöfeöö'6W'fVEöB’’’’°¢&WGW&â§6öäW'&÷"†2Âv&WGF–ær7WFöfb&WV—&W2fÆ–BF–ÖRæBö'6W'fF–öâF–ÖW7F×2v—F‚W‡Æ–6—Böff–6–Â&6VÆ—7B7WFöfb&÷fVææ6Rr“°¢Ğ¢&6TFFRÒG—VöbW†—7F–æsòç&6UöFFRÓÓÒw7G&–ærròW†—7F–ærç&6UöFFR¢G—Vöb&÷rç&6UöFFRÓÓÒw7G&–ærrò&÷rç&6UöFFR¢çVÆÃ°¢ÒVÇ6R–b…²vVçG&–W2rÂvöFG5÷6æ6†÷G2rÂw&W7VÇG2rÂw–÷WG2rÂw&VF–7F–öç2rÂwF–6¶WE÷&VF–7F–öç2rÂv&öG&6U÷&W&6Uöö'6W'fF–öç2uÒæ–æ6ÇVFW2‡F&ÆR’’°¢&6T–BÒG—Vöb&÷rç&6Uö–BÓÓÒw7G&–ærrò&÷rç&6Uö–B¢çVÆÃ°¢6öç7B&6RÒ&6T–Bòv—Bf—'7CÆç“â†F"Âu4TÄT5B7÷'BÇfVçVUö–BÇ&6UöFFRÇ&6UöæòÆFFö÷&–v–âe$ôÒ&6W2t„U$R–CÓòrÂ&6T–B’¢çVÆÃ°¢&6TFFRÒG—Vöb&6Sòç&6UöFFRÓÓÒw7G&–ærrò&6Rç&6UöFFR¢çVÆÃ°¢–b‚&6TFFR’&WGW&â§6öäW'&÷"†2Âv–ævW7B&6R×W7BÇ&VG’W†—7BrÂC’“°¢–b‡&÷ræFFö÷&–v–âÓÒ&6RæFFö÷&–v–â’&WGW&â§6öäW'&÷"†2Âv–ævW7BFF÷&–v–â×W7BÖF6‚F†RW'6—7FVB&6RrÂC’“°¢–b‡F&ÆRÓÓÒv&öG&6U÷&W&6Uöö'6W'fF–öç2r’°¢6öç7BfWF6†VDBÒG—Vöb&÷ræfWF6†VEöBÓÓÒw7G&–ærròFFRç'6R‡&÷ræfWF6†VEöB’¢æã°¢6öç7Bf–Æ&ÆTBÒG—Vöb&÷ræf–Æ&ÆUöBÓÓÒw7G&–ærròFFRç'6R‡&÷ræf–Æ&ÆUöB’¢æã°¢6öç7B6÷W&6Tö'6W'fVDBÒ&÷rç6÷W&6Uöö'6W'fVEöBÓÒçVÆÂòçVÆÂ¢FFRç'6R…7G&–ær‡&÷rç6÷W&6Uöö'6W'fVEöB’“°¢6öç7B†5F–ÖW¦öæRÒ‡fÇVS¢Væ¶æ÷vâ’ÓâG—VöbfÇVRÓÓÒw7G&–ærrbbò…§Å²²ÕÕÆG³'Ó¥ÆG³'Ò’Bö’çFW7B‡fÇVR“°¢6öç7B6÷W&6UW&ÂÒG—Vöb&÷rç6÷W&6U÷W&ÂÓÓÒw7G&–ærrò&÷rç6÷W&6U÷W&Â¢rs°¢ÆWBfÆ–EW&ÂÒfÇ6S°¢G'’°¢6öç7BW&ÂÒæWrU$Â‡6÷W&6UW&Â“°¢fÆ–EW&ÂÒW&Âç&÷Fö6öÂÓÓÒv‡GG3¢rbbW&Âæ†÷7FæÖRÓÓÒwwwræ&öG&6Ræ§p¢bbW&ÂçF†æÖRÓÓÒrö÷w2÷2÷&6Rö&Vf÷&V–æfòp¢bbW&Âç6V&6…&×2ævWB‚v†Br’ÓÓÒ7G&–ær‡&6Sòç&6UöFFRóòrr’ç&WÆ6TÆÂ‚rÒrÂrr¢bbW&Âç6V&6…&×2ævWB‚v¦6Br’ÓÓÒ7G&–ær‡&6SòçfVçVUö–Bóòrr¢bbW&Âç6V&6…&×2ævWB‚w&æòr’ÓÓÒ7G&–ær‡&6Sòç&6Uöæòóòrr“°¢Ò6F6‚²fÆ–EW&ÂÒfÇ6S²Ğ¢ÆWBfÇVW3¢ç“°¢G'’²fÇVW2Ò¥4ôâç'6R…7G&–ær‡&÷rçfÇVW5ö§6öâ’“²Ò6F6‚²fÇVW2ÒçVÆÃ²Ğ¢6öç7BfÇVT¶W—2ÒfÇVW2bbG—VöbfÇVW2ÓÓÒvö&¦V7Brbb'&’æ—4'&’‡fÇVW2’òö&¦V7Bæ¶W—2‡fÇVW2’¢µÓ°¢6öç7BÆÆ÷vVEfÇVW2Ò&÷ræ¶–æBÓÓÒwvVF†W"p¢ò²wvVF†W"rÂwv–æE÷7VVBrÂwv–æEöF—&V7F–öârÂv—%÷FV×W&GW&RrÂwvFW%÷FV×W&GW&RrÂwvfUö†V–v‡BuĞ¢¢²vW††–&—F–öå÷F–ÖRrÂwF–ÇBrÂwvV–v‡BrÂvF§W7FÖVçE÷vV–v‡BrÂw7F'EöW††–&—F–öârÂw7F'EöW††–&—F–öåö6÷W'6RrÂw7F'EöW††–&—F–öåöfÇ6U÷7F'BrÂw&÷VÆÆW%ö6†ævVBuÓ°¢6öç7Bö'6W'fF–öç5fÆ–BÒ&6Sòç7÷'BÓÓÒv&öBrbb&6SòæFFö÷&–v–âÓÓÒw&VÂrbb&÷ræFFö÷&–v–âÓÓÒw&VÂp¢bb²wvVF†W"rÂvW††–&—F–öâuÒæ–æ6ÇVFW2…7G&–ær‡&÷ræ¶–æB’¢bb‚‡&÷ræ¶–æBÓÓÒwvVF†W"rbbçVÖ&W"‡&÷ræVçG'•öçVÖ&W"’ÓÓÒ¢ÇÂ‡&÷ræ¶–æBÓÓÒvW††–&—F–öârbbçVÖ&W"æ—4–çFVvW"„çVÖ&W"‡&÷ræVçG'•öçVÖ&W"’’bbçVÖ&W"‡&÷ræVçG'•öçVÖ&W"’ãÒbbçVÖ&W"‡&÷ræVçG'•öçVÖ&W"’ÃÒb’¢bbfÆ–EW&Âbbõå¶ÖcÓ•×³cGÒBòçFW7B…7G&–ær‡&÷rç6÷W&6U÷6†#Sb’¢bb†5F–ÖW¦öæR‡&÷ræfWF6†VEöB’bb†5F–ÖW¦öæR‡&÷ræf–Æ&ÆUöB¢bb‡&÷rç6÷W&6Uöö'6W'fVEöBÓÒçVÆÂÇÂ†5F–ÖW¦öæR‡&÷rç6÷W&6Uöö'6W'fVEöB’¢bbçVÖ&W"æ—4f–æ—FR†fWF6†VDB’bbçVÖ&W"æ—4f–æ—FR†f–Æ&ÆTB’bbfWF6†VDBÓÓÒf–Æ&ÆT@¢bbfWF6†VDBÃÒFFRææ÷r‚’²3ó ¢bb‡6÷W&6Tö'6W'fVDBÓÓÒçVÆÂÇÂ„çVÖ&W"æ—4f–æ—FR‡6÷W&6Tö'6W'fVDB’bb6÷W&6Tö'6W'fVDBÃÒfWF6†VDBbb6÷W&6Tö'6W'fVDBÃÒFFRææ÷r‚’²3ó’¢bb‡&÷rç6÷W&6Uöö'6W'fF–öåöÆ&VÂÓÒçVÆÂÇÂ‡G—Vöb&÷rç6÷W&6Uöö'6W'fF–öåöÆ&VÂÓÓÒw7G&–ærrbb&÷rç6÷W&6Uöö'6W'fF–öåöÆ&VÂæÆVæwF‚ÃÒ3"’¢bbfÇVT¶W—2æÆVæwF‚bbfÇVT¶W—2æWfW'’†¶W’ÓâÆÆ÷vVEfÇVW2æ–æ6ÇVFW2†¶W’’¢bbfÇVT¶W—2æWfW'’†¶W’ÓâfÇVW5¶¶W•ÒÓÒçVÆÂÇÂ‡G—VöbfÇVW5¶¶W•ÒÓÓÒvçVÖ&W"ròçVÖ&W"æ—4f–æ—FR‡fÇVW5¶¶W•Ò’¢G—VöbfÇVW5¶¶W•ÒÓÓÒw7G&–ærrÇÂG—VöbfÇVW5¶¶W•ÒÓÓÒv&ööÆVâr’“°¢–b‚ö'6W'fF–öç5fÆ–B’&WGW&â§6öäW'&÷"†2Âw&R×&6Rö'6W'fF–öâ&WV—&W2ÖF6†–æröff–6–ÂvRÂ&VÂ&6RÂö'6W'fF–öâF–ÖW7F×ÂæBG—VBfÇVW2r“°¢Ğ¢ÒVÇ6R–b‡F&ÆRÓÓÒv6öÆÆV7F–öå÷'Vç2r’°¢&6TFFRÒG—Vöb&÷rçF&vWEöFFRÓÓÒw7G&–ærrò&÷rçF&vWEöFFR¢çVÆÃ°¢Ğ¢6öç7B÷Vä&WBÒ&6T–Bbb²w&6W2rÂvVçG&–W2rÂw&W7VÇG2rÂw–÷WG2uÒæ–æ6ÇVFW2‡F&ÆR¢òv—Bf—'7CÆç“â†F"Â4TÄT5Be$ôÒ&WG2"¤ô”â&6W2"ôâ"æ–CÖ"ç&6Uö–BäB"æFFö÷&–v–ãÖ"æFFö÷&–v–ât„U$R"ç&6Uö–CÓòäB"ç7FGW3Òv÷VâräBG¶æöåV&çF–æVD&WB‚v"r—ÒÄ”Ô•BÂ&6T–B¢¢çVÆÃ°¢6öç7BV&Æ–W7D66WFVDFFRÒ²ââæ7W'&VçEv–æF÷uÒç6÷'B‚•³Ó°¢–b‡&6TFFRbb&6TFFRÂV&Æ–W7D66WFVDFFRbb÷Vä&WB’°¢&WGW&â2æ§6öâ‡²W'&÷#¢v†—7F÷&–6Â–ævW7B—2F—6&ÆVC²öæÇ’FöF’÷–W7FW&F’FFæB÷VâÖ&WB6WGFÆVÖVçB–çWG2&R66WFVBrÂ6öFS¢v†—7F÷&–6Åö–ævW7EöF—6&ÆVBrÒÂC’“°¢Ğ¢6öç7B7W'&VçE&6TFFÒ&6TFFRbb7W'&VçEv–æF÷ræ†2‡&6TFFR“°¢ÆWB6FVv÷'“¢w&—FT6FVv÷'’Òv÷F–öæÂs°¢–b‡F&ÆRÓÓÒv6öÆÆV7F–öå÷'Vç2rÇÂF&ÆRÓÓÒv&öG&6U÷&W&6Uöö'6W'fF–öç2r’6FVv÷'’Òv6öÆÆV7F–öâs°¢VÇ6R–b†÷Vä&WB’6FVv÷'’ÒvW76VçF–Âs°¢VÇ6R–b†7W'&VçE&6TFFbb²w&6W2rÂvVçG&–W2rÂw&W7VÇG2rÂw–÷WG2uÒæ–æ6ÇVFW2‡F&ÆR’’6FVv÷'’ÒvW76VçF–Âs°¢VÇ6R–b†7W'&VçE&6TFFbb²w&VF–7F–öç2rÂwF–6¶WE÷&VF–7F–öç2uÒæ–æ6ÇVFW2‡F&ÆR’’°¢6öç7BÖöFVÄ–BÒ&÷ræÖöFVÅö–C°¢6öç7BÖöFVÂÒG—VöbÖöFVÄ–BÓÓÒw7G&–ærròv—Bf—'7CÆç“â†F"Âu4TÄT5B7FGW2e$ôÒÖöFVÇ2t„U$R–CÓòrÂÖöFVÄ–B’¢çVÆÃ°¢–b†ÖöFVÃòç7FGW2ÓÓÒv7F—fRr’6FVv÷'’ÒvW76VçF–Âs°¢Ğ¢&÷t6FVv÷'’ç6WB‡&÷rÂ6FVv÷'’“°¢Ğ¢6öç7B6†ævVD'”6FVv÷'“¢&V6÷&CÂvW76VçF–ÂrÂv÷F–öæÂrÂv6öÆÆV7F–öârÂ'F–ÃÅ&V6÷&CÄ–ævW7EF&ÆRÂçVÖ&W#ããâÒ²W76VçF–Ã¢·ÒÂ÷F–öæÃ¢·ÒÂ6öÆÆV7F–öã¢·ÒÓ°¢6öç7B6–FTVffV7G4'”6FVv÷'“¢&V6÷&CÂvW76VçF–ÂrÂv÷F–öæÂrÂv6öÆÆV7F–öârÂçVÖ&W#âÒ²W76VçF–Ã¢Â÷F–öæÃ¢Â6öÆÆV7F–öã¢Ó°¢f÷"†6öç7B&÷röb&÷w2’°¢–b‡F&ÆRÓÓÒw&6W2rbbv—Bf—'7CÆç“â†F"Âu4TÄT5B&6Uö–Be$ôÒFF÷&W—%÷V&çF–æVE÷&6W2t„U$R&6Uö–CÓòrÇ&÷ræ–B’’&WGW&â§6öäW'&÷"†2Âw&6R—2V&çF–æVB'’6÷W&6R×&W—"VF—Br“°¢6öç7BvVæW&FVEWFFVDBÒF&ÆRÓÓÒw&6W2rbb&÷rçWFFVEöBÓÓÒVæFVf–æVC°¢–b†vVæW&FVEWFFVDB’&÷rçWFFVEöBÒæ÷r‚“°¢–b‡F&ÆRÓÓÒvÖöFVÇ2rbb‡&÷rç7FGW2ÓÓÒv7F—fRrÇÂ&÷rç7FGW2ÓÓÒw&WF—&VBr’’°¢6öç7BW†—7F–ærÒv—Bf—'7CÆç“â†2æVçbäD"Âu4TÄT5B7FGW2e$ôÒÖöFVÇ2t„U$R–CÓòrÂ&÷ræ–B“°¢–b‚W†—7F–ærÇÂW†—7F–ærç7FGW2ÓÒ&÷rç7FGW2’&WGW&â§6öäW'&÷"†2Âv–ævW7B6ææ÷B6†ævRÖöFVÂÆ–fV7–6ÆR7FGW2r“°¢Ğ¢–b‡F&ÆRÓÓÒvÖöFVÇ2rbb²v6æF–FFRrÂwVçG&–æVBrÂv7F—fRrÂw&WF—&VBuÒæ–æ6ÇVFW2…7G&–ær‡&÷rç7FGW2’’’&WGW&â§6öäW'&÷"†2Âv–çfÆ–BÖöFVÂ7FGW2r“°¢–b‡F&ÆRÓÓÒwF–6¶WE÷&VF–7F–öç2r’°¢6öç7BÖöFVÂÒv—Bf—'7CÆç“â†F"Âu4TÄT5B7÷'BÆ&WE÷G—RÆÖWG&–75ö§6öâÇG&–æVEöBe$ôÒÖöFVÇ2t„U$R–CÓòrÂ7G&–ær‡&÷ræÖöFVÅö–B’“°¢ÆWBÖWG&–73¢ç“°¢G'’²ÖWG&–72Ò¥4ôâç'6R†ÖöFVÃòæÖWG&–75ö§6öâÇÂw·Òr“²Ò6F6‚²&WGW&â§6öäW'&÷"†2ÂwF–6¶WBÖöFVÂÖWFFF—2–çfÆ–Br“²Ğ¢6öç7B6VÆV7F–öâÒG—Vöb&÷rç6VÆV7F–öâÓÓÒw7G&–ærrò6æöæ–6ÅF–6¶WE6VÆV7F–öâ…7G&–ær‡&÷ræ&WE÷G—R’2&WEG—RÂ&÷rç6VÆV7F–öâ’¢çVÆÃ°¢–b‚ÖöFVÂÇÂÖöFVÂç7÷'BÓÒ†v—Bf—'7CÆç“â†F"Âu4TÄT5B7÷'Be$ôÒ&6W2t„U$R–CÓòrÂ7G&–ær‡&÷rç&6Uö–B’’“òç7÷'@¢ÇÂÖöFVÂæ&WE÷G—RÓÒ&÷ræ&WE÷G—RÇÂ&÷ræ&WE÷G—RÓÓÒwv–âp¢ÇÂÖWG&–72çF–6¶WDÖöFVÅ66†VÖfW'6–öâÓÒD”4´UEôÔôDTÅõ44„TÔ¢ÇÂÖWG&–72çF–6¶WE&VF–7F–öå6VÖçF–72ÓÒD”4´UEõ$ô$$”Ä•E•õ4TÔåD”50¢ÇÂÖWG&–72çF–6¶WD&WEG—RÓÒ&÷ræ&WE÷G—P¢ÇÂG—VöbÖWG&–72çF–6¶WD'F–f7E6†#SbÓÒw7G&–ærp¢ÇÂõå¶ÖcÓ•×³cGÒBòçFW7B†ÖWG&–72çF–6¶WD'F–f7E6†#Sb¢ÇÂ&÷ræfVGW&U÷66†VÖ÷fW'6–öâÓÒD”4´UEôÔôDTÅõ44„TÔ¢ÇÂ&÷ræ'F–f7E÷6†#SbÓÒÖWG&–72çF–6¶WD'F–f7E6†#S`¢ÇÂ6VÆV7F–öâÇÂ6VÆV7F–öâÓÒ&÷rç6VÆV7F–öà¢ÇÂG—Vöb&÷rç&VF–7FVEöBÓÒw7G&–ærrÇÂçVÖ&W"æ—4f–æ—FR„FFRç'6R‡&÷rç&VF–7FVEöB’’ÇÂFFRç'6R‡&÷rç&VF–7FVEöB’âFFRææ÷r‚¢ÇÂÖöFVÂçG&–æVEöBÇÂçVÖ&W"æ—4f–æ—FR„FFRç'6R†ÖöFVÂçG&–æVEöB’’ÇÂFFRç'6R†ÖöFVÂçG&–æVEöB’ãÒFFRç'6R‡&÷rç&VF–7FVEöB¢ÇÂG—Vöb&÷rç&ö&&–Æ—G’ÓÒvçVÖ&W"rÇÂçVÖ&W"æ—4f–æ—FR‡&÷rç&ö&&–Æ—G’’ÇÂ&÷rç&ö&&–Æ—G’ÂÇÂ&÷rç&ö&&–Æ—G’â¢ÇÂ‡&÷rç&ö%÷7FBÓÒVæFVf–æVBbb&÷rç&ö%÷7FBÓÒçVÆÂbb‚çVÖ&W"æ—4f–æ—FR‡&÷rç&ö%÷7FB’ÇÂçVÖ&W"‡&÷rç&ö%÷7FB’Â’’’°¢&WGW&â§6öäW'&÷"†2ÂwF–6¶WB&VF–7F–öâFöW2æ÷BÖF6‚6ö×F–&ÆRW†7B×G—RÖöFVÂ6öçG&7Br“°¢Ğ¢Ğ¢6öç7B6öÇ2Òö&¦V7Bæ¶W—2‡&÷r’æf–ÇFW"†²ÓâÆÆ÷vVBæ–æ6ÇVFW2†²’bb&÷u¶µÒÓÒVæFVf–æVB“°¢–b†6öæf–rç&WV—&VBç6öÖR†²Óâ6öÇ2æ–æ6ÇVFW2†²’’’&WGW&â§6öäW'&÷"†2ÂvÖ—76–ær&WV—&VBf–VÆG2r“°¢òò”G2æB6W'fW"ÖvVæW&FVBWFFVEöB&Ræ÷BæGW&ÂÖ¶W’FF²fö–@¢òòÖçVf7GW&–ærw&—FW2v†VââW7G&VÒ&WG'’&WVG2â–FVçF–6Â&÷rà¢6öç7BWFFT6öÇ2ÒWFFW2æf–ÇFW"†³Óæ6öÇ2æ–æ6ÇVFW2†²’bb²ÓÒv–Br“°¢6öç7B'W6–æW75WFFT6öÇ2ÒWFFT6öÇ2æf–ÇFW"†²Óâ²ÓÒwWFFVEöBr“°¢6öç7B¶W”6öÇ2Ò6öæf–ræ6öæfÆ–7Bç7Æ—B‚rÂr“°¢6öç7B¶W•fÇVW2Ò¶W”6öÇ2æÖ†²Óâ&÷u¶µÒ“°¢6öç7B&Wf–÷W2Òv—Bf—'7CÆç“â†F"Â4TÄT5B¢e$ôÒG·F&ÆWÒt„U$RG¶¶W”6öÇ2æÖ†³ÓæG¶·ÓÓö’æ¦ö–â‚räBr—ÖÂââæ¶W•fÇVW2“°¢ÆWB6†ævVBÒ&Wf–÷W3°¢–b‡&Wf–÷W2’°¢–b‡F&ÆRÓÓÒvÖöFVÇ2rbb‡&Wf–÷W2ç7FGW2ÓÓÒv7F—fRrÇÂ&Wf–÷W2ç7FGW2ÓÓÒw&WF—&VBr’’6†ævVBÒfÇ6S°¢VÇ6R6†ævVBÒ'W6–æW75WFFT6öÇ2ç6öÖR†²Óâ°¢–b‡F&ÆRÓÓÒw&6W2rbb²ÓÓÒw7FGW2rbb²vf–æ—6†VBrÂv6æ6VÆÆVBuÒæ–æ6ÇVFW2‡&Wf–÷W2ç7FGW2’’&WGW&âfÇ6S°¢&WGW&â&Wf–÷W5¶µÒÓÒ&÷u¶µÒbb‡&Wf–÷W5¶µÒÓÒçVÆÂbb&÷u¶µÒÓÒçVÆÂ“°¢Ò“°¢Ğ¢–b†6†ævVB’°¢6öç7B–ævW7EF&ÆRÒF&ÆR2–ævW7EF&ÆS°¢6öç7B&÷u&–÷&—G’Ò&÷t6FVv÷'’ævWB‡&÷r“°¢6öç7B6FVv÷'’Ò&÷u&–÷&—G’ÓÓÒvW76VçF–ÂrÇÂ&÷u&–÷&—G’ÓÓÒv6öÆÆV7F–öârò&÷u&–÷&—G’¢v÷F–öæÂs°¢6†ævVD'”6FVv÷'•¶6FVv÷'•Õ¶–ævW7EF&ÆUÒÒ†6†ævVD'”6FVv÷'•¶6FVv÷'•Õ¶–ævW7EF&ÆUÒóò’²°¢Ğ¢6öç7BWFFU6WBÒWFFT6öÇ2æÖ†³ÓæG¶·ÓÖW†6ÇVFVBâG¶·Ö“°¢–b‡F&ÆRÓÓÒw&6W2rbb6öÇ2æ–æ6ÇVFW2‚w7FGW2r’’WFFU6WE·WFFU6WBæ–æFW„öb‚w7FGW3ÖW†6ÇVFVBç7FGW2r•ÒÒ'7FGW3Ô44Rt„Tâ&6W2ç7FGW2”â‚vf–æ—6†VBrÂv6æ6VÆÆVBr’D„Tâ&6W2ç7FGW2TÅ4RW†6ÇVFVBç7FGW2TäB#°¢6öç7BwV&DW‡"Ò†³¢7G&–ær’ÓâF&ÆRÓÓÒw&6W2rbb²ÓÓÒw7FGW2p¢ò44Rt„Tâ&6W2ç7FGW2”â‚vf–æ—6†VBrÂv6æ6VÆÆVBr’D„Tâ&6W2ç7FGW2TÅ4RW†6ÇVFVBç7FGW2TäB•2äõB&6W2ç7FGW6 ¢¢G·F&ÆWÒâG¶·Ò•2äõBW†6ÇVFVBâG¶·Ö°¢6öç7Bæô÷wV&BÒ'W6–æW75WFFT6öÇ2æÆVæwF‚ò‚G¶'W6–æW75WFFT6öÇ2æÖ†wV&DW‡"’æ¦ö–â‚rõ"r—Ò–¢ss°¢6öç7BWFFUv†W&RÒF&ÆRÓÓÒvÖöFVÇ2ròt„U$RÖöFVÇ2ç7FGW2äõB”â‚v7F—fRrÂw&WF—&VBr’äBG¶æô÷wV&GÖ¢t„U$RG¶æô÷wV&GÖ°¢6öç7B7ÂÒ”å4U%B”åDòG·F&ÆWÒ‚G¶6öÇ2æ¦ö–â‚rÂr—Ò’dÅTU2‚G¶6öÇ2æÖ‚‚“Óâsòr’æ¦ö–â‚rÂr—Ò’ôâ4ôädÄ”5B‚G¶6öæf–ræ6öæfÆ–7GÒ’DòUDDR4UBG·WFFU6WBæ¦ö–â‚rÂr’ÇÂG¶6öæf–ræ6öæfÆ–7Bç7Æ—B‚rÂr•³×ÓÖW†6ÇVFVBâG¶6öæf–ræ6öæfÆ–7Bç7Æ—B‚rÂr•³×ÖÒG·WFFUv†W&WÖ°¢–b†6†ævVB’7FFVÖVçG2çW6‚†F"ç&W&R‡7Â’æ&–æB‚ââæ6öÇ2æÖ†³Óç&÷u¶µÒ’’“°¢Ğ¢òò{YiéÎ8;¾h™^h‹¾8îXZ^8>8ş8:Î8;Î8+8).z+®Zé®8¾88(¾ûÈ„C8îi»8Ş‹ëÎ8şŠÎi[8).h©88(¾8ş8(8:Î8;Î8+XÙKØŞ8sY¹î8iÊ®z+®Zé®8î8(.8î88ûÈ¢–b†æÖRÓÓÒw–÷WG2rÇÂæÖRÓÓÒw&W7VÇG2r’°¢f÷"†6öç7B–BöbæWr6WB‡&÷w2æÖ‡"Óâ7G&–ær‡"ç&6Uö–B’’’’°¢6öç7B&6RÒv—Bf—'7CÆç“â†F"Â%4TÄT5Be$ôÒ&6W2t„U$R–CÓòäB7FGW2äõB”â‚vf–æ—6†VBrÂv6æ6VÆÆVBr’"Â–B“°¢–b‡&6R’²7FFVÖVçG2çW6‚†F"ç&W&R‚%UDDR&6W24UB7FGW3Òvf–æ—6†VBrt„U$R–CÓòäB7FGW2äõB”â‚vf–æ—6†VBrÂv6æ6VÆÆVBr’"’æ&–æB†–B’“°¢6öç7B6FVv÷'’Ò&÷t6FVv÷'’ævWB‡&÷w2æf–æB‡"Óâ7G&–ær‡"ç&6Uö–B’ÓÓÒ–B’’ÓÓÒvW76VçF–ÂròvW76VçF–Âr¢v÷F–öæÂs°¢6–FTVffV7G4'”6FVv÷'•¶6FVv÷'•Ò²³²Ğ¢Ğ¢Ğ¢6öç7B6†ævVE&÷w2Ò„ö&¦V7BçfÇVW2†6†ævVD'”6FVv÷'’æW76VçF–Â’ç&VGV6R‚‡7VÒÂ6÷VçB’Óâ7VÒ²†6÷VçBóò’Â’°¢ö&¦V7BçfÇVW2†6†ævVD'”6FVv÷'’æ6öÆÆV7F–öâ’ç&VGV6R‚‡7VÒÂ6÷VçB’Óâ7VÒ²†6÷VçBóò’Â’°¢ö&¦V7BçfÇVW2†6†ævVD'”6FVv÷'’æ÷F–öæÂ’ç&VGV6R‚‡7VÒÂ6÷VçB’Óâ7VÒ²†6÷VçBóò’Â’²6–FTVffV7G4'”6FVv÷'’æW76VçF–Â²6–FTVffV7G4'”6FVv÷'’æ÷F–öæÂ“°¢6öç7B&W6W'fF–öç2Ò…²vW76VçF–ÂrÂv6öÆÆV7F–öârÂv÷F–öæÂuÒ26öç7B’æfÆDÖ†6FVv÷'’Óâ°¢6öç7B6÷VçG2Ò6†ævVD'”6FVv÷'•¶6FVv÷'•ÒÂ6–FTVffV7G2Ò6–FTVffV7G4'”6FVv÷'•¶6FVv÷'•Ó°¢6öç7B&÷w4–ä6FVv÷'’Òö&¦V7BçfÇVW2†6÷VçG2’ç&VGV6R‚‡7VÒÂ6÷VçB’Óâ7VÒ²†6÷VçBóò’Â’²6–FTVffV7G3°¢&WGW&â&÷w4–ä6FVv÷'’âò·²Væ—G3¢W7F–ÖFT–ævW7Ew&—FUVæ—G2†6÷VçG2Â6–FTVffV7G2’Â6FVv÷'’ÕÒ¢µÓ°¢Ò“°¢–b‡&W6W'fF–öç2æÆVæwF‚bbv—B&W6W'fUw&—FT'VFvWG2†F"ÂWF4FFR‚’Â&W6W'fF–öç2’’°¢6öç7B'VFvWBÒv—B&VEw&—FT'VFvWB†F"“°¢&WGW&â2æ§6öâ‡²W'&÷#¢vF–Ç’Cw&—FR'VFvWBVæf–Æ&ÆR÷"W††W7FVBrÂ6öFS¢'VFvWBç7FFRÓÓÒvÖ—76–ærrÇÂ'VFvWBç7FFRÓÓÒv–çfÆ–BròvC÷w&—FUö'VFvWE÷Væf–Æ&ÆRr¢vC÷w&—FUö'VFvWEöW††W7FVBrÂ'VFvWBÒÂC#’“°¢Ğ¢òòC&F6‚8ó888:8;>8+n8*ş8+~8:~8;>8~ZéşŠÎ8^8(Î8(¾ûÈŠÎ8N88î[è[ê8).˜ş88(¾ûÈ¢–b‡7FFVÖVçG2æÆVæwF‚’°¢–b†F"æ&F6‚’v—BF"æ&F6‚‡7FFVÖVçG2“²VÇ6Rf÷"†6öç7B2öb7FFVÖVçG2’v—B2ç'Vâ‚“°¢Ğ¢&WGW&â2æ§6öâ‡²W6W'FVC¢&÷w2æÆVæwF‚Â6†ævVC¢6†ævVE&÷w2Ò“°§Ğ¦7–æ2gVæ7F–öâ6WGFÆT÷Vâ†F#¢F"’°¢6öç7B&WG2Òv—BÆÃÆç“â†F"Â4TÄT5B"â¢Â"ç7FGW22&6U÷7FGW2Â"æFFö÷&–v–â2&6Uö÷&–v–âe$ôÒ&WG2"¤ô”â&6W2"ôâ"æ–CÖ"ç&6Uö–Bt„U$R"ç7FGW3Òv÷VâräB"ç7FGW2”â‚vf–æ—6†VBrÂv6æ6VÆÆVBr’äB"æFFö÷&–v–ã×"æFFö÷&–v–âäBäõBU„•5E2…4TÄT5Be$ôÒFF÷&W—%÷V&çF–æVE÷&6W2t„U$Rç&6Uö–C×"æ–B’äBG¶æöåV&çF–æVD&WB‚—Ö“°¢ÆWB6WGFÆVBÒ°¢f÷"†6öç7B"öb&WG2’°¢–b†"ç&6U÷7FGW2ÓÓÒv6æ6VÆÆVBr’°¢–b‚v—B&W6W'fUv÷&¶W%w&—FW2†F"Â’’'&V³°¢6öç7B&W7VÇBÒv—B'Vâ†F"ÂUDDR&WG24UB7FGW3Òwfö–BrÇ–÷WCÓÇ&öf—CÓÇ6WGFÆVEöCÓòt„U$R–CÓòäB7FGW3Òv÷VâvÂæ÷r‚’Â"æ–B“°¢6WGFÆVB³ÒçVÖ&W"‡&W7VÇBæÖWFòæ6†ævW2óò“²6öçF–çVS°¢Ğ¢6öç7B–çFVw&—G’Òv—Bf—'7CÆç“â†F"Â4TÄT5@¢…4TÄT5B4õTåB‚¢’e$ôÒVçG&–W2Rt„U$RRç&6Uö–CÓòäBRæFFö÷&–v–ãÓò’VçG'•ö6÷VçBÀ¢…4TÄT5B4õTåB‚¢’e$ôÒVçG&–W2Rt„U$RRç&6Uö–CÓòäBRæFFö÷&–v–ãÓòäBG·FW&Ö–æÄf–æ—6„6öFU7ÇÒ’FW&Ö–æÅöVçG'•ö6÷VçBÀ¢…4TÄT5B4õTåB‚¢’e$ôÒ&W7VÇG2&W2t„U$R&W2ç&6Uö–CÓòäB&W2æFFö÷&–v–ãÓò’&W7VÇEö6÷VçBÀ¢…4TÄT5B4õTåB„D•5D”ä5B&W2æçVÖ&W"’e$ôÒ&W7VÇG2&W2t„U$R&W2ç&6Uö–CÓòäB&W2æFFö÷&–v–ãÓò’F—7F–æ7E÷&W7VÇEö6÷VçBÀ¢…4TÄT5B4õTåB‚¢’e$ôÒ&W7VÇG2&W2t„U$R&W2ç&6Uö–CÓòäB&W2æFFö÷&–v–ãÓòäBU„•5E2€¢4TÄT5Be$ôÒVçG&–W2Rt„U$RRç&6Uö–C×&W2ç&6Uö–BäBRæçVÖ&W#×&W2æçVÖ&W"äBRæFFö÷&–v–ã×&W2æFFö÷&–v–à¢’’ÖF6†VE÷&W7VÇEö6÷VçBÀ¢…4TÄT5B4õTåB‚¢’e$ôÒ&W7VÇG2&W2t„U$R&W2ç&6Uö–CÓòäB&W2æFFö÷&–v–ãÓòäB&W2æf–æ—6…ö÷&FW#Ó’v–ææW%ö6÷VçBÀ¢…4TÄT5B4õTåB‚¢’e$ôÒ&W7VÇG2&W2¤ô”â–÷WG2ôâç&6Uö–C×&W2ç&6Uö–@¢äBæFFö÷&–v–ã×&W2æFFö÷&–v–âäBæ&WE÷G—SÒwv–âp¢äBç6VÆV7F–öãÔ45B‡&W2æçVÖ&W"2DU…B’äBç–÷WCã ¢t„U$R&W2ç&6Uö–CÓòäB&W2æFFö÷&–v–ãÓòäB&W2æf–æ—6…ö÷&FW#Ó’–E÷v–ææW%ö6÷VçBÀ¢…4TÄT5B4õTåB‚¢’e$ôÒ–÷WG2t„U$Rç&6Uö–CÓòäBæFFö÷&–v–ãÓòäBæ&WE÷G—SÓòäBç–÷WCã’F–6¶WE÷–÷WEö6÷VçBÀ¢…4TÄT5B4õTåB‚¢’e$ôÒ–÷WG2t„U$Rç&6Uö–CÓòäBæFFö÷&–v–ãÓòäBæ&WE÷G—SÒwv–âräBç–÷WCãäBäõBU„•5E2€¢4TÄT5Be$ôÒ&W7VÇG2&W2t„U$R&W2ç&6Uö–C×ç&6Uö–BäB&W2æFFö÷&–v–ã×æFFö÷&–v–âäB&W2æf–æ—6…ö÷&FW#ÓäBç6VÆV7F–öãÔ45B‡&W2æçVÖ&W"2DU…B’’’æöçv–ææW%÷v–å÷–÷WEö6÷VçBÀ¢…4TÄT5B44Rt„Tâ§6öå÷fÆ–B†RæfVGW&W5ö§6öâ’D„Tâ§6öåöW‡G&7B†RæfVGW&W5ö§6öâÂrBæf–æ—6…ö6öFRr’TäBe$ôÒVçG&–W2Rt„U$RRç&6Uö–CÓòäBRæFFö÷&–v–ãÓòäB45B†RæçVÖ&W"2DU…B“ÓòÄ”Ô•B’6VÆV7FVEöf–æ—6…ö6öFVÀ¢"ç&6Uö–BÆ"æFFö÷&–v–âÆ"ç&6Uö–BÆ"æFFö÷&–v–âÆ"ç&6Uö–BÆ"æFFö÷&–v–âÆ"ç&6Uö–BÆ"æFFö÷&–v–âÆ"ç&6Uö–BÆ"æFFö÷&–v–âÀ¢"ç&6Uö–BÆ"æFFö÷&–v–âÆ"ç&6Uö–BÆ"æFFö÷&–v–âÆ"ç&6Uö–BÆ"æFFö÷&–v–âÆ"æ&WE÷G—RÆ"ç&6Uö–BÆ"æFFö÷&–v–âÆ"ç&6Uö–BÆ"æFFö÷&–v–âÆ"ç6VÆV7F–öâ“°¢–b‚–çFVw&—G’ÇÂ–çFVw&—G’æVçG'•ö6÷VçBÃÒ ¢ÇÂ–çFVw&—G’ç&W7VÇEö6÷VçB²–çFVw&—G’çFW&Ö–æÅöVçG'•ö6÷VçBÓÒ–çFVw&—G’æVçG'•ö6÷Vç@¢ÇÂ–çFVw&—G’æF—7F–æ7E÷&W7VÇEö6÷VçBÓÒ–çFVw&—G’ç&W7VÇEö6÷Vç@¢ÇÂ–çFVw&—G’æÖF6†VE÷&W7VÇEö6÷VçBÓÒ–çFVw&—G’ç&W7VÇEö6÷Vç@¢ÇÂ–çFVw&—G’çv–ææW%ö6÷VçBÃÒ ¢ÇÂ†"æ&WE÷G—RÓÓÒwv–ârbb–çFVw&—G’ææöçv–ææW%÷v–å÷–÷WEö6÷VçBâ¢ÇÂ†"æ&WE÷G—RÓÓÒwv–ârò–çFVw&—G’ç–E÷v–ææW%ö6÷VçBÓÒ–çFVw&—G’çv–ææW%ö6÷VçB¢–çFVw&—G’çF–6¶WE÷–÷WEö6÷VçBÃÒ’’6öçF–çVS°¢–b†"æ&WE÷G—RÓÓÒwG&–fV7Fr’°¢6öç7BgVÆÄ÷&FW"Òv—BÆÃÆç“â†F"Âu4TÄT5BçVÖ&W"Æf–æ—6…ö÷&FW"e$ôÒ&W7VÇG2t„U$R&6Uö–CÓòäBFFö÷&–v–ãÓòõ$DU"%’f–æ—6…ö÷&FW"ÆçVÖ&W"rÂ"ç&6Uö–BÂ"æFFö÷&–v–â“°¢–b†–çFVw&—G’æVçG'•ö6÷VçBÓÒbÇÂ–çFVw&—G’çv–ææW%ö6÷VçBÓÒÇÂgVÆÄ÷&FW"æÆVæwF‚ÓÒ`¢ÇÂgVÆÄ÷&FW"ç6öÖR‚‡ƒ¢ç’Â“¢çVÖ&W"’Óâ‚æf–æ—6…ö÷&FW"ÓÒ’²’’6öçF–çVS°¢6öç7Bv–ææ–æu6VÆV7F–öâÒgVÆÄ÷&FW"ç6Æ–6RƒÃ2’æÖ‚‡ƒ¢ç’’Óâ7G&–ær‡‚æçVÖ&W"’’æ¦ö–â‚rÒr“°¢6öç7BG&–fV7F–÷WG2Òv—BÆÃÆç“â†F"Â%4TÄT5B6VÆV7F–öâÇ–÷WBe$ôÒ–÷WG2t„U$R&6Uö–CÓòäBFFö÷&–v–ãÓòäB&WE÷G—SÒwG&–fV7FräB–÷WCã"Â"ç&6Uö–BÂ"æFFö÷&–v–â“°¢–b‡G&–fV7F–÷WG2æÆVæwF‚ÓÒÇÂG&–fV7F–÷WG5³Òç6VÆV7F–öâÓÒv–ææ–æu6VÆV7F–öâ’6öçF–çVS°¢ÒVÇ6R–b†"æ&WE÷G—RÓÒwv–âr’°¢òò÷F†W"F–6¶WB6WGFÆVÖVçB6VÖçF–72&WV—&RF†V—"÷vâW†7B÷WF6öÖP¢òò6öçG&7C²ÆVfR†—7F÷&–6ÂöÖçVÂ&÷w2÷Vâ&F†W"F†âwVW76–ærà¢6öçF–çVS°¢Ğ¢6öç7B’Òv—Bf—'7CÆç“â†F"Âu4TÄT5B–÷WBe$ôÒ–÷WG2t„U$R&6Uö–CÓòäBFFö÷&–v–ãÓòäB&WE÷G—SÓòäB6VÆV7F–öãÓòäB–÷WCãrÂ"ç&6Uö–BÂ"æFFö÷&–v–âÂ"æ&WE÷G—RÂ"ç6VÆV7F–öâ“°¢òò&V6÷&FVBfÇ6R×7F'BòF—7VÆ–f–6F–öâFöW2æ÷BW7F&Æ—6‚v†WF†W ¢òòF†—2W†7BF–6¶WBv2&VgVæFVBâFòæ÷BGW&âÖ—76–ær&VgVæBWf–FVæ6R–çFğ¢òòÆ÷73²¶VWF†B&WB÷Vâv†–ÆR÷F†W"ÂgVÆÇ’Wf–FVæ6VB–6·26â6WGFÆRà¢–b†"æ&WE÷G—RÓÓÒwv–ârbb—5FW&Ö–æÄf–æ—6„6öFR†–çFVw&—G’ç6VÆV7FVEöf–æ—6…ö6öFR’bb’’6öçF–çVS°¢6öç7BfÇVW2Ò6WGFÆUfÇVW2†"ç7F¶RÂ“òç–÷WBóòçVÆÂÂ’“°¢6öç7BWdÆ÷7BÒ"æW‡V7FVE÷&ö’âbbfÇVW2æf–æÄöFG2ÓÒçVÆÂbb"ç&VF–7FVE÷&ö"¢fÇVW2æf–æÄöFG2ÒÃÒ°¢–b‚v—B&W6W'fUv÷&¶W%w&—FW2†F"ÂWdÆ÷7Bò"¢’’'&V³°¢6öç7B&W7VÇBÒv—B'Vâ†F"ÂUDDR&WG24UB7FGW3ÓòÇ–÷WCÓòÇ&öf—CÓòÆf–æÅööFG3ÓòÇ6WGFÆVEöCÓòt„U$R–CÓòäB7FGW3Òv÷VâvÂ’òwvöâr¢vÆ÷7BrÂfÇVW2ç–÷WBÂfÇVW2ç&öf—BÂfÇVW2æf–æÄöFG2Âæ÷r‚’Â"æ–B“°¢–b„çVÖ&W"‡&W7VÇBæÖWFòæ6†ævW2óò’â’°¢–b†WdÆ÷7B’v—B'Vâ†F"ÂUDDR&WG24UBWeöÆ÷7CÓt„U$R–CÓòäBWeöÆ÷7CÃãÂ"æ–B“°¢6WGFÆVB²³°¢Ğ¢Ğ¢&WGW&â6WGFÆVC°§Ğ¦gVæ7F–öâ&–Ö'•W%F–Ö–ær†7WFöfdC¢7G&–ærÂçVÆÂÂVæFVf–æVBÂFV6—6–öäC¢çVÖ&W"Â7WFöfe6÷W&6Só¢7G&–ærÂçVÆÂÂ7WFöfdö'6W'fVDCó¢7G&–ærÂçVÆÂ’°¢6öç7B7WFöfd×2Ò7WFöfdBòFFRç'6R†7WFöfdB’¢çVÖ&W"äæã°¢6öç7Bö'6W'fVD×2Ò7WFöfdö'6W'fVDBòFFRç'6R†7WFöfdö'6W'fVDB’¢çVÖ&W"äæã°¢–b†7WFöfe6÷W&6RÓÒE%U5DTEô5UDôdeõ4õU$4RÇÂçVÖ&W"æ—4f–æ—FR†7WFöfd×2’ÇÂçVÖ&W"æ—4f–æ—FR†ö'6W'fVD×2’’&WGW&â²VÆ–v–&ÆS¢fÇ6RÂ&V6öã¢vÖ—76–æuö÷%ö–çfÆ–Eö7WFöfbrÂ7WFöfd×3¢çVÆÂÂF&vWD×3¢çVÆÂÂ6V6öæG4&Vf÷&T7WFöfc¢çVÆÂÂF&vWDFVÇF6V6öæG3¢çVÆÂÓ°¢–b†ö'6W'fVD×2âFV6—6–öäB²Uó’&WGW&â²VÆ–v–&ÆS¢fÇ6RÂ&V6öã¢vgWGW&Uö7WFöfeöö'6W'fF–öârÂ7WFöfd×2ÂF&vWD×3¢7WFöfd×2Ò$”Ô%•õU%ôôde4UEôÕ2Â6V6öæG4&Vf÷&T7WFöfc¢çVÆÂÂF&vWDFVÇF6V6öæG3¢çVÆÂÓ°¢–b†FV6—6–öäBÒö'6W'fVD×2â$ôE$4Uô5UDôdeôÔ…ôtUôÕ2’&WGW&â²VÆ–v–&ÆS¢fÇ6RÂ&V6öã¢w7FÆUö7WFöfeöWf–FVæ6RrÂ7WFöfd×2ÂF&vWD×3¢7WFöfd×2Ò$”Ô%•õU%ôôde4UEôÕ2Â6V6öæG4&Vf÷&T7WFöfc¢çVÆÂÂF&vWDFVÇF6V6öæG3¢çVÆÂÓ°¢6öç7BF&vWD×2Ò7WFöfd×2Ò$”Ô%•õU%ôôde4UEôÕ3°¢6öç7BFVÇFÒFV6—6–öäBÒF&vWD×3°¢6öç7B6V6öæG4&Vf÷&T7WFöfbÒ†7WFöfd×2ÒFV6—6–öäB’ò°¢6öç7BF&vWDFVÇF6V6öæG2ÒFVÇFò°¢–b„ÖF‚æ'2†FVÇF’ÃÒ$”Ô%•õU%õDôÄU$ä4UôÕ2’&WGW&â²VÆ–v–&ÆS¢G'VRÂ&V6öã¢çVÆÂÂ7WFöfd×2ÂF&vWD×2Â6V6öæG4&Vf÷&T7WFöfbÂF&vWDFVÇF6V6öæG2Ó°¢&WGW&â²VÆ–v–&ÆS¢fÇ6RÂ&V6öã¢FVÇFâ$”Ô%•õU%õDôÄU$ä4UôÕ2òvÖ—76VE÷F–Ö–ærr¢væ÷EöGVRrÂ7WFöfd×2ÂF&vWD×2Â6V6öæG4&Vf÷&T7WFöfbÂF&vWDFVÇF6V6öæG2Ó°§Ğ¦gVæ7F–öâfÆ–E&ö&&–Æ—G’‡fÇVS¢Væ¶æ÷vâ“¢&ööÆVâ°¢&WGW&âfÇVRÓÒçVÆÂbbfÇVRÓÒVæFVf–æVBbbçVÖ&W"æ—4f–æ—FR„çVÖ&W"‡fÇVR’’bbçVÖ&W"‡fÇVR’ãÒbbçVÖ&W"‡fÇVR’ÃÒ°§Ğ¦gVæ7F–öâfÆ–EVæ6W'F–çG’‡fÇVS¢Væ¶æ÷vâ“¢&ööÆVâ°¢&WGW&âfÇVRÓÒçVÆÂbbfÇVRÓÒVæFVf–æVBbbçVÖ&W"æ—4f–æ—FR„çVÖ&W"‡fÇVR’’bbçVÖ&W"‡fÇVR’ãÒ°§Ğ¦gVæ7F–öâW$'7FVçF–öå&V6öâ‡&÷w3¢ç•µÒ“¢7G&–ær°¢–b‚&÷w2æÆVæwF‚’&WGW&âv7F—fUöÖöFVÅ÷&VF–7F–öå÷Væf–Æ&ÆRs°¢–b‡&÷w2ç6öÖR‡&÷rÓâfÆ–E&ö&&–Æ—G’‡&÷rç&ö&&–Æ—G’’’’&WGW&âv–çfÆ–E÷&ö&&–Æ—M´ëŞ­¢G§²ÚîÆ­yÑÍÑ…ÑÕÌéˆ¹ÍÑ…ÑÕÌ±Á…å½ÕĞéˆ¹Á…å½ÕĞüı¹Õ±°±ÁÉ½™¥Ğéˆ¹ÁÉ½™¥Ğüı¹Õ±°±™¥¹…±=‘‘Ìéˆ¹™¥¹…±}½‘‘Ìüı¹Õ±°±Í•ÑÑ±•‘Ğéˆ¹Í•ÑÑ±•‘}…Ğüı¹Õ±°±‘…Ñ…=É¥¥¸éˆ¹‘…Ñ…}½É¥¥¸±É½ÕÁ%éˆ¹‰•Ñ}É½ÕÁ}¥üı¹Õ±°±…¹‘¥‘…Ñ•I…¹¬éˆ¹…¹‘¥‘…Ñ•}É…¹¬üı¹Õ±°±…¹‘¥‘…Ñ•½Õ¹Ğéˆ¹…¹‘¥‘…Ñ•}½Õ¹Ğüı¹Õ±°±½‘‘Í…ÁÑÕÉ•‘Ğéˆ¹½‘‘Í}…ÁÑÕÉ•‘}…Ğüı¹Õ±°±ÁÉ•‘¥Ñ•‘ÑÑ	•Ğéˆ¹ÁÉ•‘¥Ñ•‘}…Ñ}…Ñ}‰•Ğüı¹Õ±°±‘•¥Í¥½¹A¡…Í”éˆ¹‘•¥Í¥½¹}Á¡…Í”üı¹Õ±°±É•ÍÕ±Ñ]…¥ÑI•…Í½¸éˆ¹É…•}ÍÑ…ÑÕÌôõ¹Õ±°ıÕ¹‘•™¥¹•éÉ•ÍÕ±Ñ]…¥ÑI•…Í½¸¡ˆ¤±É•ÍÕ±Ñ½±±•Ñ¥½¹M½ÕÉ”éˆ¹É•ÍÕ±Ñ}½±±•Ñ¥½¹}Í½ÕÉ”üı¹Õ±°±É•ÍÕ±Ñ½±±•Ñ¥½¹MÑ…ÑÕÌéˆ¹É•ÍÕ±Ñ}½±±•Ñ¥½¹}ÍÑ…ÑÕÌüı¹Õ±°±É•ÍÕ±Ñ½±±•Ñ¥½¹1…ÍÑÑÑ•µÁÑĞéˆ¹É•ÍÕ±Ñ}½±±•Ñ¥½¹}±…ÍÑ}…ÑÑ•µÁÑ}…Ğüı¹Õ±°±É•ÍÕ±Ñ½±±•Ñ¥½¹1…ÍÑMÕ•ÍÍĞéˆ¹É•ÍÕ±Ñ}½±±•Ñ¥½¹}±…ÍÑ}ÍÕ•ÍÍ}…Ğüı¹Õ±±ôíô)…Íå¹Œ™Õ¹Ñ¥½¸ÅÕ…É…¹Ñ¥¹•MÕµµ…Éä¡‘ˆèˆ°ÍÁ½ÉĞèÍÑÉ¥¹œğ¹Õ±°°½É¥¥¸èÍÑÉ¥¹œğ¹Õ±°¤ì(É•ÑÕÉ¸…İ…¥Ğ™¥ÉÍĞñ…¹äø¡‘ˆ°M1P=U9P ¨¤½Õ¹Ğ±=1M¡MU4¡ˆ¹ÍÑ…­”¤°À¤ÍÑ…­”±=1M¡MU4¡ˆ¹Á…å½ÕĞ¤°À¤Á…å½ÕĞ±=1M¡MU4¡ˆ¹ÁÉ½™¥Ğ¤°À¤ÁÉ½™¥ĞI=4‰•ÑÌˆ]!Ia%MQL¡M1P€ÄI=4‘…Ñ…}É•Á…¥É}…Õ‘¥Ñ}µ…É­ÌÄ]!IÄ¹É•½É‘}ÑåÁ”ô‰•Ğœ9Ä¹É•½É‘}¥õˆ¹¥¤9€ ü%L9U10=Hˆ¹ÍÁ½ÉĞôü¤9€ ü%L9U10=Hˆ¹‘…Ñ…}½É¥¥¸ôü¥€°ÍÁ½ÉĞ°ÍÁ½ÉĞ°½É¥¥¸°½É¥¥¸¤€üüí½Õ¹ĞèÀ±ÍÑ…­”èÀ±Á…å½ÕĞèÀ±ÁÉ½™¥ĞèÁôì)ô)…ÁÀ¹•Ğ œ½‰•ÑÌ½ÅÕ…É…¹Ñ¥¹”µÍÕµµ…Éäœ±…Íå¹ŒŒôùí½¹ÍĞÍÁ½ÉĞõŒ¹É•Ä¹ÅÕ•Éä ÍÁ½ÉĞœ¤±½É¥¥¸õ½É¥¥¹¥±Ñ•È¡Œ¹É•Ä¹ÅÕ•Éä ½É¥¥¸œ¤¤í¥˜¡ÍÁ½ÉĞ˜˜…Ù…±¥‘MÁ½ÉĞ¡ÍÁ½ÉĞ¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°¥¹Ù…±¥ÍÁ½ÉĞœ¤íÉ•ÑÕÉ¸Œ¹©Í½¸¡…İ…¥ĞÅÕ…É…¹Ñ¥¹•MÕµµ…Éä¡Œ¹•¹Ø¹±ÍÁ½ÉÑññ¹Õ±°±½É¥¥¸¤¤íô¤ì)…ÁÀ¹•Ğ œ½Á…Á•È½‘•¥Í¥½¹Ìœ±…Íå¹ŒŒôùì(½¹ÍĞ‘…Ñ”õŒ¹É•Ä¹ÅÕ•Éä ‘…Ñ”œ¤üı©ÍÑI…•…Ñ” ¤ì(¥˜ „½yq‘ìÑôµq‘ìÉôµq‘ìÉô¼¹Ñ•ÍĞ¡‘…Ñ”¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°‘…Ñ”µÕÍĞ‰”eeedµ54µœ¤ì(½¹ÍĞÉ½İÌõ…İ…¥Ğ…±°ñ…¹äø¡Œ¹•¹Ø¹±M1P¹É…•}¥±¹Á¡…Í”±¹ÕÑ½™™}…Ğ±¹ÕÑ½™™}Í½ÕÉ”±¹ÕÑ½™™}½‰Í•ÉÙ•‘}…Ğ±¹Ñ…É•Ñ}…Ğ±¹¥¹ÁÕÑ}…Í}½™}…Ğ±¹‘•¥‘•‘}…Ğ±¹½ÕÑ½µ”±¹É•…Í½¸±¹‰•Ñ}É½ÕÁ}¥±¹Í¹…ÁÍ¡½Ñ}©Í½¸(€€I=4Á…Á•É}‘•¥Í¥½¹Ì)=%8É…•ÌÈ=8È¹¥õ¹É…•}¥]!IÈ¹É…•}‘…Ñ”ôü=IH	d©Õ±¥…¹‘…ä¡¹‘•¥‘•‘}…Ğ¤±¹É…•}¥±¹Á¡…Í”1%5%P€ÔÀÁ€±‘…Ñ”¤ì(É•ÑÕÉ¸Œ¹©Í½¸¡í‘…Ñ”±Ñ¥µ¥¹œéíÁÉ¥µ…ÉäéíÁ¡…Í”éAI%5Ie}AAI}A!M±ÕÑ½™™M½ÕÉ”éQIUMQ}UQ=}M=UI±Ñ…É•Ñ=™™Í•ÑM•½¹‘ÌèØÀ±Ñ½±•É…¹•M•½¹‘ÌèÄÀ°(€€…•ÁÑ•‘M•½¹‘Í	•™½É•ÕÑ½™˜éíµ¥¸èÔÀ±µ…àèÜÁõô±½µÁ…É¥Í½¹ÌéAAI}=5AI%M=9}A!MMô°(€€‘•¥Í¥½¹ÌéÉ½İÌ¹µ…À¡É½Üôùí±•ĞÍ¹…ÁÍ¡½Ğõ¹Õ±°íÑÉåíÍ¹…ÁÍ¡½ĞõÉ½Ü¹Í¹…ÁÍ¡½Ñ}©Í½¸ı)M=8¹Á…ÉÍ”¡É½Ü¹Í¹…ÁÍ¡½Ñ}©Í½¸¤é¹Õ±°íõ…Ñ¡íô(€€€½¹ÍĞÕÑ½™™5ÌõÉ½Ü¹ÕÑ½™™}…Ğı…Ñ”¹Á…ÉÍ”¡É½Ü¹ÕÑ½™™}…Ğ¤é9Õµ‰•È¹9…8±‘•¥‘•‘5Ìõ…Ñ”¹Á…ÉÍ”¡É½Ü¹‘•¥‘•‘}…Ğ¤±…ÑÕ…±M•½¹‘Í	•™½É•ÕÑ½™˜õ9Õµ‰•È¹¥Í¥¹¥Ñ”¡ÕÑ½™™5Ì¤˜™9Õµ‰•È¹¥Í¥¹¥Ñ”¡‘•¥‘•‘5Ì¤ü¡ÕÑ½™™5Ìµ‘•¥‘•‘5Ì¤¼ÄÀÀÀé¹Õ±°ì(€€€É•ÑÕÉ¸íÉ…•%éÉ½Ü¹É…•}¥±Á¡…Í”éÉ½Ü¹Á¡…Í”±ÕÑ½™™ĞéÉ½Ü¹ÕÑ½™™}…Ğüı¹Õ±°±ÕÑ½™™M½ÕÉ”éÉ½Ü¹ÕÑ½™™}Í½ÕÉ”üı¹Õ±°±ÕÑ½™™=‰Í•ÉÙ•‘ĞéÉ½Ü¹ÕÑ½™™}½‰Í•ÉÙ•‘}…Ğüı¹Õ±°±Ñ…É•ÑĞéÉ½Ü¹Ñ…É•Ñ}…Ğüı¹Õ±°±¥¹ÁÕÑÍ=™ĞéÉ½Ü¹¥¹ÁÕÑ}…Í}½™}…Ğüı¹Õ±°±‘•¥‘•‘ĞéÉ½Ü¹‘•¥‘•‘}…Ğ°(€€€€€…ÑÕ…±M•½¹‘Í	•™½É•ÕÑ½™˜±Ñ…É•Ñ•±Ñ…M•½¹‘Ìé…ÑÕ…±M•½¹‘Í	•™½É•ÕÑ½™˜ôôõ¹Õ±°ı¹Õ±°èØÀµ…ÑÕ…±M•½¹‘Í	•™½É•ÕÑ½™˜±½ÕÑ½µ”éÉ½Ü¹½ÕÑ½µ”±É•…Í½¸éÉ½Ü¹É•…Í½¸üı¹Õ±°±‰•ÑÉ½ÕÁ%éÉ½Ü¹‰•Ñ}É½ÕÁ}¥üı¹Õ±°±Í¹…ÁÍ¡½Ñôíô¥ô¤ì)ô¤ì)…ÁÀ¹•Ğ œ½‰•ÑÌœ±…Íå¹ŒŒôùí½¹ÍĞÍÁ½ÉĞõŒ¹É•Ä¹ÅÕ•Éä ÍÁ½ÉĞœ¤±ÍÑ…ÑÕÌõŒ¹É•Ä¹ÅÕ•Éä ÍÑ…ÑÕÌœ¤±½É¥¥¸õ½É¥¥¹¥±Ñ•È¡Œ¹É•Ä¹ÅÕ•Éä ½É¥¥¸œ¤¤í¥˜¡ÍÁ½ÉĞ˜˜…Ù…±¥‘MÁ½ÉĞ¡ÍÁ½ÉĞ¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°¥¹Ù…±¥ÍÁ½ÉĞœ¤í½¹ÍĞÉ½İÌõ…İ…¥Ğ…±°ñ…¹äø¡Œ¹•¹Ø¹±M1Pˆ¸¨±Ø¹¹…µ”Ù•¹Õ•}¹…µ”±È¹É…•}¹¼±È¹ÍÑ…ÑÕÌÉ…•}ÍÑ…ÑÕÌ±È¹Á½ÍÑ}Ñ¥µ”±È¹É…•}‘…Ñ”°(€¡M1P=U9P ¨¤I=4•¹ÑÉ¥•Ì”]!I”¹É…•}¥õÈ¹¥9”¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸¤•¹ÑÉå}½Õ¹Ğ°(€¡M1P=U9P ¨¤I=4•¹ÑÉ¥•Ì”]!I”¹É…•}¥õÈ¹¥9”¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸9€‘íÑ•Éµ¥¹…±¥¹¥Í¡½‘•MÅ±ô¤Ñ•Éµ¥¹…±}•¹ÑÉå}½Õ¹Ğ°(€¡M1P=U9P ¨¤I=4É•ÍÕ±ÑÌà]!Ià¹É…•}¥õÈ¹¥9à¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸¤É•ÍÕ±Ñ}½Õ¹Ğ°(€¡M1P=U9P¡%MQ%9Pà¹¹Õµ‰•È¤I=4É•ÍÕ±ÑÌà]!Ià¹É…•}¥õÈ¹¥9à¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸¤‘¥ÍÑ¥¹Ñ}É•ÍÕ±Ñ}½Õ¹Ğ°(€¡M1P=U9P ¨¤I=4É•ÍÕ±ÑÌà]!Ià¹É…•}¥õÈ¹¥9à¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸9a%MQL¡M1P€ÄI=4•¹ÑÉ¥•Ì”]!I”¹É…•}¥õà¹É…•}¥9”¹¹Õµ‰•Èõà¹¹Õµ‰•È9”¹‘…Ñ…}½É¥¥¸õà¹‘…Ñ…}½É¥¥¸¤¤µ…Ñ¡•‘}É•ÍÕ±Ñ}½Õ¹Ğ°(€¡M1P=U9P ¨¤I=4É•ÍÕ±ÑÌà]!Ià¹É…•}¥õÈ¹¥9à¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸9à¹™¥¹¥Í¡}½É‘•ÈôÄ¤İ¥¹¹•É}½Õ¹Ğ°(€¡M1P=U9P ¨¤I=4É•ÍÕ±ÑÌà)=%8Á…å½ÕÑÌÀ=8À¹É…•}¥õà¹É…•}¥9À¹‘…Ñ…}½É¥¥¸õà¹‘…Ñ…}½É¥¥¸9À¹‰•Ñ}ÑåÁ”ôİ¥¸œ9À¹Í•±•Ñ¥½¸õMP¡à¹¹Õµ‰•ÈLQaP¤9À¹Á…å½ÕĞøÀ]!Ià¹É…•}¥õÈ¹¥9à¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸9à¹™¥¹¥Í¡}½É‘•ÈôÄ¤Á…¥‘}İ¥¹¹•É}½Õ¹Ğ°(€¡M1PM]!8©Í½¹}Ù…±¥¡”¹™•…ÑÕÉ•Í}©Í½¸¤Q!8©Í½¹}•áÑÉ…Ğ¡”¹™•…ÑÕÉ•Í}©Í½¸°œ¹™¥¹¥Í¡}½‘”œ¤9I=4•¹ÑÉ¥•Ì”]!I”¹É…•}¥õÈ¹¥9”¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸9MP¡”¹¹Õµ‰•ÈLQaP¤õˆ¹Í•±•Ñ¥½¸1%5%P€Ä¤™¥¹¥Í¡}½‘”°(€¡M1PÈ¹Í½ÕÉ”I=4½±±•Ñ¥½¹}ÉÕ¹ÌÈ]!IÈ¹‘…Ñ…}½É¥¥¸ôÉ•…°œ9È¹ÍÁ½ÉĞô‰½…Ğœ9€¡È¹Í½ÕÉ”ôµ‰É…”µ‰½…Ğœ=H€¡È¹Í½ÕÉ”ô‰½…ÑÉ…”µÉ•ÍÕ±ÑÌµİ½É­•ÈµØÄœ9È¹¥ô‰½…ĞµÉ•ÍÕ±ĞèññÈ¹¥¤¤9È¹ÍÁ½ÉĞõÈ¹ÍÁ½ÉĞ9È¹Ñ…É•Ñ}‘…Ñ”õÈ¹É…•}‘…Ñ”9©Õ±¥…¹‘…ä¡È¹ÍÑ…ÉÑ•‘}…Ğ¤ğõ©Õ±¥…¹‘…ä ¹½Üœ¤=IH	d©Õ±¥…¹‘…ä¡È¹ÍÑ…ÉÑ•‘}…Ğ¤M±È¹¥M1%5%P€Ä¤É•ÍÕ±Ñ}½±±•Ñ¥½¹}Í½ÕÉ”°(€¡M1PÈ¹ÍÑ…ÑÕÌI=4½±±•Ñ¥½¹}ÉÕ¹ÌÈ]!IÈ¹‘…Ñ…}½É¥¥¸ôÉ•…°œ9È¹ÍÁ½ÉĞô‰½…Ğœ9€¡È¹Í½ÕÉ”ôµ‰É…”µ‰½…Ğœ=H€¡È¹Í½ÕÉ”ô‰½…ÑÉ…”µÉ•ÍÕ±ÑÌµİ½É­•ÈµØÄœ9È¹¥ô‰½…ĞµÉ•ÍÕ±ĞèññÈ¹¥¤¤9È¹ÍÁ½ÉĞõÈ¹ÍÁ½ÉĞ9È¹Ñ…É•Ñ}‘…Ñ”õÈ¹É…•}‘…Ñ”9©Õ±¥…¹‘…ä¡È¹ÍÑ…ÉÑ•‘}…Ğ¤ğõ©Õ±¥…¹‘…ä ¹½Üœ¤=IH	d©Õ±¥…¹‘…ä¡È¹ÍÑ…ÉÑ•‘}…Ğ¤M±È¹¥M1%5%P€Ä¤É•ÍÕ±Ñ}½±±•Ñ¥½¹}ÍÑ…ÑÕÌ°(€¡M1PÈ¹ÍÑ…ÉÑ•‘}…ĞI=4½±±•Ñ¥½¹}ÉÕ¹ÌÈ]!IÈ¹‘…Ñ…}½É¥¥¸ôÉ•…°œ9È¹ÍÁ½ÉĞô‰½…Ğœ9€¡È¹Í½ÕÉ”ôµ‰É…”µ‰½…Ğœ=H€¡È¹Í½ÕÉ”ô‰½…ÑÉ…”µÉ•ÍÕ±ÑÌµİ½É­•ÈµØÄœ9È¹¥ô‰½…ĞµÉ•ÍÕ±ĞèññÈ¹¥¤¤9È¹ÍÁ½ÉĞõÈ¹ÍÁ½ÉĞ9È¹Ñ…É•Ñ}‘…Ñ”õÈ¹É…•}‘…Ñ”9©Õ±¥…¹‘…ä¡È¹ÍÑ…ÉÑ•‘}…Ğ¤ğõ©Õ±¥…¹‘…ä ¹½Üœ¤=IH	d©Õ±¥…¹‘…ä¡È¹ÍÑ…ÉÑ•‘}…Ğ¤M±È¹¥M1%5%P€Ä¤É•ÍÕ±Ñ}½±±•Ñ¥½¹}±…ÍÑ}…ÑÑ•µÁÑ}…Ğ°(€¡M1P=1M¡È¹™¥¹¥Í¡•‘}…Ğ±È¹ÍÑ…ÉÑ•‘}…Ğ¤I=4½±±•Ñ¥½¹}ÉÕ¹ÌÈ]!IÈ¹‘…Ñ…}½É¥¥¸ôÉ•…°œ9È¹ÍÁ½ÉĞô‰½…Ğœ9€¡È¹Í½ÕÉ”ôµ‰É…”µ‰½…Ğœ=H€¡È¹Í½ÕÉ”ô‰½…ÑÉ…”µÉ•ÍÕ±ÑÌµİ½É­•ÈµØÄœ9È¹¥ô‰½…ĞµÉ•ÍÕ±ĞèññÈ¹¥¤¤9È¹ÍÁ½ÉĞõÈ¹ÍÁ½ÉĞ9È¹Ñ…É•Ñ}‘…Ñ”õÈ¹É…•}‘…Ñ”9È¹ÍÑ…ÑÕÌôÍÕ•ÍÌœ9©Õ±¥…¹‘…ä¡=1M¡È¹™¥¹¥Í¡•‘}…Ğ±È¹ÍÑ…ÉÑ•‘}…Ğ¤¤ğõ©Õ±¥…¹‘…ä ¹½Üœ¤=IH	d©Õ±¥…¹‘…ä¡È¹ÍÑ…ÉÑ•‘}…Ğ¤M±È¹¥M1%5%P€Ä¤É•ÍÕ±Ñ}½±±•Ñ¥½¹}±…ÍÑ}ÍÕ•ÍÍ}…Ğ)I=4‰•ÑÌˆ)=%8É…•ÌÈ=8È¹¥õˆ¹É…•}¥)=%8Ù•¹Õ•ÌØ=8Ø¹¥õÈ¹Ù•¹Õ•}¥]!I€ ü%L9U10=Hˆ¹ÍÁ½ÉĞôü¤9€ ü%L9U10=Hˆ¹ÍÑ…ÑÕÌôü¤9€ ü%L9U10=Hˆ¹‘…Ñ…}½É¥¥¸ôü¤9€‘í¹½¹EÕ…É…¹Ñ¥¹•‘	•Ğ ¥ô=IH	dˆ¹Á±…•‘}…ĞM€±ÍÁ½ÉÑññ¹Õ±°±ÍÁ½ÉÑññ¹Õ±°±ÍÑ…ÑÕÍññ¹Õ±°±ÍÑ…ÑÕÍññ¹Õ±°±½É¥¥¸±½É¥¥¸¤íÉ•ÑÕÉ¸Œ¹©Í½¸¡É½İÌ¹µ…À¡ˆôø¡ì¸¸¹µ…Á	•Ğ¡ˆ¤±Ù•¹Õ•9…µ”éˆ¹Ù•¹Õ•}¹…µ”±É…•9¼éˆ¹É…•}¹¼±É…•…Ñ”éˆ¹É…•}‘…Ñ•ô¤¤¤íô¤ì)…ÁÀ¹•Ğ œ½Á•É™½Éµ…¹”½É…¹¬µ½µÁ…É¥Í½¸œ±…Íå¹ŒŒôùì(½¹ÍĞ‘ˆõŒ¹•¹Ø¹±½É¥¥¸õ½É¥¥¹¥±Ñ•È¡Œ¹É•Ä¹ÅÕ•Éä ½É¥¥¸œ¤¤ì(½¹ÍĞÉ½İÌõ…İ…¥Ğ…±°ñ…¹äø¡‘ˆ±M1Pˆ¸¨I=4‰•ÑÌˆ)=%8É…•ÌÈ=8È¹¥õˆ¹É…•}¥9È¹‘…Ñ…}½É¥¥¸õˆ¹‘…Ñ…}½É¥¥¸(€€]!Iˆ¹‰•Ñ}É½ÕÁ}¥%L9=P9U109ˆ¹…¹‘¥‘…Ñ•}É…¹¬%L9=P9U109ˆ¹…¹‘¥‘…Ñ•}½Õ¹Ğ%L9=P9U10(€€9€ ü%L9U10=Hˆ¹‘…Ñ…}½É¥¥¸ôü¤9€‘í¹½¹EÕ…É…¹Ñ¥¹•‘	•Ğ ˆœ¥ô(€€99=Pa%MQL¡M1P€ÄI=4‘…Ñ…}É•Á…¥É}ÅÕ…É…¹Ñ¥¹•‘}É…•ÌÄ]!IÄ¹É…•}¥õˆ¹É…•}¥¤(€€=IH	dˆ¹‰•Ñ}É½ÕÁ}¥±ˆ¹…¹‘¥‘…Ñ•}É…¹­€±½É¥¥¸±½É¥¥¸¤ì(½¹ÍĞÉ½ÕÁÌõ¹•Ü5…ÀñÍÑÉ¥¹œ±…¹åmtø ¤ì™½È¡½¹ÍĞÉ½Ü½˜É½İÌ¥í½¹ÍĞ±¥ÍĞõÉ½ÕÁÌ¹•Ğ¡É½Ü¹‰•Ñ}É½ÕÁ}¥¤üımtí±¥ÍĞ¹ÁÕÍ ¡É½Ü¤íÉ½ÕÁÌ¹Í•Ğ¡É½Ü¹‰•Ñ}É½ÕÁ}¥±±¥ÍĞ¤íô(±•Ğ½µÁ…É•‘É½ÕÁ½Õ¹ĞôÀ±Ñ½Ñ…±MÑ…­”ôÀ±µÕ±Ñ¥Á±•A…å½ÕĞôÀ±™¥ÉÍÑ=¹±åA…å½ÕĞôÀì(±•Ğ•á±Õ‘•‘A•¹‘¥¹É½ÕÁ½Õ¹ĞôÀ±•á±Õ‘•‘5¥ÍÍ¥¹I…¹­=¹•É½ÕÁ½Õ¹ĞôÀ±•á±Õ‘•‘U¹­¹½İ¹I…¹­	•Ñ½Õ¹ĞôÀì(½¹ÍĞ½µÁ…É•‘I…•Ìõ¹•ÜM•ĞñÍÑÉ¥¹œø ¤ì(™½È¡½¹ÍĞÉ½ÕÀ½˜É½ÕÁÌ¹Ù…±Õ•Ì ¤¥ì(€€¥˜¡É½ÕÀ¹±•¹Ñ ğÈ¥½¹Ñ¥¹Õ”ì(€€¥˜ …É½ÕÀ¹Í½µ” ¡ˆé…¹ä¤ôùˆ¹…¹‘¥‘…Ñ•}É…¹¬ôôôÄ¤¥í•á±Õ‘•‘5¥ÍÍ¥¹I…¹­=¹•É½ÕÁ½Õ¹Ğ¬¬í½¹Ñ¥¹Õ”íô(€€¥˜¡É½ÕÀ¹Í½µ” ¡ˆé…¹ä¤ôø…lİ½¸œ°±½ÍĞt¹¥¹±Õ‘•Ì¡ˆ¹ÍÑ…ÑÕÌ¤¤¥í•á±Õ‘•‘A•¹‘¥¹É½ÕÁ½Õ¹Ğ¬¬í½¹Ñ¥¹Õ”íô(€€½¹ÍĞ½É¥¥¹Ìõ¹•ÜM•Ğ¡É½ÕÀ¹µ…À ¡ˆé…¹ä¤ôùˆ¹‘…Ñ…}½É¥¥¸¤¤±É…•Ìõ¹•ÜM•Ğ¡É½ÕÀ¹µ…À ¡ˆé…¹ä¤ôùˆ¹É…•}¥¤¤ì(€€¥˜¡½É¥¥¹Ì¹Í¥é”„ôôÅññÉ…•Ì¹Í¥é”„ôôÄ¥½¹Ñ¥¹Õ”ì(€€½¹ÍĞÉ…¹­=¹”õÉ½ÕÀ¹™¥¹ ¡ˆé…¹ä¤ôùˆ¹…¹‘¥‘…Ñ•}É…¹¬ôôôÄ¤ì(€€€¼¼M•ÑÑ±•µ•¹Ğ½¹±äµ…É­ÌÑ¡”É…”½µÁ±•Ñ”…™Ñ•ÈÑ¡”½™™¥¥…°É•ÍÕ±Ğ…¹İ¥¹¹•ÈÁ…å½ÕĞ…É”ÁÉ•Í•¹Ğ¸(€€€¼¼±½Í¥¹œÉ…¹¬´ÄÍ•±•Ñ¥½¸¡…Ì„­¹½İ¸é•É¼Á…å½ÕĞì„İ¥¹¹¥¹œ½¹”…ÉÉ¥•ÌÑ¡”½™™¥¥…°Á…å½ÕĞ¸(€€¥˜¡É…¹­=¹”¹ÍÑ…ÑÕÌôôôİ½¸œ˜™É…¹­=¹”¹™¥¹…±}½‘‘Ìôôõ¹Õ±°¥½¹Ñ¥¹Õ”ì(€€½¹ÍĞÍÑ…­”õÉ½ÕÀ¹É•‘Õ” ¡ÍÕ´é¹Õµ‰•È±ˆé…¹ä¤ôùÍÕ´­ˆ¹ÍÑ…­”°À¤ì(€€½µÁ…É•‘É½ÕÁ½Õ¹Ğ¬¬í½µÁ…É•‘I…•Ì¹…‘¡É…¹­=¹”¹É…•}¥¤íÑ½Ñ…±MÑ…­”¬õÍÑ…­”ì(€€µÕ±Ñ¥Á±•A…å½ÕĞ¬õÉ½ÕÀ¹É•‘Õ” ¡ÍÕ´é¹Õµ‰•È±ˆé…¹ä¤ôùÍÕ´¬¡ˆ¹Á…å½ÕĞüüÀ¤°À¤ì(€€™¥ÉÍÑ=¹±åA…å½ÕĞ¬õÉ…¹­=¹”¹ÍÑ…ÑÕÌôôôİ½¸œıÁ…å½ÕÑe•¸¡ÍÑ…­”±5…Ñ ¹É½Õ¹¡É…¹­=¹”¹™¥¹…±}½‘‘Ì¨ÄÀÀ¤¤èÀì(ô(•á±Õ‘•‘U¹­¹½İ¹I…¹­	•Ñ½Õ¹Ğõ9Õµ‰•È ¡…İ…¥Ğ™¥ÉÍĞñ…¹äø¡‘ˆ±M1P=U9P ¨¤½Õ¹ĞI=4‰•ÑÌˆ)=%8É…•ÌÈ=8È¹¥õˆ¹É…•}¥9È¹‘…Ñ…}½É¥¥¸õˆ¹‘…Ñ…}½É¥¥¸(€€]!I€¡ˆ¹‰•Ñ}É½ÕÁ}¥%L9U10=Hˆ¹…¹‘¥‘…Ñ•}É…¹¬%L9U10¤9€ ü%L9U10=Hˆ¹‘…Ñ…}½É¥¥¸ôü¤9€‘í¹½¹EÕ…É…¹Ñ¥¹•‘	•Ğ ˆœ¥ô(€€99=Pa%MQL¡M1P€ÄI=4‘…Ñ…}É•Á…¥É}ÅÕ…É…¹Ñ¥¹•‘}É…•ÌÄ]!IÄ¹É…•}¥õˆ¹É…•}¥¥€±½É¥¥¸±½É¥¥¸¤¤ü¹½Õ¹ĞüüÀ¤ì(½¹ÍĞµ•…ÍÕÉ”ô¡ÍÑ…­”é¹Õµ‰•È±Á…å½ÕĞé¹Õµ‰•È¤ôø¡íÍÑ…­”±Á…å½ÕĞ±ÁÉ½™¥ĞéÁ…å½ÕĞµÍÑ…­”±É½¤éÍÑ…­”ıÁ…å½ÕĞ½ÍÑ…­”é¹Õ±±ô¤ì(É•ÑÕÉ¸Œ¹©Í½¸¡í½µÁ…É•‘É½ÕÁ½Õ¹Ğ±½µÁ…É•‘I…•½Õ¹Ğé½µÁ…É•‘I…•Ì¹Í¥é”±Ñ½Ñ…±MÑ…­”±•á±Õ‘•‘A•¹‘¥¹É½ÕÁ½Õ¹Ğ±•á±Õ‘•‘5¥ÍÍ¥¹I…¹­=¹•É½ÕÁ½Õ¹Ğ±•á±Õ‘•‘U¹­¹½İ¹I…¹­	•Ñ½Õ¹Ğ±µÕ±Ñ¥Á±”éµ•…ÍÕÉ”¡Ñ½Ñ…±MÑ…­”±µÕ±Ñ¥Á±•A…å½ÕĞ¤±™¥ÉÍÑ=¹±äéµ•…ÍÕÉ”¡Ñ½Ñ…±MÑ…­”±™¥ÉÍÑ=¹±åA…å½ÕĞ¤°(€€¹½Ñ”èŸ–B3cš¾S¢ò–¾û¢Æ‡³ó
+çï–B3cŞ?¢Î·G¦GŸš¾S¢ò	É…¹¬€Ç
+K–B¯
+¢’šVÃ¦ãš*{
+Ã¯ó_»–£–"ã3Šë–ºk_³ó
+çƒG
+K–¾û¢Æ‡£_–6c.³¢Îó–—½É…¹¬€Ç»–º¦jo»ÖCšzsï–³–ò?š&Wš"ïŸ–7¢¢#º_	É…¹¬€Ç»ÿãŞ?¦†7
+K¦7–"g
+/’î»šÏš&Wš"ï¼Ç–šr«šê–"
++š6£›š^Ÿ¢¢c¦2Ë»¦‚’ö7’â7šb;ïšr«Šë–ºkï–>[šÚ#¿¦f“–’[–"§n+
+–Âšv—š"Câû
+K’şw¢¢ó_«ô¤ì)ô¤ì)…ÁÀ¹•Ğ œ½Á•É™½Éµ…¹”½½Ù•ÉÙ¥•Üœ±…Íå¹ŒŒôùí½¹ÍĞÍÁ½ÉĞõŒ¹É•Ä¹ÅÕ•Éä ÍÁ½ÉĞœ¤±½É¥¥¸õ½É¥¥¹¥±Ñ•È¡Œ¹É•Ä¹ÅÕ•Éä ½É¥¥¸œ¤¤í¥˜¡ÍÁ½ÉĞ˜˜…Ù…±¥‘MÁ½ÉĞ¡ÍÁ½ÉĞ¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°¥¹Ù…±¥ÍÁ½ÉĞœ¤í½¹ÍĞ‘ˆõŒ¹•¹Ø¹°¥¹¥Ñ¥…°õ9Õµ‰•È¡…İ…¥ĞÍ•ÑÑ¥¹œ¡‘ˆ°¥¹¥Ñ¥…±}‰…¹­É½±°œ°œÄÀÀÀÀÀœ¤¤°‰•ÑÌõ…İ…¥Ğ…±°ñ…¹äø¡‘ˆ±M1P€¨I=4‰•ÑÌˆ]!I€ ü%L9U10=Hˆ¹ÍÁ½ÉĞôü¤9€ ü%L9U10=Hˆ¹‘…Ñ…}½É¥¥¸ôü¤9€‘í¹½¹EÕ…É…¹Ñ¥¹•‘	•Ğ ¥ô=IH	dˆ¹Á±…•‘}…Ğ±ˆ¹¥‘€±ÍÁ½ÉÑññ¹Õ±°±ÍÁ½ÉÑññ¹Õ±°±½É¥¥¸±½É¥¥¸¤í±•Ğ‰…¹­É½±°õ¥¹¥Ñ¥…°í½¹ÍĞ•ÅÕ¥Ñäõmí…Ğé‰•ÑÍlÁtü¹Á±…•‘}…Ğüı¹½Ü ¤±‰…¹­É½±±õtí±•ĞÍ•ÑÑ±•ôÀ±¡¥ÑÌôÀ±ÍÑ…­”ôÀ±Á…å½ÕĞôÀí™½È¡½¹ÍĞˆ½˜‰•ÑÌ¥í¥˜¡ˆ¹ÍÑ…ÑÕÌôôôİ½¸ññˆ¹ÍÑ…ÑÕÌôôô±½ÍĞññˆ¹ÍÑ…ÑÕÌôôôÙ½¥œ¥í‰…¹­É½±°¬õˆ¹ÁÉ½™¥ĞüüÀíÍ•ÑÑ±•¬¬íÍÑ…­”¬õˆ¹ÍÑ…­”íÁ…å½ÕĞ¬õˆ¹Á…å½ÕĞüüÀí¥˜¡ˆ¹ÍÑ…ÑÕÌôôôİ½¸œ¥¡¥ÑÌ¬¬í•ÅÕ¥Ñä¹ÁÕÍ ¡í…Ğéˆ¹Í•ÑÑ±•‘}…Ğüıˆ¹Á±…•‘}…Ğ±‰…¹­É½±±ô¤íõõ±•ĞÁ•…¬õ¥¹¥Ñ¥…°±‘ôÀ±‘‘AĞôÀí™½È¡½¹ÍĞ”½˜•ÅÕ¥Ñä¥íÁ•…¬õ5…Ñ ¹µ…à¡Á•…¬±”¹‰…¹­É½±°¤í‘õ5…Ñ ¹µ…à¡‘±Á•…¬µ”¹‰…¹­É½±°¤í¥˜¡Á•…¬øÀ¥‘‘AĞõ5…Ñ ¹µ…à¡‘‘AĞ°¡Á•…¬µ”¹‰…¹­É½±°¤½Á•…¬¤íõÉ•ÑÕÉ¸Œ¹©Í½¸¡í¥¹¥Ñ¥…±	…¹­É½±°é¥¹¥Ñ¥…°±‰…¹­É½±°±Ñ½Ñ…±AÉ½™¥Ğé‰…¹­É½±°µ¥¹¥Ñ¥…°±É½¤éÍÑ…­”ıÁ…å½ÕĞ½ÍÑ…­”é¹Õ±°±‰•Ñ½Õ¹Ğé‰•ÑÌ¹±•¹Ñ ±Í•ÑÑ±•‘½Õ¹ĞéÍ•ÑÑ±•±¡¥ÑI…Ñ”éÍ•ÑÑ±•ı¡¥ÑÌ½Í•ÑÑ±•é¹Õ±°±µ…áÉ…İ‘½İ¸é‘±µ…áÉ…İ‘½İ¹AĞé‘‘AĞ±•ÅÕ¥ÑåÕÉÙ”é•ÅÕ¥Ñä±ÅÕ…É…¹Ñ¥¹•é…İ…¥ĞÅÕ…É…¹Ñ¥¹•MÕµµ…Éä¡‘ˆ±ÍÁ½ÉÑññ¹Õ±°±½É¥¥¸¥ô¤íô¤ì)…ÁÀ¹•Ğ œ½Á•É™½Éµ…¹”½‰É•…­‘½İ¸œ±…Íå¹ŒŒôùí½¹ÍĞ‘ˆõŒ¹•¹Ø¹±½É¥¥¸õ½É¥¥¹¥±Ñ•È¡Œ¹É•Ä¹ÅÕ•Éä ½É¥¥¸œ¤¤ì(½¹ÍĞ<õ€ ü%L9U10=Hˆ¹‘…Ñ…}½É¥¥¸ôü¤9€‘í¹½¹EÕ…É…¹Ñ¥¹•‘	•Ğ ˆœ¥õ€ì(½¹ÍĞ‰åMÁ½ÉĞõ…İ…¥Ğ…±°ñ…¹äø¡‘ˆ±M1PÍÁ½ÉĞ±=U9P ¨¤‰•ÑÌ±MU4¡ÍÑ…­”¤ÍÑ…­”±MU4¡=1M¡Á…å½ÕĞ°À¤¤Á…å½ÕĞ±MU4¡=1M¡ÁÉ½™¥Ğ°À¤¤ÁÉ½™¥Ğ±M]!8MU4¡ÍÑ…­”¤øÀQ!8€Ä¸À©MU4¡=1M¡Á…å½ÕĞ°À¤¤½MU4¡ÍÑ…­”¤9É½¤±M]!8MU4¡M]!8ÍÑ…ÑÕÌ%8€ İ½¸œ°±½ÍĞœ¤Q!8€Ä1M€À9¤øÀQ!8€Ä¸À©MU4¡M]!8ÍÑ…ÑÕÌôİ½¸œQ!8€Ä1M€À9¤½MU4¡M]!8ÍÑ…ÑÕÌ%8€ İ½¸œ°±½ÍĞœ¤Q!8€Ä1M€À9¤9¡¥ÑI…Ñ”I=4‰•ÑÌˆ]!I€‘í=ôI=U@	dÍÁ½ÉÑ€±½É¥¥¸±½É¥¥¸¤ì(½¹ÍĞ‰å5½¹Ñ õ…İ…¥Ğ…±°ñ…¹äø¡‘ˆ±M1PÍÕ‰ÍÑÈ¡Á±…•‘}…Ğ°Ä°Ü¤µ½¹Ñ ±ÍÁ½ÉĞ±MU4¡ÍÑ…­”¤ÍÑ…­”±MU4¡=1M¡Á…å½ÕĞ°À¤¤Á…å½ÕĞ±MU4¡=1M¡ÁÉ½™¥Ğ°À¤¤ÁÉ½™¥ĞI=4‰•ÑÌˆ]!I€‘í=ôI=U@	dµ½¹Ñ ±ÍÁ½ÉĞ=IH	dµ½¹Ñ¡€±½É¥¥¸±½É¥¥¸¤ì(½¹ÍĞ‰å‘”õ…İ…¥Ğ…±°ñ…¹äø¡‘ˆ±M1PM(€€]!8•áÁ•Ñ•‘}É½¤%L9U10Q!8€Ÿ’â7šb8œ(€€]!8•áÁ•Ñ•‘}É½¤€øô€À¸ÈÀQ!8€œÈÀ—’î—’â(œ(€€]!8•áÁ•Ñ•‘}É½¤€øô€À¸ÀÔQ!8€œ×pÈÀ”œ(€€]!8•áÁ•Ñ•‘}É½¤€øô€ÀQ!8€œÃpÔ”œ(€€1M€œğ€À”œ(€9‰Õ­•Ğ±=U9P ¨¤‰•ÑÌ±MU4¡ÍÑ…­”¤ÍÑ…­”±MU4¡=1M¡Á…å½ÕĞ°À¤¤Á…å½ÕĞ±M]!8MU4¡ÍÑ…­”¤øÀQ!8€Ä¸À©MU4¡=1M¡Á…å½ÕĞ°À¤¤½MU4¡ÍÑ…­”¤9É½¤(€I=4‰•ÑÌˆ]!I€‘í=ôI=U@	d‰Õ­•Ğ=IH	dM‰Õ­•Ğ]!8€œÈÀ—’î—’â(œQ!8€Ä]!8€œ×pÈÀ”œQ!8€È]!8€œÃpÔ”œQ!8€Ì]!8€œğ€À”œQ!8€Ğ1M€Ô9€±½É¥¥¸±½É¥¥¸¤ì(½¹ÍĞ‰å5½‘•°õ…İ…¥Ğ…±°ñ…¹äø¡‘ˆ±M1P=1M¡µ½‘•±}¥°Õ¹­¹½İ¸œ¤µ½‘•±%±=U9P ¨¤‰•ÑÌ±MU4¡ÍÑ…­”¤ÍÑ…­”±MU4¡=1M¡Á…å½ÕĞ°À¤¤Á…å½ÕĞ±M]!8MU4¡ÍÑ…­”¤øÀQ!8€Ä¸À©MU4¡=1M¡Á…å½ÕĞ°À¤¤½MU4¡ÍÑ…­”¤9É½¤I=4‰•ÑÌˆ]!I€‘í=ôI=U@	dµ½‘•±}¥‘€±½É¥¥¸±½É¥¥¸¤ì(½¹ÍĞ…±¥‰É…Ñ¥½¸õ…İ…¥Ğ…±°ñ…¹äø¡‘ˆ±M1PÈ¹ÍÁ½ÉĞ±MP¡À¹ÁÉ½‰…‰¥±¥Ñä¨ÄÀL%9P¤‰¥¸±Y¡À¹ÁÉ½‰…‰¥±¥Ñä¤ÁÉ•‘¥Ñ•±Y¡M]!8É•Ì¹™¥¹¥Í¡}½É‘•ÈôÄQ!8€Ä¸À1M€À¸À9¤…ÑÕ…°±=U9P ¨¤½Õ¹ĞI=4ÁÉ•‘¥Ñ¥½¹ÌÀ)=%8É…•ÌÈ=8È¹¥õÀ¹É…•}¥9À¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸)=%8µ½‘•±Ì´=8´¹¥õÀ¹µ½‘•±}¥9´¹ÍÁ½ÉĞõÈ¹ÍÁ½ÉĞ9´¹‰•Ñ}ÑåÁ”ôİ¥¸œ9€¡È¹ÍÁ½ÉĞğø‰½…Ğœ=HM]!8©Í½¹}Ù…±¥¡´¹µ•ÑÉ¥Í}©Í½¸¤Q!8€¡©Í½¹}ÑåÁ”¡´¹µ•ÑÉ¥Í}©Í½¸°œ¹‰½…ÑÉÑ¥™…ÑM¡„ÈÔØœ¤ôÑ•áĞœ9©Í½¹}•áÑÉ…Ğ¡´¹µ•ÑÉ¥Í}©Í½¸°œ¹‰½…ÑY•¹Õ•M¡•µ…Y•ÉÍ¥½¸œ¤ô‰½…ĞµÙ•¹Õ”µØÈœ9±•¹Ñ ¡©Í½¹}•áÑÉ…Ğ¡´¹µ•ÑÉ¥Í}©Í½¸°œ¹½ÉÉ•Ñ•‘QÉ…¥¹¥¹…Ñ…M¡„ÈÔØœ¤¤ôØĞ9©Í½¹}•áÑÉ…Ğ¡´¹µ•ÑÉ¥Í}©Í½¸°œ¹½ÉÉ•Ñ•‘QÉ…¥¹¥¹…Ñ…M¡„ÈÔØœ¤9=P1=€œ©my„µ˜À´åt¨œ9±•¹Ñ ¡©Í½¹}•áÑÉ…Ğ¡´¹µ•ÑÉ¥Í}©Í½¸°œ¹‰½…ÑÉÑ¥™…ÑM¡„ÈÔØœ¤¤ôØĞ9©Í½¹}•áÑÉ…Ğ¡´¹µ•ÑÉ¥Í}©Í½¸°œ¹‰½…ÑÉÑ¥™…ÑM¡„ÈÔØœ¤9=P1=€œ©my„µ˜À´åt¨œ¤1M€À9¤)=%8É•ÍÕ±ÑÌÉ•Ì=8É•Ì¹É…•}¥õÀ¹É…•}¥9É•Ì¹¹Õµ‰•ÈõÀ¹¹Õµ‰•È9É•Ì¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸]!I9=Pa%MQL¡M1P€ÄI=4‘…Ñ…}É•Á…¥É}…Õ‘¥Ñ}µ…É­ÌÄ]!IÄ¹É•½É‘}ÑåÁ”ôÁÉ•‘¥Ñ¥½¸œ9Ä¹É•½É‘}¥õÀ¹¥¤99=Pa%MQL¡M1P€ÄI=4‘…Ñ…}É•Á…¥É}ÅÕ…É…¹Ñ¥¹•‘}É…•ÌÅÈ]!IÅÈ¹É…•}¥õÈ¹¥¤9È¹ÍÑ…ÑÕÌô™¥¹¥Í¡•œ9È¹Á½ÍÑ}Ñ¥µ”%L9=P9U109©Õ±¥…¹‘…ä¡À¹ÁÉ•‘¥Ñ•‘}…Ğ¤ğõ©Õ±¥…¹‘…ä¡È¹Á½ÍÑ}Ñ¥µ”¤9€ ü%L9U10=HÈ¹‘…Ñ…}½É¥¥¸ôü¤9À¹ÁÉ•‘¥Ñ•‘}…Ğô¡M1PÀÈ¹ÁÉ•‘¥Ñ•‘}…ĞI=4ÁÉ•‘¥Ñ¥½¹ÌÀÈ]!IÀÈ¹É…•}¥õÀ¹É…•}¥9ÀÈ¹µ½‘•±}¥õÀ¹µ½‘•±}¥9ÀÈ¹¹Õµ‰•ÈõÀ¹¹Õµ‰•È9ÀÈ¹‘…Ñ…}½É¥¥¸õÈ¹‘…Ñ…}½É¥¥¸9©Õ±¥…¹‘…ä¡ÀÈ¹ÁÉ•‘¥Ñ•‘}…Ğ¤ğõ©Õ±¥…¹‘…ä¡È¹Á½ÍÑ}Ñ¥µ”¤=IH	d©Õ±¥…¹‘…ä¡ÀÈ¹ÁÉ•‘¥Ñ•‘}…Ğ¤M1%5%P€Ä¤I=U@	dÈ¹ÍÁ½ÉĞ±‰¥¸=IH	dÈ¹ÍÁ½ÉĞ±‰¥¹€±½É¥¥¸±½É¥¥¸¤ì(½¹ÍĞ½‘‘ÍÉ¥™Ğõ…İ…¥Ğ™¥ÉÍĞñ…¹äø¡‘ˆ±M1P=U9P ¨¤‰•ÑÌ±Y¡½‘‘Í}…Ñ}‰•Ğ¤…Ù=‘‘ÍÑ	•Ğ±Y¡™¥¹…±}½‘‘Ì¤…Ù¥¹…±=‘‘Ì±=1M¡MU4¡•Ù}±½ÍĞ¤°À¤•Ù1½ÍÑ½Õ¹ĞI=4‰•ÑÌˆ]!IÍÑ…ÑÕÌ%8€ İ½¸œ°±½ÍĞœ¤9€‘í=õ€±½É¥¥¸±½É¥¥¸¤ì(É•ÑÕÉ¸Œ¹©Í½¸¡í‰åMÁ½ÉĞ±‰å5½¹Ñ ±‰å‘”±‰å5½‘•°±…±¥‰É…Ñ¥½¸±½‘‘ÍÉ¥™Ğ±ÅÕ…É…¹Ñ¥¹•é…İ…¥ĞÅÕ…É…¹Ñ¥¹•MÕµµ…Éä¡‘ˆ±¹Õ±°±½É¥¥¸¥ô¤ì)ô¤ì)™Õ¹Ñ¥½¸¥ÍI•½É¡Ù…±Õ”èÕ¹­¹½İ¸¤èÙ…±Õ”¥ÌI•½ÉñÍÑÉ¥¹œ°…¹äøìÉ•ÑÕÉ¸€„…Ù…±Õ”€˜˜ÑåÁ•½˜Ù…±Õ”€ôôô€½‰©•Ğœ€˜˜€…ÉÉ…ä¹¥ÍÉÉ…ä¡Ù…±Õ”¤ìô)™Õ¹Ñ¥½¸¥ÍM¡„ÈÔØ¡Ù…±Õ”èÕ¹­¹½İ¸¤èÙ…±Õ”¥ÌÍÑÉ¥¹œìÉ•ÑÕÉ¸ÑåÁ•½˜Ù…±Õ”€ôôô€ÍÑÉ¥¹œœ€˜˜€½ym„µ˜À´åuìØÑô¼¹Ñ•ÍĞ¡Ù…±Õ”¤ìô)™Õ¹Ñ¥½¸™¥¹¥Ñ” ¸¸¹Ù…±Õ•ÌèÕ¹­¹½İ¹mt¤è‰½½±•…¸ìÉ•ÑÕÉ¸Ù…±Õ•Ì¹•Ù•Éä¡Ø€ôøÑåÁ•½˜Ø€ôôô€¹Õµ‰•Èœ€˜˜9Õµ‰•È¹¥Í¥¹¥Ñ”¡Ø¤¤ìô)™Õ¹Ñ¥½¸…¹½¹¥…±)Í½¸¡Ù…±Õ”è…¹ä¤èÍÑÉ¥¹œì(€¥˜€¡ÉÉ…ä¹¥ÍÉÉ…ä¡Ù…±Õ”¤¤É•ÑÕÉ¸l‘íÙ…±Õ”¹µ…À¡…¹½¹¥…±)Í½¸¤¹©½¥¸ œ°œ¥õu€ì(€¥˜€¡¥ÍI•½É¡Ù…±Õ”¤¤É•ÑÕÉ¸ì‘í=‰©•Ğ¹­•åÌ¡Ù…±Õ”¤¹Í½ÉĞ ¤¹µ…À¡¬ôù€‘í)M=8¹ÍÑÉ¥¹¥™ä¡¬¥ôè‘í…¹½¹¥…±)Í½¸¡Ù…±Õ•m­t¥õ€¤¹©½¥¸ œ°œ¥õõ€ì(€É•ÑÕÉ¸)M=8¹ÍÑÉ¥¹¥™ä¡Ù…±Õ”¤€üü€¹Õ±°œì)ô)…Íå¹Œ™Õ¹Ñ¥½¸Í¡„ÈÔÙ)Í½¸¡Ù…±Õ”èÕ¹­¹½İ¸¤èAÉ½µ¥Í”ñÍÑÉ¥¹œøì(€½¹ÍĞ‘¥•ÍĞõ…İ…¥ĞÉåÁÑ¼¹ÍÕ‰Ñ±”¹‘¥•ÍĞ M!´ÈÔØœ±¹•ÜQ•áÑ¹½‘•È ¤¹•¹½‘”¡…¹½¹¥…±)Í½¸¡Ù…±Õ”¤¤¤ì(€É•ÑÕÉ¸ÉÉ…ä¹™É½´¡¹•ÜU¥¹ĞáÉÉ…ä¡‘¥•ÍĞ¤±ˆôùˆ¹Ñ½MÑÉ¥¹œ ÄØ¤¹Á…‘MÑ…ÉĞ È°œÀœ¤¤¹©½¥¸ œœ¤ì)ô)…Íå¹Œ™Õ¹Ñ¥½¸Í¡„ÈÔÙQ•áĞ¡Ù…±Õ”èÍÑÉ¥¹œ¤èAÉ½µ¥Í”ñÍÑÉ¥¹œøì(€½¹ÍĞ‘¥•ÍĞõ…İ…¥ĞÉåÁÑ¼¹ÍÕ‰Ñ±”¹‘¥•ÍĞ M!´ÈÔØœ±¹•ÜQ•áÑ¹½‘•È ¤¹•¹½‘”¡Ù…±Õ”¤¤ì(€É•ÑÕÉ¸ÉÉ…ä¹™É½´¡¹•ÜU¥¹ĞáÉÉ…ä¡‘¥•ÍĞ¤±ˆôùˆ¹Ñ½MÑÉ¥¹œ ÄØ¤¹Á…‘MÑ…ÉĞ È°œÀœ¤¤¹©½¥¸ œœ¤ì)ô)™Õ¹Ñ¥½¸¡…ÍM…™•	½…ÑIÕ¹Ñ¥µ”¡µ½‘•°è…¹ä¤ì(€¥˜€¡µ½‘•°¹ÍÁ½ÉĞ€„ôô€‰½…Ğœ¤É•ÑÕÉ¸ÑÉÕ”ì(€ÑÉäì½¹ÍĞµ•ÑÉ¥Ìõ)M=8¹Á…ÉÍ”¡µ½‘•°¹µ•ÑÉ¥Í}©Í½¸ñğ€íôœ¤ìÉ•ÑÕÉ¸µ•ÑÉ¥Ì¹‰½…ÑY•¹Õ•M¡•µ…Y•ÉÍ¥½¸€ôôôM}	=Q}M!5€˜˜¥ÍM¡„ÈÔØ¡µ•ÑÉ¥Ì¹½ÉÉ•Ñ•‘QÉ…¥¹¥¹…Ñ…M¡„ÈÔØ¤€˜˜¥ÍM¡„ÈÔØ¡µ•ÑÉ¥Ì¹‰½…ÑÉÑ¥™…ÑM¡„ÈÔØ¤ìô(€…Ñ ìÉ•ÑÕÉ¸™…±Í”ìô)ô)…Íå¹Œ™Õ¹Ñ¥½¸¥¹¥Ñ¥…±	…Í•±¥¹•Y…±¥‘…Ñ¥½¹ÉÉ½È¡µ½‘•°è…¹ä°µ•ÑÉ¥ÌèI•½ÉñÍÑÉ¥¹œ°…¹äø°‰½‘äè…¹ä°¹½İ5Ìè¹Õµ‰•È¤ì(€¥˜€¡µ½‘•°¹ÍÁ½ÉĞ€„ôô€‰½…Ğœñğµ½‘•°¹‰•Ñ}ÑåÁ”€„ôô€İ¥¸œ¤É•ÑÕÉ¸€¥¹¥Ñ¥…°µ‰…Í•±¥¹”…ÁÁÉ½Ù…°¥Ì½¹±äÍÕÁÁ½ÉÑ•™½È‰½…Ğİ¥¸µ½‘•±Ìœì(€¥˜€¡µ½‘•°¹ÍÑ…ÑÕÌ€„ôô€…¹‘¥‘…Ñ”œ¤É•ÑÕÉ¸€½¹±ä„…¹‘¥‘…Ñ”µ½‘•°…¸É••¥Ù”¥¹¥Ñ¥…°µ‰…Í•±¥¹”…ÁÁÉ½Ù…°œì(€¥˜€¡‰½‘äü¹½¹™¥Éµ•€„ôôÑÉÕ”¤É•ÑÕÉ¸€•áÁ±¥¥Ğ¥¹¥Ñ¥…°µ‰…Í•±¥¹”½¹™¥Éµ…Ñ¥½¸¥ÌÉ•ÅÕ¥É•œì(€¥˜€ …¥ÍM¡„ÈÔØ¡‰½‘äü¹Ù…±¥‘…Ñ¥½¹¥¹•ÉÁÉ¥¹Ğ¤¤É•ÑÕÉ¸€Ù…±¥‘…Ñ¥½¸™¥¹•ÉÁÉ¥¹ĞµÕÍĞ‰”„M!´ÈÔØ‘¥•ÍĞœì(€¥˜€¡µ•ÑÉ¥Ì¹¥¹¥Ñ¥…±	…Í•±¥¹•±¥¥‰±”€„ôôÑÉÕ”¤É•ÑÕÉ¸ÑåÁ•½˜µ•ÑÉ¥Ì¹¥¹¥Ñ¥…±	…Í•±¥¹•I•…Í½¸€ôôô€ÍÑÉ¥¹œœ€üµ•ÑÉ¥Ì¹¥¹¥Ñ¥…±	…Í•±¥¹•I•…Í½¸€è€¥¹¥Ñ¥…°µ‰…Í•±¥¹”Ù…±¥‘…Ñ¥½¸¥Ì¹½Ğ•±¥¥‰±”œì(€½¹ÍĞØ€ôµ•ÑÉ¥Ì¹¥¹¥Ñ¥…±	…Í•±¥¹•Y…±¥‘…Ñ¥½¸ì(€¥˜€ …¥ÍI•½É¡Ø¤ñğØ¹Á½±¥åY•ÉÍ¥½¸€„ôô€¥¹¥Ñ¥…°µ‰…Í•±¥¹”µØÄœñğØ¹™¥¹•ÉÁÉ¥¹Ğ€„ôô‰½‘ä¹Ù…±¥‘…Ñ¥½¹¥¹•ÉÁÉ¥¹Ğ¤É•ÑÕÉ¸€¥¹¥Ñ¥…°µ‰…Í•±¥¹”Ù…±¥‘…Ñ¥½¸™¥¹•ÉÁÉ¥¹Ğ‘½•Ì¹½Ğµ…Ñ œì(€½¹ÍĞ™¥¹•ÉÁÉ¥¹ÑA…å±½…õì¸¸¹Ùôì‘•±•Ñ”™¥¹•ÉÁÉ¥¹ÑA…å±½…¹™¥¹•ÉÁÉ¥¹Ğì‘•±•Ñ”™¥¹•ÉÁÉ¥¹ÑA…å±½…¹Ù…±¥‘…Ñ•‘Ğì(€‘•±•Ñ”™¥¹•ÉÁÉ¥¹ÑA…å±½…¹¥¹¥Ñ¥…±	…Í•±¥¹•±¥¥‰±”ì‘•±•Ñ”™¥¹•ÉÁÉ¥¹ÑA…å±½…¹¥¹¥Ñ¥…±	…Í•±¥¹•I•…Í½¸ì(€¥˜€¡…İ…¥ĞÍ¡„ÈÔÙ)Í½¸¡™¥¹•ÉÁÉ¥¹ÑA…å±½…¤„ôõØ¹™¥¹•ÉÁÉ¥¹Ğ¤É•ÑÕÉ¸€¥¹¥Ñ¥…°µ‰…Í•±¥¹”Ù…±¥‘…Ñ¥½¸½¹Ñ•¹ÑÌ‘¼¹½Ğµ…Ñ Ñ¡•¥È™¥¹•ÉÁÉ¥¹Ğœì(€¥˜€¡Ø¹ÍÑ…ÑÕÌ„ôô•Ù…±Õ…Ñ•œñğØ¹¥¹¥Ñ¥…±	…Í•±¥¹•±¥¥‰±”„ôõÑÉÕ”ñğØ¹…¹‘¥‘…Ñ•5½‘•±%€„ôôµ½‘•°¹¥ñğØ¹ÍÁ½ÉĞ€„ôôµ½‘•°¹ÍÁ½ÉĞñğØ¹‰•ÑQåÁ”€„ôôµ½‘•°¹‰•Ñ}ÑåÁ”ñğØ¹‘…Ñ…=É¥¥¸€„ôô€É•…°œ¤É•ÑÕÉ¸€¥¹¥Ñ¥…°µ‰…Í•±¥¹”Ù…±¥‘…Ñ¥½¸¥‘•¹Ñ¥Ñä½È•±¥¥‰¥±¥Ñä‘½•Ì¹½Ğµ…Ñ Ñ¡¥ÌÉ•…°‰½…Ğµ½‘•°œì(€¥˜€¡Ø¹Ù…±¥‘…Ñ•‘Ğ€ôô¹Õ±°ñğ€…9Õµ‰•È¹¥Í¥¹¥Ñ”¡…Ñ”¹Á…ÉÍ”¡Ø¹Ù…±¥‘…Ñ•‘Ğ¤¤ñğ…Ñ”¹Á…ÉÍ”¡Ø¹Ù…±¥‘…Ñ•‘Ğ¤€ø¹½İ5Ì€¬€Ô€¨€ØÁ|ÀÀÀñğ¹½İ5Ì€´…Ñ”¹Á…ÉÍ”¡Ø¹Ù…±¥‘…Ñ•‘Ğ¤€ø€ÈĞ€¨€ØÀ€¨€ØÁ|ÀÀÀ¤É•ÑÕÉ¸€¥¹¥Ñ¥…°µ‰…Í•±¥¹”Ù…±¥‘…Ñ¥½¸¥ÌÍÑ…±”½È¡…Ì…¸¥¹Ù…±¥Ñ¥µ•ÍÑ…µÀœì(€½¹ÍĞ„õØ¹…ÉÑ¥™…Ğ°½¡½ÉĞõØ¹½¡½ÉĞ°Ñ•µÁ½É…°õØ¹Ñ•µÁ½É…°°¡•­ÌõØ¹¡•­Ì°Á…¥É•õØ¹Á…¥É•‘½µÁ…É¥Í½¸ì(€¥˜€ …¥ÍI•½É¡„¤ñğ„¹Ù•ÉÍ¥½¸€„ôôµ½‘•°¹Ù•ÉÍ¥½¸ñğ€…¥ÍM¡„ÈÔØ¡„¹©Í½¹M¡„ÈÔØ¤ñğ€…¥ÍM¡„ÈÔØ¡„¹Á¥­±•M¡„ÈÔØ¤ñğµ•ÑÉ¥Ì¹‰½…ÑY•¹Õ•M¡•µ…Y•ÉÍ¥½¸„ôõM}	=Q}M!5ñğ€…¥ÍM¡„ÈÔØ¡µ•ÑÉ¥Ì¹½ÉÉ•Ñ•‘QÉ…¥¹¥¹…Ñ…M¡„ÈÔØ¤ñğØ¹‰½…ÑY•¹Õ•M¡•µ…Y•ÉÍ¥½¸„ôõM}	=Q}M!5ñğ€…¥ÍM¡„ÈÔØ¡Ø¹½ÉÉ•Ñ•‘QÉ…¥¹¥¹…Ñ…M¡„ÈÔØ¤ñğØ¹½ÉÉ•Ñ•‘QÉ…¥¹¥¹…Ñ…M¡„ÈÔØ„ôõµ•ÑÉ¥Ì¹½ÉÉ•Ñ•‘QÉ…¥¹¥¹…Ñ…M¡„ÈÔØñğµ•ÑÉ¥Ì¹‰½…ÑÉÑ¥™…ÑM¡„ÈÔØ„ôõ„¹Á¥­±•M¡„ÈÔØñğ€…ÉÉ…ä¹¥ÍÉÉ…ä¡„¹™•…ÑÕÉ•½±Õµ¹Ì¤ñğ„¹™•…ÑÕÉ•½±Õµ¹Ì¹±•¹Ñ €ôôô€Àñğ„¹™•…ÑÕÉ•½±Õµ¹Ì¹Í½µ” ¡àéÕ¹­¹½İ¸¤ôùÑåÁ•½˜à„ôôÍÑÉ¥¹œñğ…à¤¤É•ÑÕÉ¸€Ù…±¥‘…Ñ•…ÉÑ¥™…Ğ¥‘•¹Ñ¥Ñä¥Ì¥¹½µÁ±•Ñ”œì(€¥˜€ …¥ÍI•½É¡½¡½ÉĞ¤ñğ€…™¥¹¥Ñ”¡½¡½ÉĞ¹É…•½Õ¹Ğ±½¡½ÉĞ¹‘…å½Õ¹Ğ¤ñğ½¡½ÉĞ¹É…•½Õ¹Ğ€ğ€Äñğ½¡½ÉĞ¹‘…å½Õ¹Ğ€ğ€Äñğ€…¥ÍM¡„ÈÔØ¡½¡½ÉĞ¹É…•M•ÑM¡„ÈÔØ¤ñğ€…9Õµ‰•È¹¥Í¥¹¥Ñ”¡…Ñ”¹Á…ÉÍ”¡½¡½ÉĞ¹™É½´¤¤ñğ€…9Õµ‰•È¹¥Í¥¹¥Ñ”¡…Ñ”¹Á…ÉÍ”¡½¡½ÉĞ¹Ñ¼¤¤ñğ…Ñ”¹Á…ÉÍ”¡½¡½ÉĞ¹™É½´¤ù…Ñ”¹Á…ÉÍ”¡½¡½ÉĞ¹Ñ¼¤¤É•ÑÕÉ¸€Ù…±¥‘…Ñ•É•…°½¡½ÉĞ½Õ¹ÑÌ½È‘…Ñ•Ì…É”¥¹Ù…±¥œì(€¥˜€ …¥ÍI•½É¡Ñ•µÁ½É…°¤ñğ€…™¥¹¥Ñ”¡Ñ•µÁ½É…°¹ÑÉ…¥¹I…•½Õ¹Ğ±Ñ•µÁ½É…°¹Ù…±¥‘I…•½Õ¹Ğ±Ñ•µÁ½É…°¹Ñ•ÍÑI…•½Õ¹Ğ¤ñğÑ•µÁ½É…°¹ÑÉ…¥¹I…•½Õ¹ĞğÄñğÑ•µÁ½É…°¹Ù…±¥‘I…•½Õ¹ĞğÄñğÑ•µÁ½É…°¹Ñ•ÍÑI…•½Õ¹ĞğÄñğÑ•µÁ½É…°¹‘¥Í©½¥¹ÑI…•%‘Ì„ôõÑÉÕ”ñğÑ•µÁ½É…°¹™¥Ñ¹‘Y…±¥‘…Ñ¥½¹AÉ••‘•!½±‘½ÕĞ„ôõÑÉÕ”ñğÑ•µÁ½É…°¹ÍÁ±¥Ñ5…Ñ¡•ÍÉÑ¥™…Ñ5•Ñ…‘…Ñ„„ôõÑÉÕ”¤É•ÑÕÉ¸€Ñ•µÁ½É…°Ù…±¥‘…Ñ¥½¸•Ù¥‘•¹”¥Ì¥¹½µÁ±•Ñ”œì(€½¹ÍĞ‘…Ñ•ÌõmÑ•µÁ½É…°¹ÑÉ…¥¹É½´±Ñ•µÁ½É…°¹ÑÉ…¥¹Q¼±Ñ•µÁ½É…°¹Ù…±¥‘É½´±Ñ•µÁ½É…°¹Ù…±¥‘Q¼±Ñ•µÁ½É…°¹Ñ•ÍÑÉ½´±Ñ•µÁ½É…°¹Ñ•ÍÑQ½t¹µ…À¡…Ñ”¹Á…ÉÍ”¤ì(€¥˜€¡‘…Ñ•Ì¹Í½µ”¡ôø…9Õµ‰•È¹¥Í¥¹¥Ñ”¡¤¤ñğ€„¡‘…Ñ•ÍlÁtğõ‘…Ñ•ÍlÅt˜™‘…Ñ•ÍlÅtñ‘…Ñ•ÍlÉt˜™‘…Ñ•ÍlÉtğõ‘…Ñ•ÍlÍt˜™‘…Ñ•ÍlÍtñ‘…Ñ•ÍlÑt˜™‘…Ñ•ÍlÑtğõ‘…Ñ•ÍlÕt¤ñğ…Ñ”¹Á…ÉÍ”¡½¡½ÉĞ¹™É½´¤„ôõ‘…Ñ•ÍlÑtñğ…Ñ”¹Á…ÉÍ”¡½¡½ÉĞ¹Ñ¼¤„ôõ‘…Ñ•ÍlÕt¤É•ÑÕÉ¸€Ñ•µÁ½É…°ÍÁ±¥Ğ‘…Ñ•Ì‘¼¹½Ğµ…Ñ Ñ¡”¡•±µ½ÕĞ½¡½ÉĞœì(€½¹ÍĞÉ•ÅÕ¥É•‘¡•­ÌõlÍ…™••…ÑÕÉ•M¡•µ„œ°É•…±=¹±äœ°½µÁ±•Ñ•Õ±±I…•½¡½ÉÑÌœ°ÁÉ½‰…‰¥±¥Ñ¥•Í¥¹¥Ñ•9½Éµ…±¥é•œ°ÍÑ½É•‘5•ÑÉ¥ÍI•ÁÉ½‘Õ•œ°Ñ•µÁ½É…±MÁ±¥Ñ5…Ñ¡•ÍÉÑ¥™…Ğœ°‘¥Í©½¥¹ÑI…•%‘Ìœ°™¥Ñ¹‘Y…±¥‘…Ñ¥½¹AÉ••‘•!½±‘½ÕĞœ°µ¥¹!•±‘½ÕÑI…•½Õ¹Ğœ°µ¥¹!•±‘½ÕÑ…Ñ•½Õ¹Ğœ°Á…¥É•‘1½1½ÍÍ%µÁÉ½Ù•µ•¹Ğœ°Á…¥É•‘	É¥•É%µÁÉ½Ù•µ•¹Ğœ°Á…¥É•‘1½1½ÍÍ…Ñ•±ÕÍÑ•É%µÁÉ½Ù•µ•¹Ğœ°Á…¥É•‘	É¥•É…Ñ•±ÕÍÑ•É%µÁÉ½Ù•µ•¹Ğœ°••]¥Ñ¡¥¹Q¡É•Í¡½±œ°¹½É½ÍÍ…Ñ•M±¥•I•Ù•ÉÍ…°œ°…ÕÑ¡•¹Ñ¥…Ñ•‘I•¥ÍÑÉåM¹…ÁÍ¡½Ğœ°…¹‘¥‘…Ñ•I•¥ÍÑ•É•‘Í…¹‘¥‘…Ñ”œ°¹½½µÁ…Ñ¥‰±•Ñ¥Ù•5½‘•±Ìtì(€¥˜€ …¥ÍI•½É¡¡•­Ì¤ñğÉ•ÅÕ¥É•‘¡•­Ì¹Í½µ”¡¬ôù¡•­Ím­t„ôõÑÉÕ”¤¤É•ÑÕÉ¸€¥¹¥Ñ¥…°µ‰…Í•±¥¹”•Ù¥‘•¹”¡•­Ì‘¥¹½Ğ…±°Á…ÍÌœì(€½¹ÍĞ´õØ¹…¹‘¥‘…Ñ•5•ÑÉ¥Ì°‰´õØ¹±…¹•	…Í•±¥¹•5•ÑÉ¥Ìì(€¥˜€ …¥ÍI•½É¡Ø¹…¹‘¥‘…Ñ•I•¥ÍÑÉå%‘•¹Ñ¥Ñä¤ñğØ¹…¹‘¥‘…Ñ•I•¥ÍÑÉå%‘•¹Ñ¥Ñä¹¥„ôõµ½‘•°¹¥ñğØ¹…¹‘¥‘…Ñ•I•¥ÍÑÉå%‘•¹Ñ¥Ñä¹Ù•ÉÍ¥½¸„ôõµ½‘•°¹Ù•ÉÍ¥½¸ñğØ¹…¹‘¥‘…Ñ•I•¥ÍÑÉå%‘•¹Ñ¥Ñä¹ÍÑ…ÑÕÌ„ôô…¹‘¥‘…Ñ”œ¤É•ÑÕÉ¸€…¹‘¥‘…Ñ”É•¥ÍÑÉä¥‘•¹Ñ¥Ñä¥Ì¥¹½µÁ±•Ñ”½ÈÍÑ…±”œì(€¥˜€ …¥ÍI•½É¡´¤ñğ€…¥ÍI•½É¡‰´¤ñğ€…™¥¹¥Ñ”¡´¹¹I…•Ì±´¹±½1½ÍÌ±´¹‰É¥•È±´¹•”±‰´¹¹I…•Ì±‰´¹±½1½ÍÌ±‰´¹‰É¥•È±‰´¹•”¤ñğ´¹¹I…•Ì„ôõ½¡½ÉĞ¹É…•½Õ¹Ğñğ‰´¹¹I…•Ì„ôõ½¡½ÉĞ¹É…•½Õ¹Ğ¤É•ÑÕÉ¸€…¹‘¥‘…Ñ”…¹±…¹”µ‰…Í•±¥¹”µ•ÑÉ¥Ì‘¼¹½Ğ½Ù•ÈÑ¡”Í…µ”½µÁ±•Ñ”½¡½ÉĞœì(€¥˜€ …¥ÍI•½É¡Á…¥É•¤ñğÁ…¥É•¹µ•Ñ¡½„ôôÁ…¥É•‰½½ÑÍÑÉ…À‰äÉ…”ìÍ•Á…É…Ñ”‘…Ñ”µ±ÕÍÑ•È‰½½ÑÍÑÉ…Àœñğ€…™¥¹¥Ñ”¡Á…¥É•¹É…•½Õ¹Ğ±Á…¥É•¹±½1½ÍÍ•±Ñ„±Á…¥É•¹‰É¥•É•±Ñ„¤ñğÁ…¥É•¹É…•½Õ¹Ğ„ôõ½¡½ÉĞ¹É…•½Õ¹Ğñğ€…ÉÉ…ä¹¥ÍÉÉ…ä¡Á…¥É•¹±½1½ÍÍ$äÔ¤ñğÁ…¥É•¹±½1½ÍÍ$äÔ¹±•¹Ñ „ôôÈñğ€…™¥¹¥Ñ” ¸¸¹Á…¥É•¹±½1½ÍÍ$äÔ¤ñğ€…ÉÉ…ä¹¥ÍÉÉ…ä¡Á…¥É•¹‰É¥•É$äÔ¤ñğÁ…¥É•¹‰É¥•É$äÔ¹±•¹Ñ „ôôÈñğ€…™¥¹¥Ñ” ¸¸¹Á…¥É•¹‰É¥•É$äÔ¤ñğ€…ÉÉ…ä¹¥ÍÉÉ…ä¡Á…¥É•¹‘…Ñ•±ÕÍÑ•É1½1½ÍÍ$äÔ¤ñğÁ…¥É•¹‘…Ñ•±ÕÍÑ•É1½1½ÍÍ$äÔ¹±•¹Ñ „ôôÈñğ€…™¥¹¥Ñ” ¸¸¹Á…¥É•¹‘…Ñ•±ÕÍÑ•É1½1½ÍÍ$äÔ¤ñğ€…ÉÉ…ä¹¥ÍÉÉ…ä¡Á…¥É•¹‘…Ñ•±ÕÍÑ•É	É¥•É$äÔ¤ñğÁ…¥É•¹‘…Ñ•±ÕÍÑ•É	É¥•É$äÔ¹±•¹Ñ „ôôÈñğ€…™¥¹¥Ñ” ¸¸¹Á…¥É•¹‘…Ñ•±ÕÍÑ•É	É¥•É$äÔ¤ñğÁ…¥É•¹±½1½ÍÍ$äÕlÅtøôÀñğÁ…¥É•¹‰É¥•É$äÕlÅtøôÀñğÁ…¥É•¹‘…Ñ•±ÕÍÑ•É1½1½ÍÍ$äÕlÅtøôÀñğÁ…¥É•¹‘…Ñ•±ÕÍÑ•É	É¥•É$äÕlÅtøôÀ¤É•ÑÕÉ¸€Á…¥É•‰…Í•±¥¹”½µÁ…É¥Í½¸¥Ì¥¹½µÁ±•Ñ”½È‘½•Ì¹½ĞÍ¡½ÜÉ•ÅÕ¥É•¥µÁÉ½Ù•µ•¹Ğœì(€¥˜€ …ÉÉ…ä¹¥ÍÉÉ…ä¡Ø¹‘…Ñ•M±¥•Ì¤ñğØ¹‘…Ñ•M±¥•Ì¹±•¹Ñ ôôôÀñğØ¹‘…Ñ•M±¥•Ì¹Í½µ” ¡àé…¹ä¤ôø…¥ÍI•½É¡à¥ñğ…™¥¹¥Ñ”¡à¹É…•½Õ¹Ğ±à¹±½1½ÍÌ±à¹‰É¥•È±à¹•”±à¹‘•±Ñ…1½1½ÍÍYÍ1…¹”±à¹‘•±Ñ…	É¥•ÉYÍ1…¹”¥ññà¹É…•½Õ¹ĞğÄ¤¤É•ÑÕÉ¸€‘…Ñ”µÍ±¥”Ù…±¥‘…Ñ¥½¸•Ù¥‘•¹”¥Ì¥¹½µÁ±•Ñ”œì(€¥˜€¡Ø¹Í½ÕÉ•Ù…¥±…‰¥±¥Ñä„ôô…ÍÍÕµ•‘}™É½µ}	}ÁÉ•É…•}½¹Ñ•¹Ñ}¹½Ñ}É•½É‘•œñğØ¹¡¥ÍÑ½Éå•…ÑÕÉ•Ì„ôô¹½Ñ}½‰Í•ÉÙ•‘}½É}ÕÍ•œ¤É•ÑÕÉ¸€Í½ÕÉ”µ…Ù…¥±…‰¥±¥Ñä½È¡¥ÍÑ½Éäµ™•…ÑÕÉ”±¥µ¥Ñ…Ñ¥½¹Ì…É”µ¥ÍÍ¥¹œœì(€¥˜€ …¥ÍI•½É¡Ø¹ÁÉ½™¥Ñ…‰¥±¥Ñä¤ñğ€…l½Õ¹Ñ•É™…ÑÕ…±}É•Á±…å}Õ¹ÁÉ½Ù•¸œ°½Õ¹Ñ•É™…ÑÕ…±}É•Á±…å}Á½Í¥Ñ¥Ù•}•Ù¥‘•¹•}¹½Ñ}ÁÉ½™¥Ñ…‰¥±¥Ñå}ÁÉ½½˜t¹¥¹±Õ‘•Ì¡Ø¹ÁÉ½™¥Ñ…‰¥±¥Ñä¹ÍÑ…ÑÕÌ¤¤É•ÑÕÉ¸€ÁÉ½™¥Ñ…‰¥±¥Ñä•Ù¥‘•¹”µÕÍĞÉ•µ…¥¸•áÁ±¥¥Ñ±äÕ¹ÁÉ½Ù•¸½È½Õ¹Ñ•É™…ÑÕ…°œì(€½¹ÍĞÍ¹…ÁÍ¡½ĞõØ¹…Ñ¥Ù•5½‘•±M¹…ÁÍ¡½Ğì(€¥˜€ …¥ÍI•½É¡Í¹…ÁÍ¡½Ğ¤ñğÍ¹…ÁÍ¡½Ğ¹Í½ÕÉ”„ôô…ÕÑ¡•¹Ñ¥…Ñ•‘}É•¥ÍÑÉäœñğ€…¥ÍM¡„ÈÔØ¡Í¹…ÁÍ¡½Ğ¹Í¹…ÁÍ¡½ÑM¡„ÈÔØ¤ñğ€…ÉÉ…ä¹¥ÍÉÉ…ä¡Í¹…ÁÍ¡½Ğ¹µ½‘•±Ì¤ñğÍ¹…ÁÍ¡½Ğ¹µ½‘•±Ì¹Í½µ” ¡àé…¹ä¤ôø…¥ÍI•½É¡à¥ññÑåÁ•½˜à¹¥„ôôÍÑÉ¥¹œññÑåÁ•½˜à¹Ù•ÉÍ¥½¸„ôôÍÑÉ¥¹œñğ…¥ÍM¡„ÈÔØ¡à¹µ•ÑÉ¥ÍM¡„ÈÔØ¥ñğ…lÕ¹ÑÉ…¥¹•œ°…¹‘¥‘…Ñ”œ°…Ñ¥Ù”œ°É•Ñ¥É•t¹¥¹±Õ‘•Ì¡à¹ÍÑ…ÑÕÌ¥ñğ…l½µÁ…Ñ¥‰±”œ°¥¹½µÁ…Ñ¥‰±”œ°Õ¹­¹½İ¸t¹¥¹±Õ‘•Ì¡à¹…ÉÑ¥™…Ñ½µÁ…Ñ¥‰¥±¥Ñä¥ññà¹¥ôôõµ½‘•°¹¥¤¤É•ÑÕÉ¸€…ÕÑ¡•¹Ñ¥…Ñ•µ½‘•°É•¥ÍÑÉäÍ¹…ÁÍ¡½Ğ¥Ì¥¹Ù…±¥œì(€¥˜€¡Í¹…ÁÍ¡½Ğ¹µ½‘•±Ì¹Í½µ” ¡àé…¹ä¤ôùà¹ÍÑ…ÑÕÌôôô…Ñ¥Ù”œ˜™à¹…ÉÑ¥™…Ñ½µÁ…Ñ¥‰¥±¥Ñä„ôô¥¹½µÁ…Ñ¥‰±”œ¤¤É•ÑÕÉ¸€…¸…Ñ¥Ù”½µÁ…Ñ¥‰±”½ÈÕ¹Ù•É¥™¥•µ½‘•°ÁÉ•Ù•¹ÑÌ¥¹¥Ñ¥…°µ‰…Í•±¥¹”…ÁÁÉ½Ù…°œì(€¥˜€¡…İ…¥ĞÍ¡„ÈÔÙ)Í½¸¡Í¹…ÁÍ¡½Ğ¹µ½‘•±Ì¤„ôõÍ¹…ÁÍ¡½Ğ¹Í¹…ÁÍ¡½ÑM¡„ÈÔØ¤É•ÑÕÉ¸€…ÕÑ¡•¹Ñ¥…Ñ•µ½‘•°É•¥ÍÑÉäÍ¹…ÁÍ¡½Ğ‘¥•ÍĞ¥Ì¥¹Ù…±¥œì(€É•ÑÕÉ¸¹Õ±°ì)ô)…Íå¹Œ™Õ¹Ñ¥½¸É•¥ÍÑÉåM¹…ÁÍ¡½Ñ5…Ñ¡•Ì¡‘ˆèˆ°µ½‘•°è…¹ä°Ù…±¥‘…Ñ¥½¸è…¹ä¤ì(€½¹ÍĞÕÉÉ•¹Ğõ…İ…¥Ğ…±°ñ…¹äø¡‘ˆ°M1P¥±Ù•ÉÍ¥½¸±ÍÑ…ÑÕÌ±µ•ÑÉ¥Í}©Í½¸I=4µ½‘•±Ì]!IÍÁ½ÉĞôü9‰•Ñ}ÑåÁ”ôü9¥ğøü=IH	d¥±Ù•ÉÍ¥½¸±ÍÑ…ÑÕÌœ±µ½‘•°¹ÍÁ½ÉĞ±µ½‘•°¹‰•Ñ}ÑåÁ”±µ½‘•°¹¥¤ì(€½¹ÍĞ½É‘•Èô¡„é…¹ä±ˆé…¹ä¤ôù„¹¥ñˆ¹¥ü´Äé„¹¥ùˆ¹¥üÄé„¹Ù•ÉÍ¥½¸ñˆ¹Ù•ÉÍ¥½¸ü´Äé„¹Ù•ÉÍ¥½¸ùˆ¹Ù•ÉÍ¥½¸üÄé„¹ÍÑ…ÑÕÌñˆ¹ÍÑ…ÑÕÌü´Äé„¹ÍÑ…ÑÕÌùˆ¹ÍÑ…ÑÕÌüÄèÀì(€½¹ÍĞ•áÁ•Ñ•ô¡Ù…±¥‘…Ñ¥½¸¹…Ñ¥Ù•5½‘•±M¹…ÁÍ¡½Ğ¹µ½‘•±Ì…Ì…¹åmt¤¹µ…À¡àôø¡í¥éà¹¥±Ù•ÉÍ¥½¸éà¹Ù•ÉÍ¥½¸±ÍÑ…ÑÕÌéà¹ÍÑ…ÑÕÌ±µ•ÑÉ¥ÍM¡„ÈÔØéà¹µ•ÑÉ¥ÍM¡„ÈÔÙô¤¤¹Í½ÉĞ¡½É‘•È¤ì(€½¹ÍĞ…ÑÕ…°õ…İ…¥ĞAÉ½µ¥Í”¹…±°¡ÕÉÉ•¹Ğ¹Í½ÉĞ¡½É‘•È¤¹µ…À¡…Íå¹Œàôø¡í¥éà¹¥±Ù•ÉÍ¥½¸éà¹Ù•ÉÍ¥½¸±ÍÑ…ÑÕÌéà¹ÍÑ…ÑÕÌ±µ•ÑÉ¥ÍM¡„ÈÔØé…İ…¥ĞÍ¡„ÈÔÙQ•áĞ¡à¹µ•ÑÉ¥Í}©Í½¸üüœœ¥ô¤¤¤ì(€É•ÑÕÉ¸)M=8¹ÍÑÉ¥¹¥™ä¡…ÑÕ…°¤ôôõ)M=8¹ÍÑÉ¥¹¥™ä¡•áÁ•Ñ•¤ì)ô)…ÁÀ¹•Ğ œ½µ½‘•±Ìœ±…Íå¹ŒŒôùí½¹ÍĞÉ½İÌõ…İ…¥Ğ…±°ñ…¹äø¡Œ¹•¹Ø¹°M1P€¨I=4µ½‘•±Ì=IH	dÍÁ½ÉĞ±ÍÑ…ÑÕÌ±¥œ¤íÉ•ÑÕÉ¸Œ¹©Í½¸¡É½İÌ¹µ…À¡µ…Á5½‘•°¤¤íô¤ì)…ÁÀ¹Á½ÍĞ œ½µ½‘•±Ì¼é¥½ÁÉ½µ½Ñ”œ±…Íå¹ŒŒôùì(½¹ÍĞ‘ˆõŒ¹•¹Ø¹±¥õŒ¹É•Ä¹Á…É…´ ¥œ¤±´õ…İ…¥Ğ™¥ÉÍĞñ…¹äø¡‘ˆ°M1P€¨I=4µ½‘•±Ì]!I¥ôüœ±¥¤í¥˜ …´¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°µ½‘•°¹½Ğ™½Õ¹œ°ĞÀĞ¤í¥˜¡´¹ÍÑ…ÑÕÌôôôÕ¹ÑÉ…¥¹•œ¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°Õ¹ÑÉ…¥¹•µ½‘•°…¹¹½Ğ‰”ÁÉ½µ½Ñ•œ¤ì(±•Ğµ•ÑÉ¥ÌéI•½ÉñÍÑÉ¥¹œ±…¹äøíÑÉåíµ•ÑÉ¥Ìõ)M=8¹Á…ÉÍ”¡´¹µ•ÑÉ¥Í}©Í½¹ñğíôœ¤íõ…Ñ¡íÉ•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°µ½‘•°µ•ÑÉ¥Ì…É”¥¹Ù…±¥œ¤íô(½¹ÍĞ‰½‘äõ…İ…¥ĞŒ¹É•Ä¹©Í½¸ ¤¹…Ñ   ¤ôø¡íô¤¤…Ì…¹ä°¥¹¥Ñ¥…°õ‰½‘äü¹µ½‘”ôôô¥¹¥Ñ¥…±}‰…Í•±¥¹”œì(¥˜¡‰½‘äü¹µ½‘”„ôõÕ¹‘•™¥¹•˜˜…¥¹¥Ñ¥…°¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°Õ¹ÍÕÁÁ½ÉÑ•ÁÉ½µ½Ñ¥½¸µ½‘”œ¤ì(¥˜¡¥¹¥Ñ¥…°¥ì(€€½¹ÍĞ•ÉÉ½Èõ…İ…¥Ğ¥¹¥Ñ¥…±	…Í•±¥¹•Y…±¥‘…Ñ¥½¹ÉÉ½È¡´±µ•ÑÉ¥Ì±‰½‘ä±…Ñ”¹¹½Ü ¤¤í¥˜¡•ÉÉ½È¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ±•ÉÉ½È¤ì(€€¥˜ …¡…ÍM…™•	½…ÑIÕ¹Ñ¥µ”¡´¥ññµ•ÑÉ¥Ì¹‰½…ÑY•¹Õ•M¡•µ…Y•ÉÍ¥½¸„ôõM}	=Q}M!5ñğ…¥ÍM¡„ÈÔØ¡µ•ÑÉ¥Ì¹½ÉÉ•Ñ•‘QÉ…¥¹¥¹…Ñ…M¡„ÈÔØ¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°Ù…±¥‘…Ñ•Í…™”‰½…ĞÉÕ¹Ñ¥µ”Í¡•µ„¥ÌÉ•ÅÕ¥É•œ¤ì(€€¥˜ ……İ…¥ĞÉ•¥ÍÑÉåM¹…ÁÍ¡½Ñ5…Ñ¡•Ì¡‘ˆ±´±µ•ÑÉ¥Ì¹¥¹¥Ñ¥…±	…Í•±¥¹•Y…±¥‘…Ñ¥½¸¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°µ½‘•°É•¥ÍÑÉä¡…¹•Í¥¹”¥¹¥Ñ¥…°µ‰…Í•±¥¹”Ù…±¥‘…Ñ¥½¸ìÙ…±¥‘…Ñ”……¥¸œ¤ì(ô•±Í”ì(€€¥˜¡µ•ÑÉ¥Ì¹ÁÉ½µ½Ñ¥½¹±¥¥‰±”ôôõ™…±Í”¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ±ÑåÁ•½˜µ•ÑÉ¥Ì¹ÁÉ½µ½Ñ¥½¹I•…Í½¸ôôôÍÑÉ¥¹œœıµ•ÑÉ¥Ì¹ÁÉ½µ½Ñ¥½¹I•…Í½¸è…¹‘¥‘…Ñ”™…¥±•Í…µ”µ¡½±‘½ÕĞÁÉ½µ½Ñ¥½¸É¥Ñ•É¥„œ¤ì(€€¥˜¡´¹ÍÁ½ÉĞôôô‰½…Ğœ˜™µ•ÑÉ¥Ì¹ÁÉ½µ½Ñ¥½¹±¥¥‰±”„ôõÑÉÕ”¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°‰½…Ğ…¹‘¥‘…Ñ•ÌÉ•ÅÕ¥É”…¸•±¥¥‰±”Í…µ”µ¡½±‘½ÕĞ½µÁ…É¥Í½¸½È•áÁ±¥¥Ğ¥¹¥Ñ¥…°µ‰…Í•±¥¹”…ÁÁÉ½Ù…°œ¤ì(€€¥˜¡´¹‰•Ñ}ÑåÁ”„ôôİ¥¸œ˜˜…Ñ¥­•ÑY…±¥‘…Ñ¥½¹Ù¥‘•¹”¡µ•ÑÉ¥Ì±´¹‰•Ñ}ÑåÁ”¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°Ñ¥­•Ğµ½‘•°É•ÅÕ¥É•Ì„É••¹Ğ…ÉÑ¥™…Ğµ‰½Õ¹Ù…±¥‘…Ñ¥½¸…¹•áÁ±¥¥Ğ½µÁ±•Ñ”µÑ¥­•ĞÅÕ…±¥Ñä…Ñ”œ¤ì(€€¥˜¡´¹‰•Ñ}ÑåÁ”ôôôİ¥¸œ˜˜…¡…ÍM…™•	½…ÑIÕ¹Ñ¥µ”¡´¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°Ù…±¥‘…Ñ•Í…™”‰½…ĞÉÕ¹Ñ¥µ”Í¡•µ„¥ÌÉ•ÅÕ¥É•‰•™½É”‰½…Ğİ¥¸ÁÉ½µ½Ñ¥½¸œ¤ì(ô(¥˜ ……İ…¥ĞÉ•Í•ÉÙ•]½É­•É]É¥Ñ•Ì¡‘ˆ°È¤¥í½¹ÍĞ‰Õ‘•Ğõ…İ…¥ĞÉ•…‘]É¥Ñ•	Õ‘•Ğ¡‘ˆ¤íÉ•ÑÕÉ¸Œ¹©Í½¸¡í•ÉÉ½Èè‘…¥±äÄİÉ¥Ñ”‰Õ‘•ĞÕ¹…Ù…¥±…‰±”½È•á¡…ÕÍÑ•œ±½‘”é‰Õ‘•Ğ¹ÍÑ…Ñ”ôôôµ¥ÍÍ¥¹œññ‰Õ‘•Ğ¹ÍÑ…Ñ”ôôô¥¹Ù…±¥œüÅ}İÉ¥Ñ•}‰Õ‘•Ñ}Õ¹…Ù…¥±…‰±”œèÅ}İÉ¥Ñ•}‰Õ‘•Ñ}•á¡…ÕÍÑ•œ±‰Õ‘•Ñô°ĞÈä¤íô(¥˜¡‘ˆ¹‰…Ñ ¥ì(€€…İ…¥Ğ‘ˆ¹‰…Ñ ¡l(€€€€‘ˆ¹ÁÉ•Á…É” ‰UAQµ½‘•±ÌMPÍÑ…ÑÕÌôÉ•Ñ¥É•œ]!IÍÁ½ÉĞôü9‰•Ñ}ÑåÁ”ôü9ÍÑ…ÑÕÌô…Ñ¥Ù”œ9¥ğøü9a%MQL¡M1P€ÄI=4µ½‘•±Ì]!I¥ôü9ÍÑ…ÑÕÌôü9Ù•ÉÍ¥½¸ôü9µ•ÑÉ¥Í}©Í½¸%L€ü¤ˆ¤¹‰¥¹¡´¹ÍÁ½ÉĞ±´¹‰•Ñ}ÑåÁ”±¥±¥±´¹ÍÑ…ÑÕÌ±´¹Ù•ÉÍ¥½¸±´¹µ•ÑÉ¥Í}©Í½¸¤°(€€€€‘ˆ¹ÁÉ•Á…É” ‰UAQµ½‘•±ÌMPÍÑ…ÑÕÌô…Ñ¥Ù”œ]!I¥ôü9ÍÑ…ÑÕÌôü9Ù•ÉÍ¥½¸ôü9µ•ÑÉ¥Í}©Í½¸%L€üˆ¤¹‰¥¹¡¥±´¹ÍÑ…ÑÕÌ±´¹Ù•ÉÍ¥½¸±´¹µ•ÑÉ¥Í}©Í½¸¤°(€€t¤ì(ô•±Í”ì(€€½¹ÍĞ…Ñ¥Ù…Ñ¥½¸õ…İ…¥ĞÉÕ¸¡‘ˆ°‰UAQµ½‘•±ÌMPÍÑ…ÑÕÌô…Ñ¥Ù”œ]!I¥ôü9ÍÑ…ÑÕÌôü9Ù•ÉÍ¥½¸ôü9µ•ÑÉ¥Í}©Í½¸%L€üˆ±¥±´¹ÍÑ…ÑÕÌ±´¹Ù•ÉÍ¥½¸±´¹µ•ÑÉ¥Í}©Í½¸¤ì(€€¥˜ ……Ñ¥Ù…Ñ¥½¸¹µ•Ñ„ü¹¡…¹•Ì¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°µ½‘•°¡…¹•‘ÕÉ¥¹œÁÉ½µ½Ñ¥½¸ìÉ•Ù¥•Ü……¥¸œ°ĞÀä¤ì(€€…İ…¥ĞÉÕ¸¡‘ˆ°‰UAQµ½‘•±ÌMPÍÑ…ÑÕÌôÉ•Ñ¥É•œ]!IÍÁ½ÉĞôü9‰•Ñ}ÑåÁ”ôü9ÍÑ…ÑÕÌô…Ñ¥Ù”œ9¥ğøüˆ±´¹ÍÁ½ÉĞ±´¹‰•Ñ}ÑåÁ”±¥¤ì(ô(½¹ÍĞÕÁ‘…Ñ•õ…İ…¥Ğ™¥ÉÍĞñ…¹äø¡‘ˆ°M1P€¨I=4µ½‘•±Ì]!I¥ôüœ±¥¤í¥˜ …ÕÁ‘…Ñ•‘ññÕÁ‘…Ñ•¹ÍÑ…ÑÕÌ„ôô…Ñ¥Ù”œ¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°µ½‘•°ÁÉ½µ½Ñ¥½¸ÍÑ…Ñ”¡…¹•ìÉ•ÑÉä…™Ñ•ÈÉ•Ù¥•Üœ°ĞÀä¤ì(É•ÑÕÉ¸Œ¹©Í½¸¡µ…Á5½‘•°¡ÕÁ‘…Ñ•¤¤ì)ô¤ì(¼¼Q¡”½Á•É…Ñ½È…±¥…Ì¥Ì%9MQ}Q=-8µÍ½Á•‰•…ÕÍ”Ñ¥½¹Ì…¹¹½Ğ¡½±Ñ¡”(¼¼İ•ˆ]½É­•ÈÁÉ½áäÑ½­•¸¸%Ğ…•ÁÑÌ½¹±äÑ¡¥Ì…ÁÁÉ½Ù•Í…µ”µ‘…ä‰…Í•±¥¹”…¹(¼¼‘•±•…Ñ•ÌÑ¼Ñ¡”½É‘¥¹…ÉäÁÉ½µ½Ñ¥½¸É½ÕÑ”°ÁÉ•Í•ÉÙ¥¹œ•Ù•Éä•á¥ÍÑ¥¹œ…Ñ”¸)…ÁÀ¹Á½ÍĞ œ½¥¹•ÍĞ½…ÁÁÉ½Ù•µ‰½…Ğµ‰…Í•±¥¹”½ÁÉ½µ½Ñ”œ±…Íå¹ŒŒôùì(€¥˜ ……ÕÑ ¡Œ¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°Õ¹…ÕÑ¡½É¥é•œ°ĞÀÄ¤ì(€½¹ÍĞ‰½‘äõ…İ…¥ĞŒ¹É•Ä¹©Í½¸ ¤¹…Ñ   ¤ôù¹Õ±°¤…Ì…¹äì(€½¹ÍĞ­•åÌõ‰½‘ä˜™ÑåÁ•½˜‰½‘äôôô½‰©•Ğœ˜˜…ÉÉ…ä¹¥ÍÉÉ…ä¡‰½‘ä¤ı=‰©•Ğ¹­•åÌ¡‰½‘ä¤¹Í½ÉĞ ¤émtì(€¥˜¡­•åÌ¹±•¹Ñ „ôôÍññ­•åÍlÁt„ôô½¹™¥Éµ•ññ­•åÍlÅt„ôô‘…Ñ”ññ­•åÍlÉt„ôôÙ…±¥‘…Ñ¥½¹¥¹•ÉÁÉ¥¹Ğñğ(€€€€‰½‘ä¹½¹™¥Éµ•„ôõÑÉÕ•ññ‰½‘ä¹‘…Ñ”„ôõÕÑ…Ñ” ¥ññ‰½‘ä¹Ù…±¥‘…Ñ¥½¹¥¹•ÉÁÉ¥¹Ğ„ôô„ÔÔäØÔÔÑŒÍ‘•˜ÜĞàÔÌÄĞå™‘…‰„ÕˆÔĞÔÔÜĞÜÌĞÔå‰„ÄÉ™™ˆÜÄİÉÙ…àÀÕ”Á…•Œœ¤(€€€É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°•áÁ±¥¥ĞÕÉÉ•¹ĞµUQµ‘…ä½¹™¥Éµ…Ñ¥½¸™½ÈÑ¡”…ÁÁÉ½Ù•¥¹¥Ñ¥…°‰…Í•±¥¹”¥ÌÉ•ÅÕ¥É•œ¤ì(€½¹ÍĞ¡•…‘•ÉÌõ¹•Ü!•…‘•ÉÌ¡ìÕÑ¡½É¥é…Ñ¥½¸œé	•…É•È€‘íŒ¹•¹Ø¹%9MQ}Q=-9õ€°½¹Ñ•¹ĞµQåÁ”œè…ÁÁ±¥…Ñ¥½¸½©Í½¸ô¤ì(€¥˜¡Œ¹•¹Ø¹AI=ae}Q=-8¥¡•…‘•ÉÌ¹Í•Ğ `µI=$µAÉ½áäœ±Œ¹•¹Ø¹AI=ae}Q=-8¤ì(€½¹ÍĞ‘•±•…Ñ•õ…İ…¥Ğ…ÁÀ¹É•ÅÕ•ÍĞ œ½…Á¤½µ½‘•±Ì½‰½…Ğµİ¥¸µ±‰´´ÈÀÈØÄÀÄÀ´ÄÑˆÑ„äÁ„½ÁÉ½µ½Ñ”œ±ì(€€€µ•Ñ¡½èA=MPœ±¡•…‘•ÉÌ±‰½‘äé)M=8¹ÍÑÉ¥¹¥™ä¡íµ½‘”è¥¹¥Ñ¥…±}‰…Í•±¥¹”œ±½¹™¥Éµ•éÑÉÕ”±Ù…±¥‘…Ñ¥½¹¥¹•ÉÁÉ¥¹Ğé‰½‘ä¹Ù…±¥‘…Ñ¥½¹¥¹•ÉÁÉ¥¹Ñô¤°(€ô±Œ¹•¹Ø¤ì(€É•ÑÕÉ¸¹•ÜI•ÍÁ½¹Í”¡‘•±•…Ñ•¹‰½‘ä±íÍÑ…ÑÕÌé‘•±•…Ñ•¹ÍÑ…ÑÕÌ±ÍÑ…ÑÕÍQ•áĞé‘•±•…Ñ•¹ÍÑ…ÑÕÍQ•áĞ±¡•…‘•ÉÌé‘•±•…Ñ•¹¡•…‘•ÉÍô¤ì)ô¤ì)…ÁÀ¹Á½ÍĞ œ½µ½‘•±Ì¼é¥½É½±±‰…¬œ±…Íå¹ŒŒôùí½¹ÍĞ‘ˆõŒ¹•¹Ø¹±¥õŒ¹É•Ä¹Á…É…´ ¥œ¤±´õ…İ…¥Ğ™¥ÉÍĞñ…¹äø¡‘ˆ°M1P€¨I=4µ½‘•±Ì]!I¥ôüœ±¥¤í¥˜ …´¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°µ½‘•°¹½Ğ™½Õ¹œ°ĞÀĞ¤í¥˜¡´¹ÍÑ…ÑÕÌ„ôô…Ñ¥Ù”œ¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°µ½‘•°¥Ì¹½Ğ…Ñ¥Ù”œ¤í½¹ÍĞ½±õ…İ…¥Ğ™¥ÉÍĞñ…¹äø¡‘ˆ°‰M1P€¨I=4µ½‘•±Ì]!IÍÁ½ÉĞôü9‰•Ñ}ÑåÁ”ôü9ÍÑ…ÑÕÌôÉ•Ñ¥É•œ=IH	dÉ½İ¥M1%5%P€Äˆ±´¹ÍÁ½ÉĞ±´¹‰•Ñ}ÑåÁ”¤í¥˜ …½±¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°¹¼É•Ñ¥É•µ½‘•°Ñ¼É½±±‰…¬œ¤í¥˜¡´¹‰•Ñ}ÑåÁ”„ôôİ¥¸œ¥í±•Ğµ•ÑÉ¥Ìé…¹äíÑÉåíµ•ÑÉ¥Ìõ)M=8¹Á…ÉÍ”¡½±¹µ•ÑÉ¥Í}©Í½¹ñğíôœ¥õ…Ñ¡íÉ•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°É½±±‰…¬Ñ¥­•Ğµ½‘•°µ•Ñ…‘…Ñ„¥Ì¥¹Ù…±¥œ¥õ¥˜ …Ñ¥­•ÑY…±¥‘…Ñ¥½¹Ù¥‘•¹”¡µ•ÑÉ¥Ì±´¹‰•Ñ}ÑåÁ”¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°É½±±‰…¬Ñ…É•Ğ±…­ÌÕÉÉ•¹ĞÙ…±¥‘…Ñ•Ñ¥­•ĞÅÕ…±¥Ñä•Ù¥‘•¹”œ¥õ¥˜¡´¹‰•Ñ}ÑåÁ”ôôôİ¥¸œ˜˜…¡…ÍM…™•	½…ÑIÕ¹Ñ¥µ”¡½±¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°É½±±‰…¬Ñ…É•Ğ±…­ÌÙ…±¥‘…Ñ•Í…™”‰½…ĞÉÕ¹Ñ¥µ”Í¡•µ„œ¤í¥˜ ……İ…¥ĞÉ•Í•ÉÙ•]½É­•É]É¥Ñ•Ì¡‘ˆ°È¤¥í½¹ÍĞ‰Õ‘•Ğõ…İ…¥ĞÉ•…‘]É¥Ñ•	Õ‘•Ğ¡‘ˆ¤íÉ•ÑÕÉ¸Œ¹©Í½¸¡í•ÉÉ½Èè‘…¥±äÄİÉ¥Ñ”‰Õ‘•ĞÕ¹…Ù…¥±…‰±”½È•á¡…ÕÍÑ•œ±½‘”é‰Õ‘•Ğ¹ÍÑ…Ñ”ôôôµ¥ÍÍ¥¹œññ‰Õ‘•Ğ¹ÍÑ…Ñ”ôôô¥¹Ù…±¥œüÅ}İÉ¥Ñ•}‰Õ‘•Ñ}Õ¹…Ù…¥±…‰±”œèÅ}İÉ¥Ñ•}‰Õ‘•Ñ}•á¡…ÕÍÑ•œ±‰Õ‘•Ñô°ĞÈä¤íõ¥˜¡‘ˆ¹‰…Ñ ¥í…İ…¥Ğ‘ˆ¹‰…Ñ ¡m‘ˆ¹ÁÉ•Á…É” ‰UAQµ½‘•±ÌMPÍÑ…ÑÕÌôÉ•Ñ¥É•œ]!I¥ôü9ÍÑ…ÑÕÌô…Ñ¥Ù”œˆ¤¹‰¥¹¡¥¤±‘ˆ¹ÁÉ•Á…É” ‰UAQµ½‘•±ÌMPÍÑ…ÑÕÌô…Ñ¥Ù”œ]!I¥ôü9ÍÑ…ÑÕÌôÉ•Ñ¥É•œˆ¤¹‰¥¹¡½±¹¥¥t¤íõ•±Í•í…İ…¥ĞÉÕ¸¡‘ˆ°‰UAQµ½‘•±ÌMPÍÑ…ÑÕÌôÉ•Ñ¥É•œ]!I¥ôü9ÍÑ…ÑÕÌô…Ñ¥Ù”œˆ±¥¤í…İ…¥ĞÉÕ¸¡‘ˆ°‰UAQµ½‘•±ÌMPÍÑ…ÑÕÌô…Ñ¥Ù”œ]!I¥ôü9ÍÑ…ÑÕÌôÉ•Ñ¥É•œˆ±½±¹¥¤íõ½¹ÍĞÕÁ‘…Ñ•õ…İ…¥Ğ™¥ÉÍĞñ…¹äø¡‘ˆ°M1P€¨I=4µ½‘•±Ì]!I¥ôüœ±½±¹¥¤í¥˜ …ÕÁ‘…Ñ•‘ññÕÁ‘…Ñ•¹ÍÑ…ÑÕÌ„ôô…Ñ¥Ù”œ¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°É½±±‰…¬ÍÑ…Ñ”¡…¹•ìÉ•ÑÉä…™Ñ•ÈÉ•Ù¥•Üœ°ĞÀä¤íÉ•ÑÕÉ¸Œ¹©Í½¸¡µ…Á5½‘•°¡ÕÁ‘…Ñ•¤¤íô¤ì)…ÁÀ¹•Ğ œ½½±±•Ñ¥½¸½ÍÑ…ÑÕÌœ±…Íå¹ŒŒôùí½¹ÍĞ‘ˆõŒ¹•¹Ø¹±ÉÕ¹Ìõ…İ…¥Ğ…±°ñ…¹äø¡‘ˆ°M1P€¨I=4½±±•Ñ¥½¹}ÉÕ¹Ì=IH	dÍÑ…ÉÑ•‘}…ĞMœ¤°Ñ…‰±•ÌõlÙ•¹Õ•Ìœ°É…•Ìœ°•¹ÑÉ¥•Ìœ°½‘‘Í}Í¹…ÁÍ¡½ÑÌœ°É•ÍÕ±ÑÌœ°Á…å½ÕÑÌœ°µ½‘•±Ìœ°ÁÉ•‘¥Ñ¥½¹Ìœ°Ñ¥­•Ñ}ÁÉ•‘¥Ñ¥½¹Ìœ°‰•ÑÌœ°½±±•Ñ¥½¹}ÉÕ¹Ìœ°‘…¥±å}ÍÕµµ…É¥•Ìœ°Í•ÑÑ¥¹Ìt°Ñ…‰±•½Õ¹ÑÌéI•½ÉñÍÑÉ¥¹œ±¹Õµ‰•Èøõíôí™½È¡½¹ÍĞĞ½˜Ñ…‰±•Ì¥Ñ…‰±•½Õ¹ÑÍmÑtô¡…İ…¥Ğ™¥ÉÍĞñ…¹äø¡‘ˆ±M1P=U9P ¨¤¸I=4€‘íÑõ€¤¤ü¹¸üüÀì(½¹ÍĞ±…ÍÍ¥™¥•õÉÕ¹Ì¹µ…À¡Èôø¡ì¸¸¹È°¸¸¹½±±•Ñ¥½¹%ÍÍÕ•Ì¡È¥ô¤¤ì(½¹ÍĞ­•åÌõl¸¸¹¹•ÜM•Ğ¡ÉÕ¹Ì¹µ…À¡Èôù€‘íÈ¹Í½ÕÉ•õq¸‘íÈ¹ÍÁ½ÉÑõ€¤¥tì(½¹ÍĞÍ½ÕÉ•Ìõ­•åÌ¹µ…À¡­•äôùì(€½¹ÍĞÉ½ÕÀõ±…ÍÍ¥™¥•¹™¥±Ñ•È¡Èôù€‘íÈ¹Í½ÕÉ•õq¸‘íÈ¹ÍÁ½ÉÑõ€ôôõ­•ä¤±±…Ñ•ÍĞõÉ½ÕÁlÁtì(€½¹ÍĞ…ÑÑ•µÁÑÌõÉ½ÕÀ¹™¥±Ñ•È¡ÈôùÈ¹ÍÑ…ÑÕÌ„ôôÍ­¥ÁÁ•œ€˜˜€„¡È¹ÅÕ…±¥Ñä¹±•¹Ñ €˜˜€…È¹•ÉÉ½È€˜˜€…È¹É•½É‘Ì¤¤ì(€½¹ÍĞÍÕ•ÍÍ•Ìõ…ÑÑ•µÁÑÌ¹™¥±Ñ•È¡ÈôùÈ¹ÍÑ…ÑÕÌôôôÍÕ•ÍÌœñğ€¡È¹ÅÕ…±¥Ñä¹±•¹Ñ €˜˜€…È¹•ÉÉ½È€˜˜È¹É•½É‘ÌøÀ¤¤ì(€½¹ÍĞ±…ÍÑMÕ•ÍÍĞõÍÕ•ÍÍ•ÍlÁtü¹ÍÑ…ÉÑ•‘}…Ğüı¹Õ±°ì(€€¼¼ÅÕ…±¥ÑäÍ­¥À¥ÌÍÑ¥±°…¸•¹…‰±•½±±•Ñ½È°¹½Ğ„™•…ÑÕÉ”µ™±…œÍ¡ÕÑ‘½İ¸¸(€½¹ÍĞ•¹…‰±•õ±…Ñ•ÍĞ¹Í½ÕÉ”„ôô©É„œ€˜˜€¡±…Ñ•ÍĞ¹ÍÑ…ÑÕÌ„ôôÍ­¥ÁÁ•ññ±…Ñ•ÍĞ¹ÅÕ…±¥Ñä¹±•¹Ñ øÀ¤ì(€É•ÑÕÉ¸íÍ½ÕÉ”é±…Ñ•ÍĞ¹Í½ÕÉ”±ÍÁ½ÉĞé±…Ñ•ÍĞ¹ÍÁ½ÉĞ±•¹…‰±•±±…ÍÑIÕ¹Ğé±…Ñ•ÍĞ¹ÍÑ…ÉÑ•‘}…Ğ±±…ÍÑMÕ•ÍÍĞ±ÍÕ•ÍÍI…Ñ”é…ÑÑ•µÁÑÌ¹±•¹Ñ ıÍÕ•ÍÍ•Ì¹±•¹Ñ ½…ÑÑ•µÁÑÌ¹±•¹Ñ é¹Õ±°±ÉÕ¹ÌéÉ½ÕÀ¹±•¹Ñ ±É•½É‘ÌéÉ½ÕÀ¹É•‘Õ” ¡¸±È¤ôù¸¬¡È¹É•½É‘ÌüüÀ¤°À¤±ÅÕ…±¥Ñåá±ÕÍ¥½¹ÌéÉ½ÕÀ¹É•‘Õ” ¡¸±È¤ôù¸­È¹ÅÕ…±¥Ñä¹±•¹Ñ °À¤±™É•Í¡¹•ÍÍ5¥¹ÕÑ•Ìé±…Ñ•ÍĞ¹ÍÑ…ÉÑ•‘}…Ğı5…Ñ ¹µ…à À°¡…Ñ”¹¹½Ü ¤µ…Ñ”¹Á…ÉÍ”¡±…Ñ•ÍĞ¹ÍÑ…ÉÑ•‘}…Ğ¤¤¼ØÀÀÀÀ¤é¹Õ±°±¹½Ñ”é±…Ñ•ÍĞ¹Í½ÕÉ”ôôô©É„œüŸ¢š?Ò’â+¢«–.W–>[–ú_’â7–>¼œé¹Õ±±ôì(ô¤ì(½¹ÍĞ•ÉÉ½ÉÌõ±…ÍÍ¥™¥•¹™¥±Ñ•È¡Èôø¡È¹ÍÑ…ÑÕÌôôô™…¥±•ññÈ¹ÍÑ…ÑÕÌôôôÁ…ÉÑ¥…°œ¤€˜˜€¡È¹•ÉÉ½Éñğ…È¹ÅÕ…±¥Ñä¹±•¹Ñ ¤¤¹Í±¥” À°ÔÀ¤¹µ…À¡Èôø¡í…ĞéÈ¹ÍÑ…ÉÑ•‘}…Ğ±Í½ÕÉ”éÈ¹Í½ÕÉ”±•ÉÉ½ÈéÈ¹•ÉÉ½ÈüıÈ¹É•…Í½¸üıÈ¹ÍÑ…ÑÕÍô¤¤ì(½¹ÍĞÉ••¹ÑEÕ…±¥ÑåÕÑ½™˜õ…Ñ”¹¹½Ü ¤´ØÀ¨ØÁ|ÀÀÀì(½¹ÍĞÅÕ…±¥Ñåá±ÕÍ¥½¹Ìõ±…ÍÍ¥™¥•¹™¥±Ñ•È¡ÈôùÈ¹ÅÕ…±¥Ñä¹±•¹Ñ €˜˜…Ñ”¹Á…ÉÍ”¡È¹ÍÑ…ÉÑ•‘}…Ğ¤øõÉ••¹ÑEÕ…±¥ÑåÕÑ½™˜¤¹Í±¥” À°ÔÀ¤¹µ…À¡Èôø¡í…ĞéÈ¹ÍÑ…ÉÑ•‘}…Ğ±Í½ÕÉ”éÈ¹Í½ÕÉ”±½Õ¹ĞéÈ¹ÅÕ…±¥Ñä¹±•¹Ñ ±É•…Í½¸éÈ¹ÅÕ…±¥Ñä¹©½¥¸ œğ€œ¥ô¤¤ì(É•ÑÕÉ¸Œ¹©Í½¸¡íÍ½ÕÉ•Ì±•ÉÉ½ÉÌ±ÅÕ…±¥Ñåá±ÕÍ¥½¹Ì±Ñ…‰±•½Õ¹ÑÌ±Å]É¥Ñ•	Õ‘•Ğé…İ…¥ĞÉ•…‘]É¥Ñ•	Õ‘•Ğ¡‘ˆ¤±™É••Q¥•ÈéíÅI½İÍÁÁÉ½àé=‰©•Ğ¹Ù…±Õ•Ì¡Ñ…‰±•½Õ¹ÑÌ¤¹É•‘Õ” ¡„±ˆ¤ôù„­ˆ°À¤±ÅI½İÍ9½Ñ”èŸ–B#¢¢#¿’şw–¶c’â·»ó[¯¢†3šVÃ»ššº_Ÿ±½Õ‘™±…É—
+‹
+¯
+›Ï#–£’öO¹ÅÕ½Ñ‡’öÿR£¦?Ÿ¿
++ûo
+Oõô¤ì)ô¤ì)™½È¡½¹ÍĞÉ½ÕÑ”½˜=‰©•Ğ¹­•åÌ¡¥¹•ÍÑQ…‰±•Ì¤¤…ÁÀ¹Á½ÍĞ¡€½¥¹•ÍĞ¼‘íÉ½ÕÑ•õ€…Ì…¹ä±Œôù¥¹•ÍĞ¡Œ±É½ÕÑ”¤¤ì)…ÁÀ¹•Ğ œ½¥¹•ÍĞ½µ½‘•±Ìœ±…Íå¹ŒŒôùì(¥˜ ……ÕÑ ¡Œ¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°Õ¹…ÕÑ¡½É¥é•œ°ĞÀÄ¤ì(½¹ÍĞµ½‘•±Ìõ…İ…¥Ğ…±°ñ…¹äø¡Œ¹•¹Ø¹°M1P¥±ÍÁ½ÉĞ±‰•Ñ}ÑåÁ”±Ù•ÉÍ¥½¸±…±½É¥Ñ¡´±ÍÑ…ÑÕÌ±ÑÉ…¥¹}™É½´±ÑÉ…¥¹}Ñ¼±Ù…±¥‘}™É½´±Ù…±¥‘}Ñ¼±Ñ•ÍÑ}™É½´±Ñ•ÍÑ}Ñ¼±¹}ÑÉ…¥¸±µ•ÑÉ¥Í}©Í½¸±ÑÉ…¥¹•‘}…Ğ±¹½Ñ•ÌI=4µ½‘•±Ì=IH	dÍÁ½ÉĞ±ÍÑ…ÑÕÌ±¥œ¤ì(É•ÑÕÉ¸Œ¹©Í½¸¡íµ½‘•±Íô¤ì)ô¤ì)…ÁÀ¹Á½ÍĞ œ½…‘µ¥¸½½±±•Ğµ‰½…ĞµÉ•ÍÕ±ÑÌœ±…Íå¹ŒŒôùì(¥˜ ……ÕÑ ¡Œ¤˜˜…ÁÉ½áåÕÑ ¡Œ¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°Õ¹…ÕÑ¡½É¥é•œ°ĞÀÄ¤ì(¥˜¡Œ¹•¹Ø¹9	1}	=QI}IMU1QM}MIA„ôôÑÉÕ”œ¥É•ÑÕÉ¸Œ¹©Í½¸¡í•ÉÉ½ÈèÉ•ÍÕ±Ğ½±±•Ñ¥½¸‘¥Í…‰±•œ±½‘”èÉ•ÍÕ±ÑÍ}½±±•Ñ¥½¹}‘¥Í…‰±•ô°ĞÀÌ¤ì(½¹ÍĞ‰½‘äõ…İ…¥ĞŒ¹É•Ä¹©Í½¸ ¤¹…Ñ   ¤ôù¹Õ±°¤…Ìí½¹™¥Éµ•üéÕ¹­¹½İ¹õñ¹Õ±°ì(¥˜¡‰½‘äü¹½¹™¥Éµ•„ôõÑÉÕ”¥É•ÑÕÉ¸Œ¹©Í½¸¡í•ÉÉ½Èè•áÁ±¥¥Ğ½¹™¥Éµ…Ñ¥½¸É•ÅÕ¥É•œ±½‘”è½¹™¥Éµ…Ñ¥½¹}É•ÅÕ¥É•ô°ĞÀÀ¤ì(ÑÉäì(€€½¹ÍĞÉ•ÍÕ±Ğõ…İ…¥Ğ½±±•ÑI•ÍÕ±ÑÌ¡Œ¹•¹Ø¹±¹•Ü…Ñ” ¤±íµ½‘”èµ…¹Õ…°œ±É•ÅÕ•ÍÑ	Õ‘•ĞéíÕÍ•èÀ±µ…àèĞåõô¤ì(€€½¹Í½±”¹¥¹™¼¡)M=8¹ÍÑÉ¥¹¥™ä¡í•Ù•¹Ğè‰½…Ğµµ…¹Õ…°µÉ•ÍÕ±ÑÌœ±ÍÑ…ÑÕÌéÉ•ÍÕ±Ğ¹ÍÑ…ÑÕÌ±Ñ…É•ÑÌéÉ•ÍÕ±Ğ¹Ñ…É•ÑÌ±Ù•É¥™¥•éÉ•ÍÕ±Ğ¹Ù•É¥™¥•±É•½É‘ÌéÉ•ÍÕ±Ğ¹É•½É‘Ì±…ÑÑ•µÁÑ•éÉ•ÍÕ±Ğ¹…ÑÑ•µÁÑ•±É•…Í½¸èÉ•…Í½¸œ¥¸É•ÍÕ±ĞıÉ•ÍÕ±Ğ¹É•…Í½¸é¹Õ±°±™•Ñ¡…¥±ÕÉ•Ìè™•Ñ¡…¥±ÕÉ•Ìœ¥¸É•ÍÕ±ĞıÉ•ÍÕ±Ğ¹™•Ñ¡…¥±ÕÉ•Ìémuô¤¤ì(€€É•ÑÕÉ¸Œ¹©Í½¸¡É•ÍÕ±Ğ¤ì(ô…Ñ íÉ•ÑÕÉ¸Œ¹©Í½¸¡í•ÉÉ½Èèµ…¹Õ…°É•ÍÕ±ĞÁ…ÍÌ™…¥±•œ±½‘”èµ…¹Õ…±}É•ÍÕ±ÑÍ}™…¥±•ô°ÔÀÌ¤íô)ô¤ì)…ÁÀ¹Á½ÍĞ œ½…‘µ¥¸½Í•ÑÑ±”œ±…Íå¹ŒŒôùì(¥˜ ……ÕÑ ¡Œ¤¥ì(€€¥˜ …ÁÉ½áåÕÑ ¡Œ¤¥É•ÑÕÉ¸©Í½¹ÉÉ½È¡Œ°Õ¹…ÕÑ¡½É¥é•œ°ĞÀÄ¤ì(€€½¹ÍĞ‰½‘äõ…İ…¥ĞŒ¹É•Ä¹©Í½¸ ¤¹…Ñ   ¤ôù¹Õ±°¤…Ìí½¹™¥Éµ•üéÕ¹­¹½İ¹õñ¹Õ±°ì(€€¥˜¡‰½‘äü¹½¹™¥Éµ•„ôõÑÉÕ”¥É•ÑÕÉ¸Œ¹©Í½¸¡í•ÉÉ½Èè•áÁ±¥¥Ğ½¹™¥Éµ…Ñ¥½¸É•ÅÕ¥É•œ±½‘”è½¹™¥Éµ…Ñ¥½¹}É•ÅÕ¥É•ô°ĞÀÀ¤ì(ô(É•ÑÕÉ¸Œ¹©Í½¸¡íÍ•ÑÑ±•é…İ…¥ĞÍ•ÑÑ±•=Á•¸¡Œ¹•¹Ø¹¥ô¤ì)ô¤ì)•áÁ½ÉĞ‘•™…Õ±Ğì™•Ñ è…ÁÀ¹™•Ñ °Í¡•‘Õ±•è…Íå¹Œ€¡•Ù•¹ĞèM¡•‘Õ±•‘½¹ÑÉ½±±•È°•¹Øè¹Ø¤€ôøì(€¥˜€¡•Ù•¹Ğ¹É½¸€„ôô€œ¨€¨€¨€¨€¨œ¤É•ÑÕÉ¸ì(€½¹ÍĞÉ•ÅÕ•ÍÑ	Õ‘•ĞõíÕÍ•èÀ±µ…àèĞåôì(€½¹ÍĞÁ…Á•É¹…‰±•õ•¹Ø¹9	1}UQ=}	PôôôÑÉÕ”œñğ€¡…İ…¥ĞÍ•ÑÑ¥¹œ¡•¹Ø¹°…ÕÑ½}‰•Ñ}•¹…‰±•œ°™…±Í”œ¤¤ôôôÑÉÕ”œì(€¥˜€¡Á…Á•É¹…‰±•¤ì(€€€€¼¼Ù•Éä•á¥ÍÑ¥¹œµ¥¹ÕÑ”Ñ¥¬•Ù…±Õ…Ñ•ÌÑ¡”‰½Õ¹‘•P´ØÀİ¥¹‘½Ü‰•™½É”(€€€€¼¼½±±•Ñ½Èİ½É¬…¹‰•™½É”Ñ¡”ÍÁ•¥…°€èÀÔ•…É±äÉ•ÑÕÉ¸¸(€€€½¹ÍĞÁ…Á•Èõ…İ…¥Ğ…ÕÑ½	•Ñ]¥Ñ¡I•Á½ÉĞ¡•¹Ø¹±ÑÉÕ”¤ì(€€€½¹Í½±”¹¥¹™¼¡)M=8¹ÍÑÉ¥¹¥™ä¡í•Ù•¹ĞèÁ…Á•Èµ‘•¥Í¥½¸µÑ¥µ¥¹œœ°¸¸¹Á…Á•È¹É•Á½ÉÑô¤¤ì(€ô(€½¹ÍĞÁ…Á•É	½Õ¹‘…Éä€ô5…Ñ ¹™±½½È¡•Ù•¹Ğ¹Í¡•‘Õ±•‘Q¥µ”€¼€ØÁ|ÀÀÀ¤€”€ÄÀ€ôôô€Àì(€€¼¼I•Í•ÉÙ”µ¥¹ÕÑ”€èÀÔ™½ÈÑ¡”¡½ÕÉ±äÉ•ÍÕ±ĞÁ…ÍÌ¸Q¡¥Ì¥Ì¹½Ğ„Ñ•¸µµ¥¹ÕÑ”(€€¼¼µ…¥¹Ñ•¹…¹”‰½Õ¹‘…Éäì¥Í½±…Ñ¥¹œ¥Ğ…Ù½¥‘Ì½¹ÍÕµ¥¹œÑ¡”€ÔÀµÅÕ•Éä™É•”(€€¼¼Ä…±±½İ…¹”¹••‘•‰ä½‘‘Ì€¬Í•ÑÑ±•µ•¹Ğ¥¸Ñ¡”Í…µ”¥¹Ù½…Ñ¥½¸¸(€¥˜€¡•¹Ø¹9	1}	=QI}IMU1QM}MIA€ôôô€ÑÉÕ”œ€˜˜5…Ñ ¹™±½½È¡•Ù•¹Ğ¹Í¡•‘Õ±•‘Q¥µ”¼ØÁ|ÀÀÀ¤”ØÀôôôÔ¤ì(€€€ÑÉäì(€€€€€½¹ÍĞÉ•ÍÕ±Ğõ…İ…¥Ğ½±±•ÑI•ÍÕ±ÑÌ¡•¹Ø¹±¹•Ü…Ñ” ¤±íÉ•ÅÕ•ÍÑ	Õ‘•Ñô¤ì(€€€€€½¹Í½±”¹¥¹™¼¡)M=8¹ÍÑÉ¥¹¥™ä¡í•Ù•¹Ğè‰½…Ğµ¡½ÕÉ±äµÉ•ÍÕ±ÑÌœ±ÍÑ…ÑÕÌéÉ•ÍÕ±Ğ¹ÍÑ…ÑÕÌ±Ñ…É•ÑÌéÉ•ÍÕ±Ğ¹Ñ…É•ÑÌ±Ù•É¥™¥•éÉ•ÍÕ±Ğ¹Ù•É¥™¥•±É•½É‘ÌéÉ•ÍÕ±Ğ¹É•½É‘Ì±…ÑÑ•µÁÑ•éÉ•ÍÕ±Ğ¹…ÑÑ•µÁÑ•±É•…Í½¸èÉ•…Í½¸œ¥¸É•ÍÕ±ĞıÉ•ÍÕ±Ğ¹É•…Í½¸é¹Õ±°±™•Ñ¡…¥±ÕÉ•Ìè™•Ñ¡…¥±ÕÉ•Ìœ¥¸É•ÍÕ±ĞıÉ•ÍÕ±Ğ¹™•Ñ¡…¥±ÕÉ•Ìémuô¤¤ì(€€€ô…Ñ ì(€€€€€½¹Í½±”¹¥¹™¼¡)M=8¹ÍÑÉ¥¹¥™ä¡í•Ù•¹Ğè‰½…Ğµ¡½ÕÉ±äµÉ•ÍÕ±ÑÌœ±ÍÑ…ÑÕÌè™…¥±•œ±É•…Í½¸è¡½ÕÉ±äµÁ…ÍÌµ™…¥±•ô¤¤ì(€€€ô(€€€É•ÑÕÉ¸ì(€ô(€¥˜€¡Á…Á•É	½Õ¹‘…Éä¤ì(€€€€¼¼Q¡”µ¥¹ÕÑ”µ±•Ù•°Á…Á•È‘•¥Í¥½¸…±É•…‘äÉ…¸…‰½Ù”¸-••ÀÍ•ÑÑ±•µ•¹Ğ…¹(€€€€¼¼µ…¥¹Ñ•¹…¹”½¸Ñ¡•¥È•á¥ÍÑ¥¹œÑ•¸µµ¥¹ÕÑ”…‘•¹”İ¥Ñ¡½ÕĞ„Í•½¹‰ÕäÁ…ÍÌ¸(€€€…İ…¥ĞÉ½¸¡•¹Ø¹°™…±Í”¤ì(€ô(€¥˜€¡•¹Ø¹9	1}	=QI}=M}MIA€ôôô€ÑÉÕ”œñğ•¹Ø¹9	1}	=QI}QI%Q}=M}MIA€ôôô€ÑÉÕ”œ¤ì(€€€€¼¼½±±•Ñ¥½¸ÅÕ½Ñ„½İÉ¥Ñ”™…¥±ÕÉ”µÕÍĞ¹½Ğ‰±½¬Ñ•¸µµ¥¹ÕÑ”Í•ÑÑ±•µ•¹Ğ¸(€€€…İ…¥Ğ½±±•ÑM¡•‘Õ±•‘=‘‘Ì¡•¹Ø¹°•¹Ø¹9	1}	=QI}=M}MIAôôôÑÉÕ”œ°•¹Ø¹9	1}	=QI}QI%Q}=M}MIAôôôÑÉÕ”œ±É•ÅÕ•ÍÑ	Õ‘•Ğ¤¹…Ñ   ¤€ôøÕ¹‘•™¥¹•¤ì(€ô(€É•ÑÕÉ¸ì)ôôì)•áÁ½ÉĞì…ÁÀ°É½¸°Í•ÑÑ±•=Á•¸°…ÕÑ½	•Ğ°…ÕÑ½	•Ñ]¥Ñ¡I•Á½ÉĞ°ÁÉ¥µ…ÉåA…Á•ÉQ¥µ¥¹œ°É•½É‘A…Á•É‰ÍÑ•¹Ñ¥½¸ôì(
