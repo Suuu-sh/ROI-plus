@@ -435,6 +435,79 @@ app.post('/ingest/write-budget/allowance', async c=>{
   if (!applied) return c.json({ error:'allowance requires a valid current-day ledger and may be applied only once', code:'d1_write_budget_allowance_conflict', budget:await readWriteBudget(c.env.DB) }, 409);
   return c.json(await readWriteBudget(c.env.DB), 200);
 });
+// Narrow, authenticated read surface for a one-shot same-day forecast. It
+// returns only raw boat inputs available by a recent, caller-supplied cutoff;
+// the Python model remains the sole inference implementation.
+app.get('/ingest/today-boat-forecast-inputs', async c=>{
+  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
+  const day=c.req.query('date'), cutoff=c.req.query('cutoff'), nowMs=Date.now();
+  const parsed=cutoff ? Date.parse(cutoff) : NaN;
+  if (!day || day!==jstRaceDate() || !cutoff || !Number.isFinite(parsed) ||
+      parsed>nowMs || nowMs-parsed>5*60_000 || !/(Z|[+-]\d{2}:\d{2})$/i.test(cutoff))
+    return jsonError(c, 'current JST race date and recent non-future ISO cutoff are required');
+  const races=await all<any>(c.env.DB,`SELECT r.id,r.sport,r.venue_id,r.race_date,r.race_no,r.post_time,r.status,
+      r.wind_speed,r.wave_height,r.data_origin
+    FROM races r
+    WHERE r.sport='boat' AND r.race_date=? AND r.data_origin='real' AND r.status='scheduled'
+      AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?)
+      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
+    ORDER BY julianday(r.post_time),r.race_no`,day,cutoff);
+  if(races.length>180)return jsonError(c,'eligible race input exceeds the one-day operator response bound',413);
+  const entries=races.length ? await all<any>(c.env.DB,`SELECT e.id,e.race_id,e.number,e.frame,e.name,e.jockey,e.trainer,
+      e.weight_carried,e.horse_weight,e.racer_class,e.national_win_rate,e.local_win_rate,
+      e.motor_no,e.motor_2rate,e.boat_no,e.boat_2rate,e.exhibition_time,e.start_exhibition,
+      e.features_json,e.available_at,e.data_origin
+    FROM entries e JOIN races r ON r.id=e.race_id
+    WHERE r.sport='boat' AND r.race_date=? AND r.data_origin='real' AND r.status='scheduled'
+      AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?)
+      AND e.data_origin='real' AND julianday(e.available_at)<=julianday(?)
+      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
+    ORDER BY r.race_no,e.number`,day,cutoff,cutoff) : [];
+  if(entries.length>1_000)return jsonError(c,'eligible entry input exceeds the one-day operator response bound',413);
+  return c.json({date:day,cutoff,races,entries});
+});
+app.get('/ingest/today-boat-forecast-status', async c=>{
+  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
+  const day=c.req.query('date'), modelId=c.req.query('model_id');
+  if(!day||day!==jstRaceDate()||modelId!=='boat-win-lgbm-20261010-14b4a90a')
+    return jsonError(c,'approved current-day model and race date are required');
+  const db=c.env.DB, cutoff=now(), freshAfter=oddsFreshAfter();
+  const model=await first<any>(db,'SELECT id,status FROM models WHERE id=? AND sport=\'boat\' AND bet_type=\'win\'',modelId);
+  const coverage=await first<any>(db,`SELECT COUNT(DISTINCT r.id) race_count,COUNT(e.id) entry_count
+    FROM races r LEFT JOIN entries e ON e.race_id=r.id AND e.data_origin='real' AND julianday(e.available_at)<=julianday(?)
+    WHERE r.sport='boat' AND r.race_date=? AND r.data_origin='real' AND r.status='scheduled'
+      AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?)
+      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,cutoff,day,cutoff);
+  const predictions=await first<any>(db,`SELECT COUNT(*) row_count,COUNT(DISTINCT p.race_id) race_count
+    FROM predictions p JOIN races r ON r.id=p.race_id JOIN entries e ON e.race_id=p.race_id AND e.number=p.number AND e.data_origin='real'
+    WHERE p.model_id=? AND p.data_origin='real' AND r.sport='boat' AND r.race_date=? AND r.status='scheduled'
+      AND r.data_origin='real' AND julianday(r.post_time)>julianday(?) AND julianday(p.predicted_at)<=julianday(?)
+      AND julianday(p.predicted_at)<=julianday(r.post_time)
+      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,modelId,day,cutoff,cutoff);
+  const odds=await first<any>(db,`SELECT COUNT(*) row_count,COUNT(DISTINCT race_id) race_count
+    FROM odds_snapshots o JOIN races r ON r.id=o.race_id
+    WHERE o.data_origin='real' AND r.data_origin='real' AND r.sport='boat' AND r.race_date=? AND r.status='scheduled'
+      AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?)
+      AND o.bet_type='win' AND o.source IN ('boatrace-odds-tf','boatrace-odds-tf-final')
+      AND julianday(o.captured_at)<=julianday(?) AND julianday(o.captured_at)>=julianday(?)
+      AND julianday(o.captured_at)<=julianday(r.post_time)
+      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,day,cutoff,cutoff,freshAfter);
+  return c.json({date:day,cutoff,model:model??null,eligible:coverage??{race_count:0,entry_count:0},predictions:predictions??{row_count:0,race_count:0},freshOfficialWinOdds:odds??{row_count:0,race_count:0},autoBetEnabled:await setting(db,'auto_bet_enabled','false'),autoBetPaused:await setting(db,'auto_bet_paused','true'),writeBudget:await readWriteBudget(db)});
+});
+// One explicit operator call may invoke only the existing bounded win-odds
+// collector. It cannot settle bets, run auto-bet, or enable either feature.
+app.post('/ingest/collect-win-odds', async c=>{
+  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
+  const body=await c.req.json().catch(()=>null) as any;
+  const keys=body&&typeof body==='object'&&!Array.isArray(body)?Object.keys(body).sort():[];
+  if(keys.length!==2||keys[0]!=='confirmed'||keys[1]!=='date'||body.confirmed!==true||body.date!==utcDate())
+    return jsonError(c,'explicit current-UTC-day win-odds collection confirmation is required');
+  if(c.env.ENABLE_BOATRACE_ODDS_SCRAPE!=='true')return jsonError(c,'official win-odds collector is disabled',409);
+  const approved=await first<any>(c.env.DB,"SELECT status FROM models WHERE id='boat-win-lgbm-20261010-14b4a90a' AND sport='boat' AND bet_type='win'");
+  if(approved?.status!=='active')return jsonError(c,'approved boat-win baseline must be active before operator odds collection',409);
+  const outcome=await collectOdds(c.env.DB,new Date(),{maxRequests:30});
+  return c.json(outcome);
+});
 app.get('/races', async c=>{
   const db=c.env.DB, sport=c.req.query('sport'), date=c.req.query('date'), origin=originFilter(c.req.query('origin'));
   if (sport && !validSport(sport)) return jsonError(c,'invalid sport');
@@ -808,6 +881,23 @@ app.post('/models/:id/promote',async c=>{
  }
  const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!updated||updated.status!=='active')return jsonError(c,'model promotion state changed; retry after review',409);
  return c.json(mapModel(updated));
+});
+// The operator alias is INGEST_TOKEN-scoped because Actions cannot hold the
+// web Worker proxy token. It accepts only this approved same-day baseline and
+// delegates to the ordinary promotion route, preserving every existing gate.
+app.post('/ingest/approved-boat-baseline/promote',async c=>{
+  if(!auth(c))return jsonError(c,'unauthorized',401);
+  const body=await c.req.json().catch(()=>null) as any;
+  const keys=body&&typeof body==='object'&&!Array.isArray(body)?Object.keys(body).sort():[];
+  if(keys.length!==3||keys[0]!=='confirmed'||keys[1]!=='date'||keys[2]!=='validationFingerprint'||
+     body.confirmed!==true||body.date!==utcDate()||body.validationFingerprint!=='a5596554c3def74853149fdaba5b54557473459ba12ffb717d2d6ad805e0acec')
+    return jsonError(c,'explicit current-UTC-day confirmation for the approved initial baseline is required');
+  const headers=new Headers({'Authorization':`Bearer ${c.env.INGEST_TOKEN}`,'Content-Type':'application/json'});
+  if(c.env.PROXY_TOKEN)headers.set('X-ROI-Proxy',c.env.PROXY_TOKEN);
+  const delegated=await app.request('/api/models/boat-win-lgbm-20261010-14b4a90a/promote',{
+    method:'POST',headers,body:JSON.stringify({mode:'initial_baseline',confirmed:true,validationFingerprint:body.validationFingerprint}),
+  },c.env);
+  return new Response(delegated.body,{status:delegated.status,statusText:delegated.statusText,headers:delegated.headers});
 });
 app.post('/models/:id/rollback',async c=>{const db=c.env.DB,id=c.req.param('id'),m=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!m)return jsonError(c,'model not found',404);if(m.status!=='active')return jsonError(c,'model is not active');const old=await first<any>(db,"SELECT * FROM models WHERE sport=? AND bet_type=? AND status='retired' ORDER BY rowid DESC LIMIT 1",m.sport,m.bet_type);if(!old)return jsonError(c,'no retired model to rollback');if(m.bet_type!=='win'){let metrics:any;try{metrics=JSON.parse(old.metrics_json||'{}')}catch{return jsonError(c,'rollback ticket model metadata is invalid')}if(!ticketValidationEvidence(metrics,m.bet_type))return jsonError(c,'rollback target lacks current validated ticket quality evidence')}if(m.bet_type==='win'&&!hasSafeBoatRuntime(old))return jsonError(c,'rollback target lacks validated safe boat runtime schema');if(!await reserveWorkerWrites(db,2)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}if(db.batch){await db.batch([db.prepare("UPDATE models SET status='retired' WHERE id=? AND status='active'").bind(id),db.prepare("UPDATE models SET status='active' WHERE id=? AND status='retired'").bind(old.id)]);}else{await run(db,"UPDATE models SET status='retired' WHERE id=? AND status='active'",id);await run(db,"UPDATE models SET status='active' WHERE id=? AND status='retired'",old.id);}const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',old.id);if(!updated||updated.status!=='active')return jsonError(c,'rollback state changed; retry after review',409);return c.json(mapModel(updated));});
 app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,'SELECT * FROM collection_runs ORDER BY started_at DESC'), tables=['venues','races','entries','odds_snapshots','results','payouts','models','predictions','ticket_predictions','bets','collection_runs','daily_summaries','settings'], tableCounts:Record<string,number>={};for(const t of tables)tableCounts[t]=(await first<any>(db,`SELECT COUNT(*) n FROM ${t}`))?.n??0;
