@@ -25,6 +25,44 @@ app.use('*', async (c, next) => {
   if (c.req.header('X-ROI-Proxy') !== proxy) return c.json({ error: 'forbidden' }, 403);
   return next();
 });
+// Cache only authenticated, read-only dashboard data. Keep URLs (including the
+// complete query string) as keys; mutable ledgers and purchase-sensitive views
+// intentionally bypass this cache. Cache API failures must never fail a read.
+const READ_CACHE_TTL_SECONDS = 10;
+function cacheableReadPath(path: string): boolean {
+  return path === '/api/races' || path === '/api/rankings' || path === '/api/models'
+    || path === '/api/collection/status' || /^\/api\/races\/[^/]+$/.test(path);
+}
+app.use('*', async (c, next) => {
+  if (c.req.method !== 'GET' || !c.env.PROXY_TOKEN || !cacheableReadPath(new URL(c.req.url).pathname)) return next();
+  const keyUrl = new URL(c.req.url);
+  keyUrl.pathname = `/__roi_read_cache_v1${keyUrl.pathname}`;
+  const key = new Request(keyUrl.toString(), { method: 'GET' });
+  let cache: Cache | undefined;
+  let cached: Response | undefined;
+  try {
+    cache = (globalThis.caches as CacheStorage & { default?: Cache } | undefined)?.default;
+    cached = await cache?.match(key);
+  } catch { /* Cache is an optimization only. */ }
+  if (cached) {
+    const headers = new Headers(cached.headers);
+    headers.set('Cache-Control', 'private, no-store');
+    return new Response(cached.body, { status: cached.status, statusText: cached.statusText, headers });
+  }
+
+  // Do not wrap next() in a cache-error handler: application failures must
+  // propagate normally and must never cause the route to be executed twice.
+  await next();
+  const responseHeaders = new Headers(c.res.headers);
+  responseHeaders.set('Cache-Control', 'private, no-store');
+  c.res = new Response(c.res.body, { status: c.res.status, statusText: c.res.statusText, headers: responseHeaders });
+  if (c.res.status !== 200 || !c.res.headers.get('content-type')?.includes('application/json')) return;
+  const storeHeaders = new Headers(c.res.headers);
+  storeHeaders.set('Cache-Control', `public, max-age=${READ_CACHE_TTL_SECONDS}`);
+  try {
+    await cache?.put(key, new Response(c.res.clone().body, { status: c.res.status, statusText: c.res.statusText, headers: storeHeaders }));
+  } catch { /* Ignore cache write errors; return the fresh D1 response. */ }
+});
 // Persist timestamps with a consistent JST offset; selection queries use
 // julianday() so comparisons remain correct when imported ISO offsets differ.
 const now = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
@@ -539,7 +577,7 @@ app.get('/bets',async c=>{const sport=c.req.query('sport'),status=c.req.query('s
  (SELECT cr.status FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_status,
  (SELECT cr.started_at FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND julianday(cr.started_at)<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_attempt_at,
  (SELECT COALESCE(cr.finished_at,cr.started_at) FROM collection_runs cr WHERE r.data_origin='real' AND r.sport='boat' AND cr.source='mbrace-boat' AND cr.sport=r.sport AND cr.target_date=r.race_date AND cr.status='success' AND julianday(COALESCE(cr.finished_at,cr.started_at))<=julianday('now') ORDER BY julianday(cr.started_at) DESC,cr.id DESC LIMIT 1) result_collection_last_success_at
- FROM bets b JOIN races r ON r.id=b.race_id JOIN venues v ON v.id=r.venue_id WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.status=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at DESC`,sport||null,sport||null,status||null,status||null,origin,origin);return c.json(rows.map(b=>({...mapBet(b),venueName:b.venue_name,raceNo:b.race_no})));});
+FROM bets b JOIN races r ON r.id=b.race_id JOIN venues v ON v.id=r.venue_id WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.status=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at DESC`,sport||null,sport||null,status||null,status||null,origin,origin);return c.json(rows.map(b=>({...mapBet(b),venueName:b.venue_name,raceNo:b.race_no,raceDate:b.race_date})));});
 app.get('/performance/rank-comparison',async c=>{
  const db=c.env.DB,origin=originFilter(c.req.query('origin'));
  const rows=await all<any>(db,`SELECT b.* FROM bets b JOIN races r ON r.id=b.race_id AND r.data_origin=b.data_origin

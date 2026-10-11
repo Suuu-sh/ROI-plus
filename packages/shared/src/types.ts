@@ -64,7 +64,7 @@ export interface Bet {
   resultCollectionStatus?: 'success' | 'partial' | 'failed' | 'skipped' | null;
   resultCollectionLastAttemptAt?: string | null;
   resultCollectionLastSuccessAt?: string | null;
-  venueName?: string; raceNo?: number;
+  venueName?: string; raceNo?: number; raceDate?: string;
 }
 
 export interface RankComparisonMeasure { stake: number; payout: number; profit: number; roi: number | null }

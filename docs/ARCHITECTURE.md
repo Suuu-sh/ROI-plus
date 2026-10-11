@@ -14,6 +14,8 @@
 
 ## システム構成
 
+競技ページの主表示は `GET /api/bets?sport=&origin=` の保存済み仮想購入をレースごとにまとめる購入レビューである。賭け記録は購入時点で表示し、結果・払戻を照合する詳細だけを開いた時に `GET /api/races/:id` で取得する。購入時の確率・オッズ・期待収益率は bet の保存値を表示し、後日の予測や結果で置き換えない。着順・払戻が欠ける場合は欠損として示し、単一レースの結果から因果説明を生成しない。サンプル購入には出所バッジとサンプル結果の注記を表示する。日付フィルターは購入一覧とレース探索に共通し、「レースを調べる」内にランキング・出走表を残す。購入候補表示に結果を混入させない。
+
 ```text
 ブラウザー
   └─ Cloudflare Worker `roi-plus` (apps/web)
@@ -41,6 +43,8 @@ GitHub Actions / ローカル Python (ml/)
 - 認証付き `GET /api/ingest/write-budget` で当日 UTC 日付・上限・予約済み・残量・状態を参照できる。未登録の初期化は人手の運用操作とし、旧利用量が不明な日は当日の全上限（20,000、うち odds 10,000）を予約する `POST /api/ingest/write-budget/seed` を使う。その UTC 日が終われば次の日付への CAS 予約でカウンターが切り替わる。ローカル DB ではテスト fixture が予算を明示的に seed する。
 
 ### API の主な面
+
+閲覧系の `/api/races`・`/api/races/:id`・`/api/rankings`・`/api/models`・`/api/collection/status` は、`PROXY_TOKEN` が設定された環境で認証を通過した GET のみ Cloudflare Cache API に最大10秒保存する。URL全体（クエリを含む）でキーを分離し、200 JSON以外は保存しない。キャッシュ障害時はD1読み取りへフォールバックする。`/api/bets`・`/api/performance/*`・`/api/health`・ingest/admin と全書込系は対象外で、仮想購入の判断・記録は常にD1の最新状態を使う。Cloudflare Cache API は拠点ごとのキャッシュであり、全地域でのヒットやD1読み取り削減量は保証しない。
 
 `GET /api/races`, `/api/races/:id`, `/api/rankings`, `/api/bets`, `/api/performance/*`, `/api/models`, `/api/collection/status` が読み取り面。`GET /api/ingest/models` は `INGEST_TOKEN` 認証付きのモデルレジストリ読み取りで、Pythonが人手昇格後の状態を確認する。`POST /api/bets` は仮想単勝で、複数選択は `{raceId, betType:'win', requestId?, selections:[{selection, stake}, ...]}`（1回1〜6件）を受け付け、ticket group 全体を1ステートメントで残高ガード付き記録する。`requestId` を指定すると同じ payload の再送は冪等、同じ ID の別 payload は409。旧 `{selection, stake}` 形式も互換用に受け付ける。`GET /api/performance/rank-comparison` は購入時に保存した rank 1 を使い、全券確定・rank 1 を含む複数選択 group を同じレース集合・同じ総賭け金で比較する。順位の根拠は `candidate_rank/count`, `predicted_at_at_bet`, `odds_captured_at`, `bet_group_id` に保存し、後から再推定しない。旧 bet は順位不明として同比較から除外する。`POST /api/models/:id/promote|rollback` はモデル管理、`POST /api/ingest/{venues,races,entries,results,payouts,odds,predictions,models,collection-runs}` は Python 等からの冪等同期。`POST /api/admin/settle` は認証付き精算操作。多くの読み取り API は `origin=sample|real|all` で出所を絞れる。実際の入出力契約は `apps/api/src/index.ts` と `packages/shared/src/types.ts` が根拠。
 

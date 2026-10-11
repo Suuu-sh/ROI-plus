@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Sqlite from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -23,7 +23,7 @@ beforeEach(()=>{
  sqlite.prepare("UPDATE models SET metrics_json=json_set(CASE WHEN json_valid(metrics_json) THEN metrics_json ELSE '{}' END,'$.boatVenueSchemaVersion','boat-venue-v2','$.correctedTrainingDataSha256',?,'$.boatArtifactSha256',?) WHERE id='boat-active'").run('f'.repeat(64),'a'.repeat(64));
  sqlite.prepare("UPDATE races SET post_time=? WHERE data_origin='sample' AND status='scheduled'").run(jstIso(Date.now()+60*60_000));
 });
-afterEach(()=>sqlite.close());
+afterEach(()=>{vi.unstubAllGlobals();sqlite.close();});
 const addBetInputs=(raceId:string,prefix:string)=>{
  const entry=sqlite.prepare('SELECT number FROM entries WHERE race_id=? ORDER BY number LIMIT 1').get(raceId) as {number:number};
  sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES(?,?,'win',?,10,?,'test','sample')").run(`${prefix}-odds`,raceId,String(entry.number),jstIso(Date.now()-5000));
@@ -192,7 +192,7 @@ describe('EdgeLab API',()=>{
   expect(resp.status).toBe(201);const bet=await resp.json() as any;expect(bet.expectedRoi).toBeCloseTo(.2);expect(bet.oddsCapturedAt).toBe(oddsCapturedAt);
   expect(sqlite.prepare('SELECT odds_captured_at FROM bets WHERE id=?').get(bet.id)).toMatchObject({odds_captured_at:oddsCapturedAt});
   const listed=await app.request('/api/bets?origin=sample',{},env());
-  expect((await listed.json() as any[]).find(x=>x.id===bet.id)).toMatchObject({oddsCapturedAt});
+  const listedBet=(await listed.json() as any[]).find(x=>x.id===bet.id);expect(listedBet).toMatchObject({oddsCapturedAt});expect(listedBet.raceDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   sqlite.prepare("UPDATE races SET status='finished' WHERE id=?").run(race.id);
   const field=sqlite.prepare('SELECT number FROM entries WHERE race_id=? AND data_origin=\'sample\' ORDER BY number').all(race.id) as {number:number}[];
   for(const [i,runner] of field.entries())sqlite.prepare('INSERT INTO results(race_id,finish_order,number,data_origin) VALUES(?,?,?,\'sample\')').run(race.id,i+1,runner.number);
@@ -572,6 +572,44 @@ describe('EdgeLab API',()=>{
   expect((await app.request('/api/models',{headers:{'X-ROI-Proxy':'p'}},e)).status).toBe(200);
   expect((await app.request('/api/health',{},e)).status).toBe(200);
   expect((await app.request('/api/ingest/venues',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:'[]'},e)).status).toBe(200);
+ });
+ it('caches only successful authenticated GET reads with query-separated keys and falls back on cache errors',async()=>{
+  const values=new Map<string,Response>(); let puts=0,prepareCount=0,failMatch=false,failPut=false;
+  const fakeCache={
+   match:async(request:Request)=>{if(failMatch)throw new Error('cache unavailable');const response=values.get(request.url);return response?.clone();},
+   put:async(request:Request,response:Response)=>{puts++;if(failPut)throw new Error('cache write failed');values.set(request.url,response.clone());},
+  };
+  vi.stubGlobal('caches',{default:fakeCache});
+  const countingDb={prepare:(sql:string)=>{prepareCount++;return DB.prepare(sql);}};
+  const e={...env({PROXY_TOKEN:'proxy'}),DB:countingDb};
+  const unauthorized=await app.request('/api/models',{},e);
+  expect(unauthorized.status).toBe(403); expect(puts).toBe(0);
+  const headers={'X-ROI-Proxy':'proxy'};
+  expect((await app.request('/api/models?view=a',{headers},e)).status).toBe(200);
+  expect((await app.request('/api/models?view=a',{headers},e)).headers.get('Cache-Control')).toBe('private, no-store');
+  expect([...values.values()][0].headers.get('Cache-Control')).toBe('public, max-age=10');
+  const cacheKeyUrl=new URL([...values.keys()][0]);
+  expect(cacheKeyUrl.hostname).toBe('localhost'); expect(cacheKeyUrl.pathname).toBe('/__roi_read_cache_v1/api/models');
+  const afterFirst=prepareCount;
+  const hit=await app.request('/api/models?view=a',{headers},e);
+  expect(hit.status).toBe(200); expect(hit.headers.get('Cache-Control')).toBe('private, no-store');
+  expect(prepareCount).toBe(afterFirst);
+  expect((await app.request('/api/models?view=a',{},e)).status).toBe(403); // warm cache never bypasses auth
+  expect((await app.request('/api/models?view=b',{headers},e)).status).toBe(200);
+  expect(prepareCount).toBeGreaterThan(afterFirst);
+  const beforeErrorPuts=puts;
+  expect((await app.request('/api/races?origin=real',{headers},e)).status).toBe(400);
+  expect(puts).toBe(beforeErrorPuts);
+  const beforeExcluded=puts;
+  expect((await app.request('/api/bets',{headers},e)).status).toBe(200);
+  expect(puts).toBe(beforeExcluded);
+  const beforeFallback=prepareCount; failMatch=true;
+  expect((await app.request('/api/models?view=c',{headers},e)).status).toBe(200);
+  expect(prepareCount).toBeGreaterThan(beforeFallback);
+  failMatch=false; failPut=true;
+  const beforePutFailure=prepareCount;
+  expect((await app.request('/api/models?view=d',{headers},e)).headers.get('Cache-Control')).toBe('private, no-store');
+  expect(prepareCount).toBeGreaterThan(beforePutFailure);
  });
  it('blocks boat win runtime, promotion, rollback and rebuy without venue-v2 and corrected-data SHA metadata',async()=>{
   const race=sqlite.prepare("SELECT r.id FROM races r WHERE r.data_origin='sample' AND r.sport='boat' AND r.status='scheduled' LIMIT 1").get() as any;
