@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { Bet, RaceDetail } from '@edgelab/shared/src/types'
 import { api } from '../src/lib/api'
-import { filterBetsByDate, PurchasedRace } from '../src/pages/SportPage'
+import { filterBetsByDate, PurchasedRace, PurchasedRaces } from '../src/pages/SportPage'
 
 vi.mock('../src/lib/api', () => ({ api: { race: vi.fn() } }))
 afterEach(() => { cleanup(); vi.clearAllMocks() })
@@ -87,6 +87,47 @@ describe('purchased race review', () => {
     fireEvent.click(screen.getByText('購入後の結果レビューを開く'))
     fireEvent.click(screen.getByText('購入後の結果レビューを開く'))
     expect(api.race).toHaveBeenCalledTimes(1)
+  })
+
+  it('groups multiple selections into a horizontal rail and opens only the requested review', async () => {
+    vi.mocked(api.race).mockResolvedValue(race([]))
+    render(<MemoryRouter><PurchasedRaces bets={[bet, { ...bet, id: 'b2', selection: '3' }, { ...bet, id: 'b3', raceId: 'other', venueName: null }]} loading={false} error={null} onRetry={vi.fn()} /></MemoryRouter>)
+    const rail = screen.getByRole('region', { name: '購入レースの横スクロール' })
+    expect(rail.querySelectorAll('article')).toHaveLength(2)
+    expect(screen.getByText('2026-10-10・このレースの購入 2件')).toBeTruthy()
+    expect(screen.getByText('other 1R')).toBeTruthy()
+    const scrollBy = vi.fn()
+    Object.defineProperty(rail, 'scrollBy', { value: scrollBy })
+    fireEvent.keyDown(rail, { key: 'ArrowRight' })
+    expect(scrollBy).toHaveBeenCalledOnce()
+    fireEvent.scroll(rail)
+    expect(api.race).not.toHaveBeenCalled()
+    fireEvent.click(screen.getAllByText('購入後の結果レビューを開く')[1])
+    await screen.findByText(/サンプル結果（実績評価には含めません）/)
+    expect(api.race).toHaveBeenCalledTimes(1)
+    expect(api.race).toHaveBeenCalledWith('other')
+  })
+
+  it('keeps multi-ticket cards compact with a keyboard-focusable scrollable snapshot area', () => {
+    render(<MemoryRouter><PurchasedRace bets={Array.from({ length: 6 }, (_, index) => ({ ...bet, id: `b${index}`, selection: String(index + 1) }))} /></MemoryRouter>)
+    const snapshots = screen.getByLabelText('このレースの購入明細')
+    expect(snapshots.tabIndex).toBe(0)
+    expect(snapshots.className).toContain('max-h-[300px]')
+    expect(snapshots.querySelectorAll('dl')).toHaveLength(6)
+    expect(screen.getByText('購入明細は上下にスクロールできます')).toBeTruthy()
+    expect(api.race).not.toHaveBeenCalled()
+  })
+
+  it('preserves date filtering and empty, loading, and error states', () => {
+    const props = { bets: [bet], date: '2026-10-09', loading: false, error: null, onRetry: vi.fn() }
+    const view = render(<MemoryRouter><PurchasedRaces {...props} /></MemoryRouter>)
+    expect(screen.queryByRole('region')).toBeNull()
+    expect(screen.getByText(/この日付の仮想購入はありません/)).toBeTruthy()
+    view.rerender(<MemoryRouter><PurchasedRaces {...props} bets={null} loading /></MemoryRouter>)
+    expect(screen.queryByText(/この日付の仮想購入はありません/)).toBeNull()
+    view.rerender(<MemoryRouter><PurchasedRaces {...props} error={new Error('unavailable')} /></MemoryRouter>)
+    fireEvent.click(screen.getByRole('button', { name: /再試行/ }))
+    expect(props.onRetry).toHaveBeenCalledOnce()
   })
 
   it('filters purchase records by race date', () => {

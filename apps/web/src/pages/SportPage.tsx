@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import type { Bet, RankingCandidate, TicketCandidate, EntryView, RaceDetail, RaceSummary, Sport } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
@@ -103,24 +103,64 @@ function ResearchArea({ sport, date, origin, raceId, onDate, onChanged }: { spor
 
 export function filterBetsByDate(bets: Bet[], date: string) { return bets.filter((bet) => bet.raceDate === date) }
 
-function PurchasedRaces({ bets, date, loading, error, onRetry }: { bets: Bet[] | null; date?: string; loading: boolean; error: Error | null; onRetry: () => void }) {
+function PurchaseRail({ groups }: { groups: Bet[][] }) {
+  const rail = useRef<HTMLDivElement>(null)
+  const id = useId()
+  const [edges, setEdges] = useState({ start: true, end: true })
+  useEffect(() => {
+    const element = rail.current
+    if (!element) return
+    const update = () => setEdges({ start: element.scrollLeft <= 1, end: element.scrollLeft + element.clientWidth >= element.scrollWidth - 1 })
+    update()
+    element.addEventListener('scroll', update, { passive: true })
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
+    observer?.observe(element)
+    return () => { element.removeEventListener('scroll', update); observer?.disconnect() }
+  }, [])
+  const slide = (direction: number) => {
+    const element = rail.current
+    if (!element) return
+    const card = element.firstElementChild as HTMLElement | null
+    element.scrollBy({ left: direction * ((card?.getBoundingClientRect().width ?? element.clientWidth) + 12), behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+  }
+  return <div className="min-w-0">
+    <div className="flex items-center justify-between gap-2 px-3 pt-3">
+      <p className="text-[11px] text-muted">{groups.length}レース・横にスワイプして確認</p>
+      <div className="flex gap-1">
+        <button className="btn-ghost focus-ring h-8 w-8 px-0" aria-label="前の購入レース" aria-controls={id} disabled={edges.start} onClick={() => slide(-1)}>‹</button>
+        <button className="btn-ghost focus-ring h-8 w-8 px-0" aria-label="次の購入レース" aria-controls={id} disabled={edges.end} onClick={() => slide(1)}>›</button>
+      </div>
+    </div>
+    <div ref={rail} id={id} role="region" aria-label="購入レースの横スクロール" tabIndex={0}
+      className="purchase-rail focus-ring"
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); slide(event.key === 'ArrowLeft' ? -1 : 1) }
+      }}>
+      {groups.map((items) => <PurchasedRace key={items[0].raceId} bets={items} />)}
+    </div>
+  </div>
+}
+
+export function PurchasedRaces({ bets, date, loading, error, onRetry }: { bets: Bet[] | null; date?: string; loading: boolean; error: Error | null; onRetry: () => void }) {
   const grouped = new Map<string, Bet[]>()
   for (const bet of date ? filterBetsByDate(bets ?? [], date) : bets ?? []) grouped.set(bet.raceId, [...(grouped.get(bet.raceId) ?? []), bet])
-  return <Section title="購入したレース" right={<span className="text-xs text-muted">{date ?? '全期間'}・仮想購入レビュー</span>}>
+  return <Section className="min-w-0 overflow-hidden" title="購入したレース" right={<span className="text-xs text-muted">{date ?? '全期間'}・仮想購入レビュー</span>}>
     {error ? <ErrorState error={error} onRetry={onRetry} /> : loading && !bets ? <Loading rows={2} /> : grouped.size === 0 ? <Empty>{date ? 'この日付の仮想購入はありません。日付を切り替えるか、' : '仮想購入はまだありません。'}レースを調べるから購入できます。</Empty> :
-      <div className="divide-y divide-line">{[...grouped.values()].map((items) => <PurchasedRace key={items[0].raceId} bets={items} />)}</div>}
+      <PurchaseRail key={`${date ?? 'all'}:${[...grouped.keys()].join(',')}`} groups={[...grouped.values()]} />}
   </Section>
 }
 
 export function PurchasedRace({ bets }: { bets: Bet[] }) {
   const [reviewEnabled, setReviewEnabled] = useState(false)
-  return <article className="p-4">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <div className="flex items-center gap-2"><SportIcon sport={bets[0].sport} className="h-4 w-4"/><h3 className="font-semibold">{bets[0].venueName ?? bets[0].raceId} {bets[0].raceNo != null ? `${bets[0].raceNo}R` : ''}</h3><OriginBadge origin={bets[0].dataOrigin}/></div>
-      <Link className="text-xs text-muted hover:text-ink" to={`/${bets[0].sport}/${bets[0].raceId}`}>出走表を見る →</Link>
+  return <article className="purchase-race min-w-0 rounded-xl border border-line bg-surface p-3">
+    <div className="flex min-w-0 items-start justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-1.5"><SportIcon sport={bets[0].sport} className="h-4 w-4 shrink-0"/><h3 className="min-w-0 break-words text-sm font-semibold [overflow-wrap:anywhere]">{bets[0].venueName ?? bets[0].raceId} {bets[0].raceNo != null ? `${bets[0].raceNo}R` : ''}</h3></div><span className="shrink-0 whitespace-nowrap"><OriginBadge origin={bets[0].dataOrigin}/></span>
     </div>
     <p className="mt-1 text-xs text-muted">{bets[0].raceDate ?? '日付不明'}・このレースの購入 {bets.length}件</p>
-    <div className="mt-3 space-y-2">{bets.map((bet) => <PurchaseSnapshot key={bet.id} bet={bet} />)}</div>
+    <Link className="focus-ring mt-2 inline-block rounded text-xs text-muted hover:text-ink" to={`/${bets[0].sport}/${bets[0].raceId}`}>出走表を見る →</Link>
+    {bets.length > 2 && <p className="mt-2 text-[10px] text-muted">購入明細は上下にスクロールできます</p>}
+    <div className={`mt-2 space-y-2 ${bets.length > 2 ? 'max-h-[300px] overflow-y-auto overscroll-contain pr-1 [scrollbar-width:thin]' : ''}`} tabIndex={bets.length > 2 ? 0 : undefined} aria-label={bets.length > 2 ? 'このレースの購入明細' : undefined}>{bets.map((bet) => <PurchaseSnapshot key={bet.id} bet={bet} />)}</div>
     <details className="mt-3 rounded-lg border border-line" onToggle={(event) => { if (event.currentTarget.open) setReviewEnabled(true) }}>
       <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted">購入後の結果レビューを開く</summary>
       {reviewEnabled && <RaceOutcome bets={bets} />}
@@ -130,15 +170,17 @@ export function PurchasedRace({ bets }: { bets: Bet[] }) {
 
 function PurchaseSnapshot({ bet: b }: { bet: Bet }) {
   const label = b.status === 'open' ? '仮想購入・精算待ち' : b.status === 'void' ? '無効' : b.status === 'won' ? '的中（精算記録）' : '不的中（精算記録）'
-  return <div className="rounded-lg border border-line bg-raised/30 p-3">
-    <div className="flex flex-wrap items-center justify-between gap-2"><div className="font-mono text-sm font-semibold">{betTypeLabel[b.betType]} {b.selection}<span className="ml-2 rounded bg-raised px-1.5 py-0.5 font-sans text-[10px] text-muted">仮想・{b.mode === 'auto' ? '自動' : '手動'}</span></div><span className={`text-xs ${b.status === 'won' ? 'text-pos' : b.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{label}</span></div>
-    <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-4">
-      <span className="text-muted">購入時確率</span><span className="num">{pct(b.predictedProb)}</span>
-      <span className="text-muted">購入時オッズ</span><span className="num">{odds(b.oddsAtBet)}</span>
-      <span className="text-muted">購入時期待収益率</span><span className={`num ${tone(b.expectedRoi)}`}>{signedPct(b.expectedRoi)}</span>
-      <span className="text-muted">購入額 / 払戻 / 損益</span><span className="num">{b.stake.toLocaleString()}円 / {b.payout == null ? '記録なし' : `${b.payout.toLocaleString()}円`} / {b.profit == null ? '記録なし' : `${b.profit > 0 ? '+' : ''}${b.profit.toLocaleString()}円`}</span>
-      <span className="text-muted">購入時候補順位</span><span>{b.candidateRank == null ? '記録なし' : `${b.candidateRank}位 / ${b.candidateCount ?? '—'}件`}</span>
-    </div>
+  return <div className="rounded-lg border border-line bg-raised/30 p-2.5">
+    <div className="flex flex-wrap items-center justify-between gap-1"><div className="break-words font-mono text-sm font-semibold">{betTypeLabel[b.betType]} {b.selection}<span className="ml-2 rounded bg-raised px-1.5 py-0.5 font-sans text-[10px] text-muted">仮想・{b.mode === 'auto' ? '自動' : '手動'}</span></div><span className={`text-[11px] ${b.status === 'won' ? 'text-pos' : b.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{label}</span></div>
+    <dl className="mt-2 grid grid-cols-3 gap-x-2 gap-y-2 text-xs">
+      <div><dt className="text-[10px] text-muted">購入時確率</dt><dd className="num mt-0.5">{pct(b.predictedProb)}</dd></div>
+      <div><dt className="text-[10px] text-muted">購入時オッズ</dt><dd className="num mt-0.5">{odds(b.oddsAtBet)}</dd></div>
+      <div><dt className="text-[10px] text-muted">購入時期待収益率</dt><dd className={`num mt-0.5 ${tone(b.expectedRoi)}`}>{signedPct(b.expectedRoi)}</dd></div>
+      <div><dt className="text-[10px] text-muted">購入額</dt><dd className="num mt-0.5 break-words">{b.stake.toLocaleString()}円</dd></div>
+      <div><dt className="text-[10px] text-muted">払戻</dt><dd className="num mt-0.5 break-words">{b.payout == null ? '記録なし' : `${b.payout.toLocaleString()}円`}</dd></div>
+      <div><dt className="text-[10px] text-muted">損益</dt><dd className={`num mt-0.5 break-words ${tone(b.profit)}`}>{b.profit == null ? '記録なし' : `${b.profit > 0 ? '+' : ''}${b.profit.toLocaleString()}円`}</dd></div>
+    </dl>
+    <p className="mt-2 border-t border-line pt-1.5 text-[10px] text-muted">購入時候補順位 <span className="num text-ink">{b.candidateRank == null ? '記録なし' : `${b.candidateRank}位 / ${b.candidateCount ?? '—'}件`}</span></p>
   </div>
 }
 
