@@ -11,6 +11,8 @@ const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 export type ResultsRequestBudget = { used: number; max: number };
 type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string };
 export type CollectResultsOptions = {
+  // Set only by the authenticated, explicitly confirmed manual route.
+  mode?: 'hourly' | 'manual';
   maxRequests?: number;
   requestBudget?: ResultsRequestBudget;
   sleep?: (ms: number) => Promise<void>;
@@ -100,8 +102,14 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
   const skipped = { status:'skipped' as const, records:0, verified:0, targets:0, attempted:0 };
   if (!db.batch) return {...skipped,reason:'atomic D1 batch required'};
   const hour = now.toISOString().slice(0,13), budget = opts.requestBudget ?? {used:0,max:49};
-  const priorHour = await first<{value:string}>(db,"SELECT value FROM settings WHERE key='boat_results_hour'");
-  if (priorHour && priorHour.value >= hour) return skipped;
+  const manual=opts.mode==='manual';
+  const lockKey=manual?'boat_results_manual_until':'boat_results_hour';
+  const prior=await first<{value:string}>(db,'SELECT value FROM settings WHERE key=?',lockKey);
+  if(manual&&prior){
+    const until=Date.parse(prior.value);
+    if(!Number.isFinite(until))return {...skipped,reason:'manual lock state unavailable'};
+    if(until>now.getTime())return {...skipped,reason:'manual run in progress or throttled'};
+  } else if(!manual&&prior&&prior.value>=hour)return skipped;
   const capacity=Math.min(MAX_TARGETS,Math.max(0,Math.floor(opts.maxRequests ?? MAX_TARGETS)),Math.max(0,budget.max-budget.used));
   if (!capacity) return skipped;
   const targets = await selectResultsTargets(db,now,capacity);
@@ -112,12 +120,19 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
     {units:16+targets.length*55,category:'essential'},
     {units:targets.length*5,category:'collection'},
   ])) return {...skipped,reason:'daily D1 write budget unavailable or exhausted'};
-  const lock=await db.prepare(`INSERT INTO settings(key,value) VALUES('boat_results_hour',?)
-    ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value<excluded.value`).bind(hour).run();
-  if (!lock.meta?.changes) return skipped;
+  // The manual lease bypasses only the hourly marker. A 5-minute lease
+  // covers the bounded 261s fetch path; after completion retain a 60s throttle.
+  const lease=manual?new Date(now.getTime()+5*60_000).toISOString():hour;
+  const lock=manual
+    ?await db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
+      WHERE julianday(settings.value)<=julianday(?)`).bind(lockKey,lease,now.toISOString()).run()
+    :await db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
+      WHERE settings.value<excluded.value`).bind(lockKey,lease).run();
+  if(!lock.meta?.changes)return {...skipped,reason:manual?'manual run in progress or throttled':'hourly run already claimed'};
   const fetcher=opts.fetch ?? ((input,init)=>fetch(input,init)),sleep=opts.sleep ?? pause;
   let attempted=0,records=0,failed=0,verified=0;
   const fetchFailures:Array<FetchFailure & {count:number}>=[];
+  try {
   for (const [index,race] of targets.entries()) {
     if (budget.used>=budget.max) break;
     const url=resultUrl(race),startedAt=new Date(now.getTime()+index).toISOString();
@@ -187,6 +202,10 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
     }
   }
   return {status:records?(failed?'partial' as const:'success' as const):'failed' as const,records,verified,targets:targets.length,attempted,failed,fetchFailures};
+  } finally {
+    if(manual)await db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?')
+      .bind(new Date(Date.now()+60_000).toISOString(),lockKey,lease).run().catch(()=>undefined);
+  }
 }
 function logStatement(db:Db,race:RaceTarget,startedAt:string,status:string,records:number,evidence:Record<string,unknown>,guardData?:string) {
   return db.prepare(`INSERT INTO collection_runs(id,source,sport,target_date,started_at,finished_at,status,records,error,reason)

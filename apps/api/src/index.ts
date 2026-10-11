@@ -30,7 +30,7 @@ app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHe
 app.use('*', async (c, next) => {
   const proxy = c.env.PROXY_TOKEN;
   const path = new URL(c.req.url).pathname;
-  if (!proxy || path === '/api/health' || path.startsWith('/api/ingest/') || path === '/api/admin/settle') return next();
+  if (!proxy || path === '/api/health' || path.startsWith('/api/ingest/') || path === '/api/admin/settle' || path === '/api/admin/collect-boat-results') return next();
   if (c.req.header('X-ROI-Proxy') !== proxy) return c.json({ error: 'forbidden' }, 403);
   return next();
 });
@@ -90,6 +90,9 @@ const availableBankrollSql = `(COALESCE((SELECT CAST(value AS REAL) FROM setting
   - COALESCE((SELECT SUM(CASE WHEN b.status='open' THEN b.stake ELSE 0 END) FROM bets b WHERE NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=b.id)), 0))`;
 const nonQuarantinedBet = (alias = 'b') => `NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=${alias}.id)`;
 function auth(c: any) { const token = c.env.INGEST_TOKEN; return !!token && c.req.header('Authorization') === `Bearer ${token}`; }
+// Trusted frontend Service Binding adds this secret header; never accept a
+// missing/empty token as authenticated and do not weaken ingest bearer auth.
+function proxyAuth(c: any) { const token=c.env.PROXY_TOKEN;return !!token&&c.req.header('X-ROI-Proxy')===token; }
 function parseList(body: unknown): Record<string, unknown>[] | null {
   const rows = Array.isArray(body) ? body : body && typeof body === 'object' && Array.isArray((body as any).items) ? (body as any).items : null;
   return rows && rows.every((x: unknown) => x && typeof x === 'object' && !Array.isArray(x)) ? rows as Record<string, unknown>[] : null;
@@ -946,7 +949,25 @@ app.get('/ingest/models',async c=>{
  const models=await all<any>(c.env.DB,'SELECT id,sport,bet_type,version,algorithm,status,train_from,train_to,valid_from,valid_to,test_from,test_to,n_train,metrics_json,trained_at,notes FROM models ORDER BY sport,status,id');
  return c.json({models});
 });
-app.post('/admin/settle',async c=>{if(!auth(c))return jsonError(c,'unauthorized',401);return c.json({settled:await settleOpen(c.env.DB)});});
+app.post('/admin/collect-boat-results',async c=>{
+ if(!auth(c)&&!proxyAuth(c))return jsonError(c,'unauthorized',401);
+ if(c.env.ENABLE_BOATRACE_RESULTS_SCRAPE!=='true')return c.json({error:'result collection disabled',code:'results_collection_disabled'},403);
+ const body=await c.req.json().catch(()=>null) as {confirmed?:unknown}|null;
+ if(body?.confirmed!==true)return c.json({error:'explicit confirmation required',code:'confirmation_required'},400);
+ try {
+   const result=await collectResults(c.env.DB,new Date(),{mode:'manual',requestBudget:{used:0,max:49}});
+   console.info(JSON.stringify({event:'boat-manual-results',status:result.status,targets:result.targets,verified:result.verified,records:result.records,attempted:result.attempted,reason:'reason' in result?result.reason:null,fetchFailures:'fetchFailures' in result?result.fetchFailures:[]}));
+   return c.json(result);
+ } catch {return c.json({error:'manual result pass failed',code:'manual_results_failed'},503);}
+});
+app.post('/admin/settle',async c=>{
+ if(!auth(c)){
+   if(!proxyAuth(c))return jsonError(c,'unauthorized',401);
+   const body=await c.req.json().catch(()=>null) as {confirmed?:unknown}|null;
+   if(body?.confirmed!==true)return c.json({error:'explicit confirmation required',code:'confirmation_required'},400);
+ }
+ return c.json({settled:await settleOpen(c.env.DB)});
+});
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env) => {
   if (event.cron !== '* * * * *') return;
   const requestBudget={used:0,max:49};

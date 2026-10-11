@@ -1,10 +1,14 @@
+import { useState } from 'react'
 import { api } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
 import { dateTime, freshness, pct } from '../lib/format'
 import { Empty, ErrorState, Kpi, Loading, Section, SportDot } from '../components/ui'
 
+const API_BASE: string = import.meta.env.VITE_API_BASE ?? ''
+
 export function DataPage() {
   const q = useAsync(() => api.collection(), [])
+  const [manualResults, setManualResults] = useState<ManualResultsState>({ phase: 'idle' })
   if (q.error) return <div className="card"><ErrorState error={q.error} onRetry={q.reload} /></div>
   if (!q.data) return <div className="card"><Loading rows={5} /></div>
   const d = q.data
@@ -74,6 +78,21 @@ export function DataPage() {
         <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">表示時刻・記録成功率は保存された収集記録に基づきます。毎分の起動や未保存の試行をすべて表すものではありません。</p>
       </Section>
 
+      <Section title="購入済みボートの結果取得">
+        <div className="space-y-3 p-4">
+          <p className="text-sm text-muted">実データの購入済みボートのみ・最大4レース。結果取得後に精算します。</p>
+          <button
+            className="btn-primary text-sm"
+            disabled={manualResults.phase === 'collecting' || manualResults.phase === 'settling'}
+            onClick={() => void collectAndSettleResults(setManualResults)}
+          >
+            {manualResults.phase === 'collecting' ? '結果を取得中…' : manualResults.phase === 'settling' ? '精算中…' : '購入済みの結果を今すぐ取得'}
+          </button>
+          {manualResults.phase === 'failed' && <p role="status" className="text-sm text-neg">{manualResults.message}</p>}
+          {manualResults.phase === 'complete' && <p role="status" className={`text-sm ${manualResults.collection.status === 'success' ? 'text-pos' : 'text-warn'}`}>{manualResults.message}</p>}
+        </div>
+      </Section>
+
       <Section title="品質チェックによる除外（直近1時間）">
         <p className="px-4 py-2 text-xs text-muted">{exclusions.reduce((n, row) => n + row.count, 0)} レース試行。通信失敗ではありません。基準外のオッズは保存せず、判定・購入に使いません。成功率から品質のみの除外試行を除きます。1時間より古い品質のみの収集ログは定期的に削除します。</p>
         {exclusions.length === 0 ? <Empty>品質除外はありません。</Empty> : <ul className="divide-y divide-line">{exclusions.map((row, i) => (
@@ -108,6 +127,76 @@ export function DataPage() {
       </div>
     </div>
   )
+}
+
+type CollectionStatus = 'success' | 'partial' | 'failed' | 'skipped'
+type CollectionResult = { status: CollectionStatus; targets: number; verified: number; records: number; attempted: number }
+type ManualResultsState =
+  | { phase: 'idle' | 'collecting' | 'settling' }
+  | { phase: 'failed'; message: string }
+  | { phase: 'complete'; collection: CollectionResult; settled: number; message: string }
+
+async function collectAndSettleResults(setState: (state: ManualResultsState) => void) {
+  setState({ phase: 'collecting' })
+  let collection: CollectionResult
+  try {
+    const payload: unknown = await manualPost('/api/admin/collect-boat-results')
+    if (!isCollectionResult(payload)) {
+      setState({ phase: 'failed', message: '結果取得の応答を確認できませんでした。精算は実行していません。' })
+      return
+    }
+    collection = payload
+  } catch (error) {
+    setState({ phase: 'failed', message: error instanceof SessionExpiredError ? 'ログイン状態を確認してください。結果取得・精算は実行していません。' : '結果取得の完了を確認できませんでした。通信状態を確認してください。精算は実行していません。' })
+    return
+  }
+
+  setState({ phase: 'settling' })
+  try {
+    const payload: unknown = await manualPost('/api/admin/settle')
+    if (!isSettledResult(payload)) {
+      setState({ phase: 'failed', message: collectionSummary(collection, null) + ' 精算結果を確認できませんでした。' })
+      return
+    }
+    setState({ phase: 'complete', collection, settled: payload.settled, message: collectionSummary(collection, payload.settled) })
+  } catch (error) {
+    setState({ phase: 'failed', message: collectionSummary(collection, null) + (error instanceof SessionExpiredError ? ' ログイン状態を確認してください。' : ' 精算結果を確認できませんでした。') })
+  }
+}
+
+class SessionExpiredError extends Error {}
+
+async function manualPost(path: string): Promise<unknown> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ confirmed: true }),
+  })
+  if (response.redirected || response.type === 'opaqueredirect' || !(response.headers.get('content-type') ?? '').includes('application/json')) {
+    throw new SessionExpiredError('SESSION_EXPIRED')
+  }
+  if (!response.ok) throw new Error('REQUEST_FAILED')
+  return response.json().catch(() => { throw new Error('INVALID_JSON') })
+}
+
+function isCollectionResult(value: unknown): value is CollectionResult {
+  if (!value || typeof value !== 'object') return false
+  const result = value as Record<string, unknown>
+  return ['success', 'partial', 'failed', 'skipped'].includes(String(result.status)) &&
+    ['targets', 'verified', 'records', 'attempted'].every((key) => typeof result[key] === 'number' && Number.isFinite(result[key]))
+}
+
+function isSettledResult(value: unknown): value is { settled: number } {
+  return !!value && typeof value === 'object' && typeof (value as Record<string, unknown>).settled === 'number' && Number.isFinite((value as Record<string, unknown>).settled)
+}
+
+function collectionSummary(collection: CollectionResult, settled: number | null) {
+  const verified = `${collection.verified.toLocaleString()} / ${collection.targets.toLocaleString()} レース確認`
+  const settlement = settled == null ? '精算要求を送信しました。精算結果は未確認です。' : `${settled.toLocaleString()} 件を精算しました。`
+  if (collection.status === 'success') return `結果取得完了（${verified}）。${settlement}`
+  const label = collection.status === 'partial' ? '一部のみ取得' : collection.status === 'skipped' ? '結果取得は対象なし／スキップ' : '結果取得に失敗'
+  return `${label}（${verified}）。${settled == null ? '保存済み結果も含めて精算を試みました。' : '保存済み結果も含めて精算を実行しました。'}${settlement}`
 }
 
 function BudgetKpi({ label, used, remaining, limit }: { label: string; used: number | null; remaining: number | null; limit: number }) {

@@ -173,6 +173,8 @@ npm -w apps/web run deploy
 
 成功結果は次の既存10分精算で照合する。最大8試行×30秒＋最大7間隔×3秒で、network＋spacingの最悪経路は261秒以内（DB処理時間・Cron遅延は別）。05分に実行開始して取得が間に合った場合は通常10分の精算に反映するが、遅延時は次回以降となる。安全なCronログ `boat-hourly-results` は状態・対象数・検証済みレース数・保存レコード数・fetch試行数・固定予算理由、およびfetch失敗時の固定分類・HTTP status・件数だけを記録し、本文・応答ヘッダー・任意例外文は出さない。Workerのfetchは `redirect: manual` とし、3xxは追跡せず拒否し、HTTP／宣言サイズによる早期拒否時も応答bodyをcancelする（workerdは `redirect: error` を受け付けない）。夜間B/K日次同期は維持し、学習用データ取得へ拡張しない。SPEC §2/§5のB/K採用・Worker結果照合のみという記述とは追加取得元・頻度の差分があり、SPECは変更していない。
 
+手動実行は Data 画面の「購入済みの結果を今すぐ取得」のクリックから、`POST /api/admin/collect-boat-results` に `confirmed: true` を送る。設定済みの信頼済みfrontend proxy認証またはingest bearer認証と取得フラグの有効化を必須にする。hourly markerだけを回避し、別の5分lease／完了後60秒throttleで手動重複を抑止する。対象・fetch・書込予算・出所・隔離・原子的保存のガードは同じで、正常4対象の手動回はlease解放を含め34 D1 statement（失敗fallback最大38）。結果取得後、別HTTP呼び出しの既存 `POST /api/admin/settle` を明示実行する。proxy経由の精算にも `confirmed: true` を要求し、従来のingest bearer認証とingest APIの認証は弱めない。精算は従来どおり保存済み結果のopen betを対象とする。初期表示に新しいGETは追加せず、取得・精算の件数／未確認状態を表示し、日次推論・学習を起動しない。
+
 根拠: `apps/api/src/services/boatraceResults.ts`, `collectBoatraceResults.ts`, `apps/api/src/index.ts`。現行Cloudflareの [D1 per-invocation limits](https://developers.cloudflare.com/d1/platform/limits/) と [D1 batch](https://developers.cloudflare.com/d1/worker-api/d1-database/) を確認し、オッズ／精算の同時実行を結果専用回から分離した。
 
 ## 会場混同の復旧ガード

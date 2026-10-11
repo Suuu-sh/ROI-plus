@@ -149,6 +149,57 @@ describe('purchased real boat hourly results',()=>{
     const result=await collectResults(DB,now,{fetch:fetcher,sleep:async()=>{}});
     expect(result.attempted).toBe(2);expect(canceled).toBe(2);expect(fetcher).toHaveBeenCalledTimes(2);expect(result.verified).toBe(0);
   });
+  it('manual result route requires authentication, confirmation and enabled flag without weakening ingest auth',async()=>{
+    seed();const fetcher=vi.fn(fetchPage);vi.stubGlobal('fetch',fetcher);
+    const env={DB,PROXY_TOKEN:'test-proxy',INGEST_TOKEN:'test-ingest',ENABLE_BOATRACE_RESULTS_SCRAPE:'true'};
+    const init=(headers:Record<string,string>={},body:unknown={confirmed:true})=>({method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(body)});
+    expect((await app.request('/api/admin/collect-boat-results',init(),env)).status).toBe(401);
+    expect((await app.request('/api/admin/collect-boat-results',init({'X-ROI-Proxy':'wrong'}),env)).status).toBe(401);
+    expect((await app.request('/api/admin/collect-boat-results',init({'X-ROI-Proxy':'test-proxy'},{}),env)).status).toBe(400);
+    expect((await app.request('/api/admin/collect-boat-results',init({'X-ROI-Proxy':'test-proxy'}),{...env,ENABLE_BOATRACE_RESULTS_SCRAPE:'false'})).status).toBe(403);
+    expect((await app.request('/api/ingest/results',init({'X-ROI-Proxy':'test-proxy'},[]),env)).status).toBe(401);
+    expect((await app.request('/api/admin/settle',init(),env)).status).toBe(401);
+    expect((await app.request('/api/admin/settle',init({'X-ROI-Proxy':'test-proxy'},{}),env)).status).toBe(400);
+    expect(fetcher).not.toHaveBeenCalled();expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boat_results_manual_until'").get()).toMatchObject({n:0});
+  });
+  it('manual result route bypasses only the hourly marker and leaves settlement to the second invocation',async()=>{
+    seed();vi.useFakeTimers();vi.setSystemTime(now);vi.stubGlobal('fetch',fetchPage);
+    sqlite.prepare("INSERT INTO settings(key,value) VALUES('boat_results_hour',?)").run(now.toISOString().slice(0,13));
+    const env={DB,PROXY_TOKEN:'test-proxy',ENABLE_BOATRACE_RESULTS_SCRAPE:'true'};
+    const init={method:'POST',headers:{'content-type':'application/json','X-ROI-Proxy':'test-proxy'},body:JSON.stringify({confirmed:true})};
+    const response=await app.request('/api/admin/collect-boat-results',init,env);
+    expect(response.status).toBe(200);expect(await response.json()).toMatchObject({verified:1,targets:1,attempted:1});
+    expect(sqlite.prepare('SELECT status FROM bets').get()).toMatchObject({status:'open'});
+    expect(sqlite.prepare("SELECT value FROM settings WHERE key='boat_results_hour'").get()).toMatchObject({value:now.toISOString().slice(0,13)});
+    const settlement=await app.request('/api/admin/settle',init,env);
+    expect(await settlement.json()).toEqual({settled:1});expect(sqlite.prepare('SELECT status,profit FROM bets').get()).toMatchObject({status:'won',profit:330});
+  });
+  it('manual result mode preserves budget denial before lock or fetch',async()=>{
+    seed();sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();const fetcher=vi.fn(fetchPage);
+    expect(await collectResults(DB,now,{mode:'manual',fetch:fetcher})).toMatchObject({status:'skipped',attempted:0});expect(fetcher).not.toHaveBeenCalled();
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boat_results_manual_until'").get()).toMatchObject({n:0});
+  });
+  it('manual result mode blocks concurrent duplicate and throttles completed runs for sixty seconds',async()=>{
+    seed();vi.useFakeTimers();vi.setSystemTime(now);
+    let resolveResponse!:(response:Response)=>void;const pending=new Promise<Response>(resolve=>{resolveResponse=resolve;});const fetcher=vi.fn(async()=>pending);
+    const first=collectResults(DB,now,{mode:'manual',fetch:fetcher});
+    await vi.waitFor(()=>expect(fetcher).toHaveBeenCalledTimes(1));
+    expect(await collectResults(DB,now,{mode:'manual',fetch:fetcher})).toMatchObject({status:'skipped',attempted:0,reason:'manual run in progress or throttled'});
+    resolveResponse(new Response('not published'));await first;
+    expect(await collectResults(DB,new Date(now.getTime()+59_000),{mode:'manual',fetch:fetcher})).toMatchObject({status:'skipped',attempted:0});
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const retry=await collectResults(DB,new Date(now.getTime()+61_000),{mode:'manual',fetch:async()=>new Response('not published')});expect(retry.attempted).toBe(1);
+  });
+  it('manual result mode still bounds four targets to 34 D1 statements including lease release',async()=>{
+    for(let raceNo=1;raceNo<=5;raceNo++)seed(raceNo);let queries=0;const prepare=DB.prepare.bind(DB);
+    DB.prepare=(sql:string)=>{queries++;return prepare(sql);};
+    expect(await collectResults(DB,now,{mode:'manual',fetch:fetchPage,sleep:async()=>{}})).toMatchObject({targets:4,verified:4,attempted:4});expect(queries).toBe(34);
+  });
+  it('manual result route also preserves ingest-bearer operator authentication',async()=>{
+    seed();vi.useFakeTimers();vi.setSystemTime(now);vi.stubGlobal('fetch',fetchPage);
+    const response=await app.request('/api/admin/collect-boat-results',{method:'POST',headers:{'content-type':'application/json',Authorization:'Bearer test-ingest'},body:JSON.stringify({confirmed:true})},{DB,INGEST_TOKEN:'test-ingest',PROXY_TOKEN:'test-proxy',ENABLE_BOATRACE_RESULTS_SCRAPE:'true'});
+    expect(response.status).toBe(200);expect(await response.json()).toMatchObject({verified:1,attempted:1});
+  });
   it('keeps the flag off by default and only collects at hourly boundaries',async()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);const fetcher=vi.fn(fetchPage);vi.stubGlobal('fetch',fetcher);
     await worker.scheduled({cron:'* * * * *',scheduledTime:now.getTime()+60000} as ScheduledController,{DB,ENABLE_BOATRACE_RESULTS_SCRAPE:'true'});
