@@ -356,8 +356,9 @@ function resultWaitReason(b:any){
  if(b.status!=='open')return null;
  if(b.finish_code==='失格'||b.finish_code==='転覆'||b.finish_code==='妨害'||b.finish_code==='落水'||b.finish_code==='エンスト'||b.finish_code==='不完走')return 'disqualified';
  if(b.finish_code==='欠場'||b.finish_code==='欠')return 'withdrawn';
- if(b.post_time){const postTime=Date.parse(b.post_time);if(Number.isFinite(postTime)&&postTime>Date.now())return 'notstarted';}
- if(b.race_status==='scheduled'||b.race_status==='closed')return 'unknown';
+ const postTime=b.post_time?Date.parse(b.post_time):Number.NaN;
+ if(Number.isFinite(postTime)&&postTime>Date.now())return 'notstarted';
+ if(!Number.isFinite(postTime)&&(b.race_status==='scheduled'||b.race_status==='closed'))return 'unknown';
  if(!b.entry_count||b.result_count!==b.entry_count||b.distinct_result_count!==b.entry_count||b.matched_result_count!==b.entry_count||!b.winner_count){
    return b.result_collection_status==='failed'||b.result_collection_status==='partial'?'collectionfailed':'officialresultmissing';
  }
