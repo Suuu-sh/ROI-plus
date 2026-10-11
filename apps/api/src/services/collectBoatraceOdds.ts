@@ -48,7 +48,8 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
     const requestBudget = opts.requestBudget ?? { used: 0, max: 49 };
     const statements: Statement[] = [];
     const errors: string[] = [];
-    let failed = 0, records = 0, attempted = 0;
+    const exclusions: string[] = [];
+    let failed = 0, excluded = 0, records = 0, attempted = 0;
     for (const race of admittedTargets) {
       try {
         let html = '';
@@ -66,9 +67,15 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
           } catch (error) { requestError = error; }
         }
         if (requestError !== undefined) throw requestError;
-        const parsed = parseWinOdds(html);
-        if (!parsed.final && !isStablePool(parsed.odds)) throw new Error('odds pool not stable (overround out of range)');
-        const capturedAt = jstIso(now.getTime());
+        const parsed = parseWinOdds(html, { raceDate: race.race_date, venueCode: race.venue_id, raceNo: race.race_no });
+        if (!parsed.final && !isStablePool(parsed.odds)) {
+          excluded++;
+          const values = parsed.odds.filter((row): row is [number, number] => row[1] !== null);
+          const overround = values.reduce((sum, [, odds]) => sum + 1 / odds, 0);
+          exclusions.push(`${race.id}: odds pool not stable (overround out of range), valid=${values.length}/6, sum=${overround.toFixed(4)}, allowed=1.2..1.5, odds=${parsed.odds.map(([n, value]) => `${n}=${value ?? 'unavailable'}`).join(',')}`);
+          continue;
+        }
+        const capturedAt = jstIso(Date.now());
         const source = parsed.final ? 'boatrace-odds-tf-final' : 'boatrace-odds-tf';
         for (const [n, odds] of parsed.odds) {
           if (odds === null || !Number.isFinite(odds)) continue;
@@ -83,14 +90,14 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
         errors.push(`${race.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    const status = failed === 0 ? 'success' : failed === admittedTargets.length ? 'failed' : 'partial';
+    const status = failed ? (failed === admittedTargets.length ? 'failed' : 'partial') : excluded === admittedTargets.length ? 'skipped' : excluded ? 'partial' : 'success';
     const startedAt = jstIso(now.getTime());
-    statements.push(db.prepare(`INSERT INTO collection_runs(id,source,sport,target_date,started_at,finished_at,status,records,error)
-      VALUES(?, 'boatrace-odds-worker','boat',?,?,?,?,?,?)`)
-      .bind(crypto.randomUUID(), jstDate(now.getTime()), startedAt, jstIso(Date.now()), status, records, errors.length ? errors.join('; ').slice(0, 2000) : null));
+    statements.push(db.prepare(`INSERT INTO collection_runs(id,source,sport,target_date,started_at,finished_at,status,records,error,reason)
+      VALUES(?, 'boatrace-odds-worker','boat',?,?,?,?,?,?,?)`)
+      .bind(crypto.randomUUID(), jstDate(now.getTime()), startedAt, jstIso(Date.now()), status, records, errors.length ? errors.join('; ').slice(0, 2000) : null, exclusions.length ? `quality_excluded: ${exclusions.join(' | ')}` : null));
     if (db.batch) await db.batch(statements);
     else for (const statement of statements) await statement.run();
-    return { status, records, targets: admittedTargets.length, failed };
+    return { status, records, targets: admittedTargets.length, failed, excluded };
   } finally {
     // If cleanup fails, the five-minute lease still prevents a stuck lock forever.
     await db.prepare(`UPDATE settings SET value='' WHERE key='odds_lock' AND value=?`).bind(nowIso).run().catch(() => undefined);
