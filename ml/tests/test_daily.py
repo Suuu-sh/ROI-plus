@@ -25,6 +25,10 @@ def _store():
 
 def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_backfill(monkeypatch):
     store = _store()
+    store["entries"][0]["features_json"] = json.dumps({"finish_code": "F"})
+    store["entries"].append({"race_id": "prev", "number": 2, "features_json": "{}"})
+    store["entries"].append({"race_id": "older", "number": 2,
+                             "features_json": json.dumps({"finish_code": "F"})})
     # Midday/night K data may already have today's results and payout available.
     store["results"].append({"race_id": "today", "number": 1, "finish_order": 1, "data_origin": "real"})
     store["payouts"].append({"race_id": "today", "bet_type": "win", "selection": "1",
@@ -44,7 +48,7 @@ def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_back
     assert collection_calls == [("2026-10-08", "2026-10-09",
                                  {"refresh_k_dates": {"2026-10-08", "2026-10-09"}})]
     assert {row["id"] for row in synced["races"]} == {"prev", "today"}
-    assert {row["race_id"] for row in synced["entries"]} == {"today"}
+    assert {(row["race_id"], row["number"]) for row in synced["entries"]} == {("today", 1), ("prev", 1)}
     assert {row["race_id"] for row in synced["results"]} == {"prev", "today"}
     assert {row["race_id"] for row in synced["payouts"]} == {"prev", "today"}
     assert synced["predictions"] == [{"race_id": "today"}]
