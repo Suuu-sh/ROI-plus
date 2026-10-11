@@ -6,7 +6,7 @@ import { candidate, betId, payoutYen, settleValues, validateYenStake } from './s
 import { collectOdds } from './services/collectBoatraceOdds.js';
 import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
-import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, seedUnknownWriteBudget, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
+import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, seedUnknownWriteBudget, allowOneDayWriteBudget, ONE_DAY_ALLOWANCE, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
 interface Env { DB: Db; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; PROXY_TOKEN?: string; }
@@ -406,6 +406,20 @@ app.post('/ingest/write-budget/seed', async c=>{
   const inserted = await seedUnknownWriteBudget(c.env.DB, body.date);
   if (!inserted) return c.json({ error:'budget seed already exists or could not be written', code:'d1_write_budget_seed_conflict', budget:await readWriteBudget(c.env.DB) }, 409);
   return c.json(await readWriteBudget(c.env.DB), 201);
+});
+app.post('/ingest/write-budget/allowance', async c=>{
+  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
+  const body = await c.req.json().catch(()=>null) as any;
+  const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body).sort() : [];
+  const expectedKeys = ['confirmed','date','essentialLimit','limit','optionalLimit'];
+  if (!body || keys.length !== expectedKeys.length || keys.some((key, i)=>key !== expectedKeys[i]) ||
+      body.date !== utcDate() || body.confirmed !== true || body.limit !== ONE_DAY_ALLOWANCE.limit ||
+      body.essentialLimit !== ONE_DAY_ALLOWANCE.essentialLimit || body.optionalLimit !== ONE_DAY_ALLOWANCE.optionalLimit) {
+    return jsonError(c, 'explicit current-UTC-day one-day allowance confirmation and whitelisted limits are required');
+  }
+  const applied = await allowOneDayWriteBudget(c.env.DB, body.date);
+  if (!applied) return c.json({ error:'allowance requires a valid current-day ledger and may be applied only once', code:'d1_write_budget_allowance_conflict', budget:await readWriteBudget(c.env.DB) }, 409);
+  return c.json(await readWriteBudget(c.env.DB), 200);
 });
 app.get('/races', async c=>{
   const db=c.env.DB, sport=c.req.query('sport'), date=c.req.query('date'), origin=originFilter(c.req.query('origin'));
