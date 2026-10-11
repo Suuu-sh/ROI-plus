@@ -1,19 +1,17 @@
-"""Throttled backfill of historical rows into D1 using the API budget contract.
+"""Preview historical D1 backfill payloads; remote historical writes are disabled.
 
-Historical days are sent oldest-first only after current/previous-day sync has
-completed. Progress is stored locally so it can be resumed by a later run.
+Daily D1 capacity is reserved for current/previous results, payouts, entries,
+and active predictions. A future historical backfill requires a separate
+explicit operator decision and is not enabled by this command.
 """
 from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from edgelab.storage import load_rows
-from edgelab.sync import fetch_write_budget, sync_rows
-from edgelab.venues import venue_rows
 
 STATE_PATH = Path("ml/data/backfill_state.json")
 # Conservative estimate for indexes and trigger/update amplification.
@@ -50,48 +48,23 @@ def run(*, since: str, until: str | None, budget: int, database: str,
     state = json.loads(state_path.read_text()) if state_path.exists() else {"done": []}
     done = set(state["done"])
     days = {d: rows for d, rows in group_by_date(load_rows(), since, until).items() if d not in done}
-    status = None
-    if dry_run:
-        available = min(max(0, budget), MAX_BACKFILL_BUDGET)
-    else:
-        try:
-            status = fetch_write_budget()
-        except Exception as exc:
-            return {"skipped": True, "reason": f"write budget unavailable ({type(exc).__name__})",
-                    "sent_days": [], "remaining_days": len(days), "next_day": next(iter(days), None)}
-        today_utc = datetime.now(timezone.utc).date().isoformat()
-        if status.get("date") != today_utc or status.get("state") != "known":
-            return {"skipped": True, "reason": "write budget is not known for the current UTC day",
-                    "budget_status": status.get("state"), "sent_days": [],
-                    "remaining_days": len(days), "next_day": next(iter(days), None)}
-        # Do not infer shared usage. The API's `remaining` is authoritative;
-        # this client further limits its historical work to 20k rows/day.
-        available = min(max(0, budget), MAX_BACKFILL_BUDGET, status["limit"], status["remaining"])
-        if status.get("reserved") is not None:
-            available = min(available, max(0, status["limit"] - status["reserved"]))
+    if not dry_run:
+        return {"skipped": True,
+                "reason": "remote historical D1 backfill is disabled; only --dry-run is available",
+                "sent_days": [], "remaining_days": len(days),
+                "next_day": next(iter(days), None)}
+
+    available = min(max(0, budget), MAX_BACKFILL_BUDGET)
     used = 0
     sent: list[str] = []
-    first = True
     for day, rows in days.items():
         cost = estimate_writes(rows)
         if used + cost > available:
             break
-        payload: dict[str, list] = dict(rows)
-        if first:  # master rows once per run (idempotent upserts)
-            payload["venues"] = venue_rows()
-            payload["models"] = load_rows().get("models", [])
-            first = False
-        if not dry_run:
-            sync_rows(payload)
-            done.add(day)
-            state["done"] = sorted(done)
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            state_path.write_text(json.dumps(state, indent=2) + "\n")
         used += cost
         sent.append(day)
     remaining = [d for d in days if d not in sent]
     result = {"sent_days": sent, "estimated_rows_written": used, "backfill_budget": available,
-              "remaining_days": len(remaining), "next_day": remaining[0] if remaining else None}
-    if status is not None:
-        result["budget_status"] = status.get("state")
+              "remaining_days": len(remaining), "next_day": remaining[0] if remaining else None,
+              "dry_run": True, "remote_sync_performed": False}
     return result

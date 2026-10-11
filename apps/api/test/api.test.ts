@@ -82,13 +82,40 @@ describe('EdgeLab API',()=>{
  it('reports shared D1 budget and refuses missing state until an explicit full-day seed',async()=>{
   const authHeader={authorization:'Bearer test-token','content-type':'application/json'};
   expect((await app.request('/api/ingest/write-budget',{},env())).status).toBe(401);
-  expect(await (await app.request('/api/ingest/write-budget',{headers:authHeader},env())).json()).toMatchObject({state:'known',limit:20000,oddsLimit:10000,remaining:20000});
+  expect(await (await app.request('/api/ingest/write-budget',{headers:authHeader},env())).json()).toMatchObject({state:'known',limit:20000,essentialLimit:16000,optionalLimit:4000,oddsLimit:4000,remaining:20000,essentialRemaining:16000,optionalRemaining:4000});
   sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();
   const payload=[{id:'boat-20990101-09-01',sport:'boat',venue_id:'b01',race_date:'2099-01-01',race_no:9,status:'scheduled',data_origin:'real'}];
   const denied=await app.request('/api/ingest/races',{method:'POST',headers:authHeader,body:JSON.stringify(payload)},env());
   expect(denied.status).toBe(429); expect(await denied.json()).toMatchObject({code:'d1_write_budget_unavailable',budget:{state:'missing'}});
   const seed=await app.request('/api/ingest/write-budget/seed',{method:'POST',headers:authHeader,body:JSON.stringify({date:new Date().toISOString().slice(0,10),confirmed:true})},env());
   expect(seed.status).toBe(201); expect(await seed.json()).toMatchObject({state:'exhausted',remaining:0});
+ });
+ it('rejects historical ingest without an open bet, but protects open-bet settlement inputs',async()=>{
+  const raceId='boat-20010101-01-01', auth={authorization:'Bearer test-token','content-type':'application/json'};
+  sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,status,data_origin,updated_at) VALUES(?,'boat','b01','2001-01-01',1,'finished','real',?)").run(raceId,jstIso());
+  const post=(endpoint:string,rows:unknown[])=>app.request(`/api/ingest/${endpoint}`,{method:'POST',headers:auth,body:JSON.stringify(rows)},env());
+  const denied=await post('results',[{race_id:raceId,finish_order:1,number:1,data_origin:'real'}]);
+  expect(denied.status).toBe(409); expect(await denied.json()).toMatchObject({code:'historical_ingest_disabled'});
+  expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(raceId)).toMatchObject({n:0});
+  sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES('old-open',?,'boat','win','1',100,'manual','INSUFFICIENT_DATA',?,'open','real')").run(raceId,jstIso());
+  expect((await post('races',[{id:raceId,sport:'boat',venue_id:'b01',race_date:'2001-01-01',race_no:1,name:'open-bet repair',status:'finished',data_origin:'real',updated_at:jstIso()}])).status).toBe(200);
+  expect((await post('entries',[{id:'old-entry',race_id:raceId,number:1,name:'Lane 1',available_at:jstIso(),data_origin:'real'}])).status).toBe(200);
+  expect((await post('results',[{race_id:raceId,finish_order:1,number:1,data_origin:'real'}])).status).toBe(200);
+  expect((await post('payouts',[{race_id:raceId,bet_type:'win',selection:'1',payout:200,data_origin:'real'}])).status).toBe(200);
+  const ledger=JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
+  expect(ledger.essentialReserved).toBeGreaterThan(0); expect(ledger.optionalReserved).toBe(0);
+ });
+ it('charges current active predictions to essential and candidate predictions to optional in one reservation',async()=>{
+  const raceId=`boat-${jstDate().replaceAll('-','')}-01-01`, auth={authorization:'Bearer test-token','content-type':'application/json'};
+  sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,status,data_origin,updated_at) VALUES(?,'boat','b01',?,1,'scheduled','real',?)").run(raceId,jstDate(),jstIso());
+  sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status) VALUES('boat-candidate-budget','boat','win','test','fixture','candidate')").run();
+  const post=await app.request('/api/ingest/predictions',{method:'POST',headers:auth,body:JSON.stringify([
+   {id:'active-current-p',race_id:raceId,model_id:'boat-active',number:1,probability:0.5,predicted_at:jstIso(Date.now()-1000),data_origin:'real'},
+   {id:'candidate-current-p',race_id:raceId,model_id:'boat-candidate-budget',number:2,probability:0.5,predicted_at:jstIso(Date.now()-1000),data_origin:'real'},
+  ])},env());
+  expect(post.status).toBe(200);
+  const ledger=JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
+  expect(ledger.essentialReserved).toBeGreaterThan(0); expect(ledger.optionalReserved).toBeGreaterThan(0);
  });
  it('ingests venues and payouts idempotently and finishes paid-out races',async()=>{
   const raceId='boat-20990101-01-01';
@@ -142,7 +169,7 @@ describe('EdgeLab API',()=>{
  it('ingest preserves terminal races and manually managed model rows',async()=>{
   const post=(endpoint:string,body:unknown)=>app.request(`/api/ingest/${endpoint}`,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify(body)},env());
   const race=sqlite.prepare("SELECT * FROM races WHERE data_origin='sample' AND status='finished' LIMIT 1").get() as any;
-  expect((await post('races',[{...race,status:'scheduled'}])).status).toBe(200);
+  expect((await post('races',[{...race,status:'scheduled'}])).status).toBe(409);
   expect(sqlite.prepare('SELECT status FROM races WHERE id=?').get(race.id)).toMatchObject({status:'finished'});
   const model=sqlite.prepare("SELECT * FROM models WHERE id='boat-active'").get() as any;
   expect((await post('models',[{...model,status:'candidate',version:'rewritten',metrics_json:'{}',trained_at:'2099-01-01'}])).status).toBe(200);

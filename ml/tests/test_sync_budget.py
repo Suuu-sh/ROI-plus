@@ -64,7 +64,7 @@ def test_budget_refusal_stops_without_retry_or_fake_success(monkeypatch):
     assert len(requests) == 1
 
 
-def test_daily_sync_prioritizes_results_and_payouts_before_entries(monkeypatch):
+def test_sync_prioritizes_parent_rows_then_results_and_payouts_before_entries(monkeypatch):
     sent = []
 
     def accept(req, **_kwargs):
@@ -75,8 +75,9 @@ def test_daily_sync_prioritizes_results_and_payouts_before_entries(monkeypatch):
     sync.sync_rows({
         "entries": [{"id": "e"}], "predictions": [{"id": "p"}], "models": [{"id": "m"}],
         "payouts": [{"id": "pay"}], "results": [{"id": "r"}], "races": [{"id": "race"}],
+        "venues": [{"id": "venue"}],
     }, base_url="https://example.test", token="t")
-    assert sent == ["races", "results", "payouts", "entries", "models", "predictions"]
+    assert sent == ["venues", "races", "models", "results", "payouts", "entries", "predictions"]
 
 
 @pytest.mark.parametrize("table", [

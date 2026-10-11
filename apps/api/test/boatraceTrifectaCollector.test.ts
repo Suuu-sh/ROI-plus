@@ -27,12 +27,28 @@ beforeEach(()=>{
   sqlite=new Sqlite(':memory:');DB=new D1SqliteAdapter(sqlite);
   for(const file of readdirSync(resolve(root,'db/migrations')).filter(x=>x.endsWith('.sql')).sort())sqlite.exec(readFileSync(resolve(root,'db/migrations',file),'utf8'));
   sqlite.prepare("INSERT INTO settings(key,value) VALUES('roi_d1_write_budget_utc',?)").run(JSON.stringify({date:new Date().toISOString().slice(0,10),reserved:0,oddsReserved:0}));
+  const artifact='a'.repeat(64),report='b'.repeat(64),validatedAt=jstIso(Date.now()-60_000);
+  sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status,metrics_json,trained_at) VALUES('validated-trifecta','boat','trifecta','v1','fixture','active',?,?)")
+    .run(JSON.stringify({ticketModelSchemaVersion:'ticket-selection-v1',ticketPredictionSemantics:'exact-selection-probability-v1',ticketBetType:'trifecta',ticketArtifactSha256:artifact,promotionEligible:true,
+      ticketValidation:{status:'independently_validated',policyVersion:'ticket-selection-v1',betType:'trifecta',artifactSha256:artifact,reportSha256:report,independentReviewId:'fixture-review',dataOrigin:'real',completeCombinationCoverage:true,probabilitiesNormalized:true,outOfSampleValidated:true,pointInTimeSafe:true,validatedAt}}),jstIso(Date.now()-120_000));
   const raceDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('09','boat','Test venue')").run();
   sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES('boat-collector-test','boat','09',?,3,?,'scheduled','real',?)").run(raceDate,jstIso(Date.now()+10*60_000),jstIso());
   for(let number=1;number<=6;number++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,available_at,data_origin) VALUES(?,?,?,? ,?,'real')").run(`collector-${number}`,'boat-collector-test',number,`Runner ${number}`,jstIso());
+  seedPredictions('boat-collector-test');
 });
 afterEach(()=>sqlite.close());
+
+function seedPredictions(raceId:string){
+  const predictedAt=jstIso(Date.now()-60_000),artifact='a'.repeat(64);
+  let id=0;
+  for(let first=1;first<=6;first++)for(let second=1;second<=6;second++)for(let third=1;third<=6;third++){
+    if(first===second||first===third||second===third)continue;
+    id++;
+    sqlite.prepare("INSERT INTO ticket_predictions(id,race_id,model_id,bet_type,selection,probability,prob_std,predicted_at,data_origin,feature_schema_version,artifact_sha256) VALUES(?,?,'validated-trifecta','trifecta',?,1.0/120,0.001,?,'real','ticket-selection-v1',?)")
+      .run(`${raceId}-pred-${id}`,raceId,`${first}-${second}-${third}`,predictedAt,artifact);
+  }
+}
 
 describe('trifecta odds collector provenance',()=>{
   it('stores a complete live official page hash and uses the shared per-cron fetch budget',async()=>{
@@ -52,6 +68,7 @@ describe('trifecta odds collector provenance',()=>{
     const date=sqlite.prepare("SELECT race_date FROM races WHERE id='boat-collector-test'").get() as {race_date:string};
     sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES('boat-collector-test-2','boat','09',?,4,?,'scheduled','real',?)").run(date.race_date,jstIso(Date.now()+11*60_000),jstIso());
     for(let number=1;number<=6;number++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,available_at,data_origin) VALUES(?,?,?,? ,?,'real')").run(`collector2-${number}`,'boat-collector-test-2',number,`Runner ${number}`,jstIso());
+    seedPredictions('boat-collector-test-2');
     const good=new TextEncoder().encode(livePage(date.race_date,3)),bad=new TextEncoder().encode(livePage(date.race_date,4).replace('3連単オッズ','unrecognized market'));
     const pauses:number[]=[],fetches:{url:string}[]=[];
     const result=await collectTrifectaOdds(DB,new Date(),{maxRequests:2,sleep:async(ms)=>{pauses.push(ms)},fetch:async(input)=>{
@@ -69,6 +86,33 @@ describe('trifecta odds collector provenance',()=>{
     expect(result).toMatchObject({status:'skipped',records:0,attempted:0});expect(fetched).toBe(false);
     expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='trifecta_odds_lock'").get()).toMatchObject({n:0});
     expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs").get()).toMatchObject({n:0});
+  });
+
+  it('keeps eligible minute fetches but avoids unchanged 120-row and repeated status writes',async()=>{
+    const date=sqlite.prepare("SELECT race_date FROM races WHERE id='boat-collector-test'").get() as {race_date:string};
+    const bytes=new TextEncoder().encode(livePage(date.race_date)),requestBudget={used:0,max:49};
+    const fetch=async()=>({ok:true,status:200,arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)});
+    const first=await collectTrifectaOdds(DB,new Date(),{requestBudget,fetch,sleep:async()=>{}});
+    expect(first).toMatchObject({records:120,attempted:1});
+    const second=await collectTrifectaOdds(DB,new Date(Date.now()+60_000),{requestBudget,fetch,sleep:async()=>{}});
+    expect(second).toMatchObject({records:0,attempted:1});
+    const runCount=Number((sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE source='boatrace-trifecta-odds-worker'").get() as {n:number}).n);
+    const third=await collectTrifectaOdds(DB,new Date(Date.now()+120_000),{requestBudget,fetch,sleep:async()=>{}});
+    expect(third).toMatchObject({records:0,attempted:1});
+    expect(requestBudget.used).toBe(3);
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='boat-collector-test' AND bet_type='trifecta'").get()).toMatchObject({n:120});
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE source='boatrace-trifecta-odds-worker'").get()).toMatchObject({n:runCount});
+  });
+
+  it('does not fetch, lock, or log without a validated active ticket model and current prediction',async()=>{
+    sqlite.prepare("UPDATE models SET status='candidate' WHERE id='validated-trifecta'").run();
+    const before=(sqlite.prepare('SELECT total_changes() changes').get() as {changes:number}).changes;
+    let fetched=false;
+    expect(await collectTrifectaOdds(DB,new Date(),{fetch:async()=>{fetched=true;throw new Error('unexpected fetch');}})).toMatchObject({status:'skipped',targets:0});
+    expect(fetched).toBe(false);
+    expect((sqlite.prepare('SELECT total_changes() changes').get() as {changes:number}).changes).toBe(before);
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='trifecta_odds_lock'").get()).toMatchObject({n:0});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:0});
   });
 
 });

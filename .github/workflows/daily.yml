@@ -76,13 +76,7 @@ jobs:
           path: ml/artifacts
       - name: Clear stale report
         run: rm -f ml/data/learning/report.json
-      - name: Initialize backfill state
-        run: |
-          if [ ! -f ml/data/backfill_state.json ]; then
-            mkdir -p ml/data
-            cp ml/state/backfill_state.json ml/data/backfill_state.json
-          fi
-      - name: Bootstrap history on cache miss
+      - name: Bootstrap local history on cache miss (no D1 sync)
         if: hashFiles('ml/data/rows.json') == ''
         env:
           PYTHONPATH: ml

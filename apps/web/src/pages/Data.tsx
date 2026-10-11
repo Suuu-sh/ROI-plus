@@ -25,8 +25,19 @@ export function DataPage() {
         <Kpi label="データソース" value={d.sources.length} sub={`有効 ${d.sources.filter((s) => s.enabled).length}`} />
         <Kpi label="総レコード数" value={total.toLocaleString()} sub="D1 全テーブル" />
         <Kpi label="通信・解析等のエラー（直近）" value={d.errors.length} valueClass={d.errors.length ? 'text-neg' : ''} />
-        <Kpi label="D1 使用量（概算）" value={`${d.freeTier.d1RowsApprox.toLocaleString()} 行`} sub="無料枠内" />
+        <Kpi label="保存中の行数（概算）" value={`${d.freeTier.d1RowsApprox.toLocaleString()} 行`} sub="Cloudflare quota 使用量ではありません" />
       </div>
+
+      <Section title="D1 日次書込予約（Worker 内推定）">
+        <div className="grid gap-3 p-4 sm:grid-cols-2">
+          <BudgetKpi label="保護枠の残り" used={d.d1WriteBudget.essentialReserved} remaining={d.d1WriteBudget.essentialRemaining} limit={d.d1WriteBudget.essentialLimit} />
+          <BudgetKpi label="任意処理枠の残り" used={d.d1WriteBudget.optionalReserved} remaining={d.d1WriteBudget.optionalRemaining} limit={d.d1WriteBudget.optionalLimit} />
+        </div>
+        <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">
+          {d.d1WriteBudget.date} UTC の予約推定値です。Cloudflare アカウント全体の実使用量・quota 残量ではありません。
+          {d.d1WriteBudget.state === 'missing' || d.d1WriteBudget.state === 'invalid' ? ' 予約状態を確認できないため、残量は不明です。' : ''}
+        </p>
+      </Section>
 
       <Section title="取得状況">
         {d.sources.length === 0 ? <Empty>収集履歴がありません。</Empty> : (
@@ -34,7 +45,7 @@ export function DataPage() {
             <table className="w-full min-w-[760px] text-sm">
               <thead><tr className="text-left text-[11px] uppercase tracking-wider text-muted">
                 <th className="px-4 py-2 font-medium">ソース</th><th className="px-2 py-2 font-medium">状態</th>
-                <th className="px-2 py-2 font-medium">最終取得</th><th className="px-2 py-2 text-right font-medium">成功率</th>
+                <th className="px-2 py-2 font-medium">最終保存記録</th><th className="px-2 py-2 text-right font-medium">記録成功率</th>
                 <th className="px-2 py-2 text-right font-medium">件数</th><th className="px-4 py-2 font-medium">鮮度</th>
               </tr></thead>
               <tbody className="divide-y divide-line">
@@ -49,9 +60,9 @@ export function DataPage() {
                     </td>
                     <td className="num px-2 py-2.5 text-xs">
                       <div>{dateTime(s.lastRunAt)}</div>
-                      <div className="text-faint">成功 {dateTime(s.lastSuccessAt)}</div>
+                      <div className="text-faint">成功記録 {dateTime(s.lastSuccessAt)}</div>
                     </td>
-                    <td className={`num px-2 py-2.5 text-right ${s.enabled && s.successRate != null && s.successRate < 0.9 ? 'text-warn' : ''}`}>{s.enabled ? pct(s.successRate, 0) : <span className="text-faint">—</span>}<div className="text-[10px] text-faint">{s.runs} 回 · 品質除外 {s.qualityExclusions ?? 0} レース試行</div></td>
+                    <td className={`num px-2 py-2.5 text-right ${s.enabled && s.successRate != null && s.successRate < 0.9 ? 'text-warn' : ''}`}>{s.enabled ? pct(s.successRate, 0) : <span className="text-faint">—</span>}<div className="text-[10px] text-faint">{s.runs} 記録 · 品質除外 {s.qualityExclusions ?? 0} レース試行</div></td>
                     <td className="num px-2 py-2.5 text-right">{s.records.toLocaleString()}</td>
                     <td className={`num px-4 py-2.5 text-xs ${s.enabled && (s.freshnessMinutes == null || s.freshnessMinutes > 60 * 48) ? 'text-warn' : ''}`}>{s.enabled ? freshness(s.freshnessMinutes) : <span className="text-faint">取得停止中</span>}</td>
                   </tr>
@@ -60,6 +71,7 @@ export function DataPage() {
             </table>
           </div>
         )}
+        <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">表示時刻・記録成功率は保存された収集記録に基づきます。毎分の起動や未保存の試行をすべて表すものではありません。</p>
       </Section>
 
       <Section title="品質チェックによる除外（直近）">
@@ -91,9 +103,19 @@ export function DataPage() {
               <li key={k} className="flex justify-between px-4 py-2"><span className="font-mono text-xs text-muted">{k}</span><span className="num">{v.toLocaleString()}</span></li>
             ))}
           </ul>
-          <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">{d.freeTier.d1RowLimitNote}</p>
+          <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">{d.freeTier.d1RowsNote}</p>
         </Section>
       </div>
     </div>
   )
+}
+
+function BudgetKpi({ label, used, remaining, limit }: { label: string; used: number | null; remaining: number | null; limit: number }) {
+  const value = remaining == null ? '不明' : `${remaining.toLocaleString()} unit`
+  const detail = used == null ? `予約上限 ${limit.toLocaleString()} unit` : `予約 ${used.toLocaleString()} / ${limit.toLocaleString()} unit`
+  return <div className="rounded-lg border border-line bg-surface px-4 py-3">
+    <div className="text-xs text-muted">{label}</div>
+    <div className="num mt-1 text-lg font-semibold">{value}</div>
+    <div className="mt-0.5 text-[11px] text-faint">{detail}</div>
+  </div>
 }
