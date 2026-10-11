@@ -130,12 +130,12 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
         if not values:
             continue
         responses = []
-        # The race endpoint performs several sequential D1 lookups for every
-        # row (date/origin, quarantine, open bet, then existing value). Keep
-        # this particularly expensive table smaller than the other race data.
+        # The race and payout endpoints perform several sequential D1 lookups
+        # per row. Keep these particularly expensive tables smaller than the
+        # other race data.
         row_checked_tables = {"races", "results", "payouts", "entries", "odds_snapshots",
                               "predictions", "ticket_predictions"}
-        chunk_size = 10 if table == "races" else 50 if table in row_checked_tables else 500
+        chunk_size = 10 if table in {"races", "payouts"} else 50 if table in row_checked_tables else 500
         for start in range(0, len(values), chunk_size):
             payload = json.dumps(values[start:start + chunk_size], ensure_ascii=False).encode("utf-8")
             req = Request(f"{base_url}/api/ingest/{ENDPOINTS[table]}", data=payload,
@@ -166,6 +166,11 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
                         # changed and a partial prior sync must remain visible.
                         raise WriteBudgetRefused(
                             f"ingest {table} refused: daily D1 write budget unavailable or exhausted (HTTP 429)") from exc
+                    if attempt == 0 and exc.code in {502, 503, 504}:
+                        # Natural-key upserts make a replay safe if the Worker
+                        # committed before an upstream service error was returned.
+                        time.sleep(2)
+                        continue
                     raise RuntimeError(f"ingest {table} failed: HTTP {exc.code}") from exc
                 except (URLError, TimeoutError) as exc:
                     reason = exc.reason if isinstance(exc, URLError) else exc
