@@ -6,6 +6,7 @@ import { reserveWriteBudgets, utcDate } from './writeBudget.js';
 export const RESULTS_SOURCE = 'boatrace-results-worker-v1';
 const MAX_TARGETS = 4;
 const BODY_LIMIT = 512 * 1024;
+const RESULT_FETCH_TIMEOUT_MS = 30_000;
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 export type ResultsRequestBudget = { used: number; max: number };
 type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string };
@@ -58,15 +59,21 @@ function safeFetchFailure(error:unknown):FetchFailure {
 async function readBody(response: Response): Promise<{ html: string; sha256: string }> {
   // workerd supports manual/follow only, not redirect:error. Manual makes
   // HTTP redirects visible and rejects them without another network request.
-  if(response.status>=300&&response.status<400)throw failure('http-redirect-rejected',response.status);
-  if(!response.ok)throw failure('http-status',response.status);
-  if(!response.body)throw failure('body-missing',response.status);
-  const declared = Number(response.headers.get('content-length'));
-  if(declared>BODY_LIMIT)throw failure('body-too-large',response.status);
+  let earlyFailure:ResultFetchFailure|undefined;
+  if(response.status>=300&&response.status<400)earlyFailure=failure('http-redirect-rejected',response.status);
+  else if(!response.ok)earlyFailure=failure('http-status',response.status);
+  else if(!response.body)earlyFailure=failure('body-missing',response.status);
+  else if(Number(response.headers.get('content-length'))>BODY_LIMIT)earlyFailure=failure('body-too-large',response.status);
+  if(earlyFailure){
+    // Release upstream connections even when status/size rejects the body
+    // before a reader is acquired. Preserve the safe original failure class.
+    await response.body?.cancel().catch(()=>undefined);
+    throw earlyFailure;
+  }
   const chunks:Uint8Array[]=[];
   let size=0;
   try {
-    const reader=response.body.getReader();
+    const reader=response.body!.getReader();
     try {
       while(true) {
         const part=await reader.read();
@@ -135,7 +142,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         if(budget.used>0)await sleep(3000);
         budget.used++;attempted++;
         try {
-          const response=await fetcher(url,{headers:{'User-Agent':USER_AGENT,'Accept':'text/html'},redirect:'manual',signal:AbortSignal.timeout(8000)});
+          const response=await fetcher(url,{headers:{'User-Agent':USER_AGENT,'Accept':'text/html'},redirect:'manual',signal:AbortSignal.timeout(RESULT_FETCH_TIMEOUT_MS)});
           body=await readBody(response);break;
         } catch(error) {
           fetchFailure=safeFetchFailure(error);

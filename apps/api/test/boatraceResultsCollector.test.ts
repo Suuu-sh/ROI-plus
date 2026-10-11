@@ -132,6 +132,23 @@ describe('purchased real boat hourly results',()=>{
     expect(result).toMatchObject({attempted:2,verified:0,fetchFailures:[{code:name==='TimeoutError'?'fetch-timeout':'fetch-rejected',count:2}]});
     expect(JSON.stringify(result)).not.toContain('sensitive arbitrary message');
   });
+  it('uses an evidence-backed finite 30-second result timeout without adding source attempts',async()=>{
+    seed();const timeout=vi.spyOn(AbortSignal,'timeout');
+    try {
+      const result=await collectResults(DB,now,{fetch:async(_input,init)=>{expect(init?.signal).toBeInstanceOf(AbortSignal);expect(init?.signal?.aborted).toBe(false);return new Response('not published');}});
+      expect(timeout).toHaveBeenCalledExactlyOnceWith(30_000);expect(result.attempted).toBe(1);
+    } finally {timeout.mockRestore();}
+  });
+  it.each([
+    {status:403,headers:new Headers()},
+    {status:302,headers:new Headers({location:'https://invalid.example/no-follow'})},
+    {status:200,headers:new Headers({'content-length':String(512*1024+1)})},
+  ])('cancels an early rejected $status response body before retrying',async scenario=>{
+    seed();let canceled=0;
+    const fetcher=vi.fn(async()=>new Response(new ReadableStream({cancel(){canceled++;}}),scenario));
+    const result=await collectResults(DB,now,{fetch:fetcher,sleep:async()=>{}});
+    expect(result.attempted).toBe(2);expect(canceled).toBe(2);expect(fetcher).toHaveBeenCalledTimes(2);expect(result.verified).toBe(0);
+  });
   it('keeps the flag off by default and only collects at hourly boundaries',async()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);const fetcher=vi.fn(fetchPage);vi.stubGlobal('fetch',fetcher);
     await worker.scheduled({cron:'* * * * *',scheduledTime:now.getTime()+60000} as ScheduledController,{DB,ENABLE_BOATRACE_RESULTS_SCRAPE:'true'});
