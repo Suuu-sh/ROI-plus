@@ -77,3 +77,18 @@ def test_daily_sync_prioritizes_results_and_payouts_before_entries(monkeypatch):
         "payouts": [{"id": "pay"}], "results": [{"id": "r"}], "races": [{"id": "race"}],
     }, base_url="https://example.test", token="t")
     assert sent == ["races", "results", "payouts", "entries", "models", "predictions"]
+
+
+def test_race_ingest_chunks_are_limited_to_50_rows(monkeypatch):
+    payload_sizes = []
+
+    def accept(req, **_kwargs):
+        payload_sizes.append(len(json.loads(req.data)))
+        return _Response({"upserted": len(json.loads(req.data)), "changed": len(json.loads(req.data))})
+
+    monkeypatch.setattr(sync, "urlopen", accept)
+    result = sync.sync_rows({"races": [{"id": f"r{i}"} for i in range(123)]},
+                            base_url="https://example.test", token="t")
+    assert payload_sizes == [50, 50, 23]
+    assert sum(payload_sizes) == 123
+    assert len(result["races"]) == 3
