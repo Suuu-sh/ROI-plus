@@ -5,6 +5,7 @@ import { all, first, run, type Db, type Statement } from './repo/db.js';
 import { candidate, betId, payoutYen, settleValues, validateYenStake } from './services/logic.js';
 import { collectOdds } from './services/collectBoatraceOdds.js';
 import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
+import { collectBoatraceCaptureArchives } from './services/collectBoatraceCaptureArchives.js';
 import { collectResults } from './services/collectBoatraceResults.js';
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
@@ -1229,6 +1230,22 @@ app.get('/ingest/models',async c=>{
  const models=await all<any>(c.env.DB,'SELECT id,sport,bet_type,version,algorithm,status,train_from,train_to,valid_from,valid_to,test_from,test_to,n_train,metrics_json,trained_at,notes FROM models ORDER BY sport,status,id');
  return c.json({models});
 });
+app.get('/ingest/prerace-capture-archives',async c=>{
+ if(!auth(c))return jsonError(c,'unauthorized',401);
+ const date=c.req.query('date')??'';
+ const cursor=c.req.query('cursor')??'';
+ const rawLimit=c.req.query('limit');
+ const limit=rawLimit===undefined?25:Number(rawLimit);
+ const parsedDate=/^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+ const validDate=!!parsedDate&&new Date(Date.UTC(Number(parsedDate[1]),Number(parsedDate[2])-1,Number(parsedDate[3]))).toISOString().slice(0,10)===date;
+ if(!validDate||!Number.isInteger(limit)||limit<1||limit>25)return jsonError(c,'one valid race date and limit between 1 and 25 are required');
+ if(cursor&&!/^boat-\d{8}-\d{2}-\d{2}:capture:\d{13}$/.test(cursor))return jsonError(c,'invalid archive cursor');
+ const rows=await all<any>(c.env.DB,`SELECT id,race_id,race_date,captured_at,archive_json
+   FROM boatrace_prerace_capture_archives WHERE race_date=? AND id>? ORDER BY id ASC LIMIT ?`,date,cursor,limit+1);
+ const hasMore=rows.length>limit, page=rows.slice(0,limit);
+ const archives=page.map(row=>({id:row.id,raceId:row.race_id,raceDate:row.race_date,capturedAt:row.captured_at,archive:JSON.parse(row.archive_json)}));
+ return c.json({date,limit,archives,nextCursor:hasMore?page.at(-1)?.id??null:null});
+});
 app.post('/admin/collect-boat-results',async c=>{
  if(!auth(c)&&!proxyAuth(c))return jsonError(c,'unauthorized',401);
  if(c.env.ENABLE_BOATRACE_RESULTS_SCRAPE!=='true')return c.json({error:'result collection disabled',code:'results_collection_disabled'},403);
@@ -1279,6 +1296,14 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
   if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true' || env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE === 'true') {
     // A collection quota/write failure must not block ten-minute settlement.
     await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true', env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true',requestBudget).catch(() => undefined);
+    if (env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE === 'true') {
+      try {
+        const archive=await collectBoatraceCaptureArchives(env.DB,new Date(),{requestBudget});
+        console.info(JSON.stringify({event:'boatrace-prerace-capture-archive',...archive}));
+      } catch {
+        console.info(JSON.stringify({event:'boatrace-prerace-capture-archive',status:'failed',reason:'collector_failed'}));
+      }
+    }
   }
   return;
 } };
