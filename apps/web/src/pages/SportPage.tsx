@@ -4,10 +4,12 @@ import type { Bet, RankingCandidate, TicketCandidate, EntryView, RaceDetail, Rac
 import { api } from '../lib/api'
 import { useOrigin } from '../lib/origin'
 import { useAsync } from '../lib/useAsync'
-import { dateTime, freshness, num, odds, pct, signedPct, timeOf, todayJst, tone } from '../lib/format'
+import { dateTime, freshness, num, odds, pct, signedPct, signedYen, yen, timeOf, todayJst, tone } from '../lib/format'
 import { t } from '../i18n'
-import { EdgeBadge, Empty, ErrorState, Loading, OriginBadge, ProbBar, Section, SportIcon } from '../components/ui'
+import { EdgeBadge, Empty, ErrorState, Kpi, Loading, OriginBadge, ProbBar, Section, SportIcon } from '../components/ui'
 import { BetSheet } from '../components/BetSheet'
+import { EquityChart } from '../components/EquityChart'
+import { ProfitabilityNotice } from './Performance'
 import { betTypeLabel } from '../lib/betType'
 
 function shiftDate(d: string, days: number) {
@@ -20,6 +22,9 @@ export function SportPage({ sport }: { sport: Sport }) {
   const { raceId } = useParams()
   const { origin } = useOrigin()
   const [date, setDate] = useState(todayJst)
+  const [performanceVersion, setPerformanceVersion] = useState(0)
+  const [historyAll, setHistoryAll] = useState(sport === 'boat')
+  useEffect(() => { setHistoryAll(sport === 'boat') }, [sport])
   const [researchOpen, setResearchOpen] = useState(Boolean(raceId))
   const bets = useAsync(() => api.bets(origin, sport), [sport, origin])
   useEffect(() => { if (raceId) setResearchOpen(true) }, [raceId])
@@ -43,14 +48,39 @@ export function SportPage({ sport }: { sport: Sport }) {
         </div>
       </div>
 
-      <PurchasedRaces bets={bets.data} date={date} loading={bets.loading} error={bets.error} onRetry={bets.reload} />
+      {sport === 'boat' && <SportPerformance origin={origin} sport={sport} version={performanceVersion} />}
+      {sport === 'boat' && <div className="flex items-center gap-2 text-sm">
+        <button className={historyAll ? 'btn-primary' : 'btn-ghost'} onClick={() => setHistoryAll(true)}>全期間の購入履歴</button>
+        <button className={!historyAll ? 'btn-primary' : 'btn-ghost'} onClick={() => setHistoryAll(false)}>選択日の購入履歴</button>
+      </div>}
+      <PurchasedRaces bets={bets.data} date={historyAll ? undefined : date} loading={bets.loading} error={bets.error} onRetry={bets.reload} />
 
       <details className="card group" open={researchOpen || undefined} onToggle={(event) => setResearchOpen(event.currentTarget.open)}>
         <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold marker:content-none">レースを調べる <span className="ml-2 text-xs font-normal text-muted">期待値ランキング・出走表</span></summary>
-        {researchOpen && <ResearchArea sport={sport} date={date} origin={origin} raceId={raceId} onDate={setDate} onChanged={bets.reload} />}
+        {researchOpen && <ResearchArea sport={sport} date={date} origin={origin} raceId={raceId} onDate={setDate} onChanged={() => { bets.reload(); setPerformanceVersion((v) => v + 1) }} />}
       </details>
     </div>
   )
+}
+
+function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeof useOrigin>['origin']; sport: Sport; version: number }) {
+  const q = useAsync(() => api.overview(origin, sport), [origin, sport, version])
+  if (q.error) return <Section title="全期間の仮想運用成績"><ErrorState error={q.error} onRetry={q.reload} /></Section>
+  if (!q.data) return <Section title="全期間の仮想運用成績"><Loading rows={2} /></Section>
+  const ov = q.data
+  return <section className="space-y-3" aria-label="全期間の仮想運用成績">
+    <h2 className="text-sm font-semibold">全期間の仮想運用成績</h2>
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <Kpi label="累計損益" value={signedYen(ov.totalProfit)} valueClass={tone(ov.totalProfit)} />
+      <Kpi label="回収率" value={pct(ov.roi)} sub="確定購入の払戻 ÷ 購入額" />
+      <Kpi label="仮想購入回数" value={ov.betCount.toLocaleString()} sub={`確定 ${ov.settledCount}`} />
+      <Kpi label="的中率" value={pct(ov.hitRate)} />
+    </div>
+    <Section title="資産推移" right={<span className="text-xs text-muted">初期仮想資金 {yen(ov.initialBankroll)}・確定損益のみ</span>}>
+      {ov.equityCurve.length > 1 ? <EquityChart data={ov.equityCurve} base={ov.initialBankroll} /> : <Empty>確定した仮想購入がまだありません。</Empty>}
+    </Section>
+    <ProfitabilityNotice origin={origin} settledBets={ov.settledCount} />
+  </section>
 }
 
 function ResearchArea({ sport, date, origin, raceId, onDate, onChanged }: { sport: Sport; date: string; origin: ReturnType<typeof useOrigin>['origin']; raceId?: string; onDate: (date: string) => void; onChanged: () => void }) {
@@ -73,11 +103,11 @@ function ResearchArea({ sport, date, origin, raceId, onDate, onChanged }: { spor
 
 export function filterBetsByDate(bets: Bet[], date: string) { return bets.filter((bet) => bet.raceDate === date) }
 
-function PurchasedRaces({ bets, date, loading, error, onRetry }: { bets: Bet[] | null; date: string; loading: boolean; error: Error | null; onRetry: () => void }) {
+function PurchasedRaces({ bets, date, loading, error, onRetry }: { bets: Bet[] | null; date?: string; loading: boolean; error: Error | null; onRetry: () => void }) {
   const grouped = new Map<string, Bet[]>()
-  for (const bet of filterBetsByDate(bets ?? [], date)) grouped.set(bet.raceId, [...(grouped.get(bet.raceId) ?? []), bet])
-  return <Section title="購入したレース" right={<span className="text-xs text-muted">{date}・仮想購入レビュー</span>}>
-    {error ? <ErrorState error={error} onRetry={onRetry} /> : loading && !bets ? <Loading rows={2} /> : grouped.size === 0 ? <Empty>この日付の仮想購入はありません。日付を切り替えるか、レースを調べるから購入できます。</Empty> :
+  for (const bet of date ? filterBetsByDate(bets ?? [], date) : bets ?? []) grouped.set(bet.raceId, [...(grouped.get(bet.raceId) ?? []), bet])
+  return <Section title="購入したレース" right={<span className="text-xs text-muted">{date ?? '全期間'}・仮想購入レビュー</span>}>
+    {error ? <ErrorState error={error} onRetry={onRetry} /> : loading && !bets ? <Loading rows={2} /> : grouped.size === 0 ? <Empty>{date ? 'この日付の仮想購入はありません。日付を切り替えるか、' : '仮想購入はまだありません。'}レースを調べるから購入できます。</Empty> :
       <div className="divide-y divide-line">{[...grouped.values()].map((items) => <PurchasedRace key={items[0].raceId} bets={items} />)}</div>}
   </Section>
 }
