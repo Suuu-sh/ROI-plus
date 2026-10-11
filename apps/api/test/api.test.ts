@@ -421,6 +421,32 @@ describe('EdgeLab API',()=>{
   expect(sqlite.prepare("SELECT status,payout,profit FROM bets WHERE id='pending-loser'").get()).toMatchObject({status:'lost',payout:0,profit:-100});
   expect(await settleOpen(DB)).toBe(0);
  });
+ it('requires every entry to have a finish or official terminal marker and never guesses a terminal pick refund',async()=>{
+  const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND sport='boat' AND status='scheduled' LIMIT 1").get() as {id:string};
+  const field=sqlite.prepare('SELECT number FROM entries WHERE race_id=? AND data_origin=\'sample\' ORDER BY number').all(race.id) as {number:number}[];
+  expect(field).toHaveLength(6);
+  const placed=jstIso(Date.now()-10000), winner=field[0].number, loser=field[1].number, falseStarter=field[5].number;
+  for(const [id,selection] of [['evidenced-loser',loser],['false-start-pick',falseStarter]] as const){
+   sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES(?,?,'boat','win',?,100,'manual','INSUFFICIENT_DATA',?,'open','sample')").run(id,race.id,String(selection),placed);
+  }
+  sqlite.prepare("UPDATE races SET status='finished' WHERE id=?").run(race.id);
+  for(const [i,runner] of field.slice(0,5).entries())sqlite.prepare('INSERT INTO results(race_id,finish_order,number,data_origin) VALUES(?,?,?,\'sample\')').run(race.id,i+1,runner.number);
+  sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,popularity,data_origin) VALUES(?,'win',?,120,1,'sample')").run(race.id,String(winner));
+  // One unrepresented entrant still blocks whole-field settlement.
+  expect(await settleOpen(DB)).toBe(0);
+  sqlite.prepare(`UPDATE entries SET features_json='{"finish_code":"F"}' WHERE race_id=? AND number=? AND data_origin='sample'`).run(race.id,falseStarter);
+  // The finished field is now accounted for, but the F selection has no stored
+  // return amount and therefore cannot safely be recorded as a win or loss.
+  expect(await settleOpen(DB)).toBe(1);
+  expect(sqlite.prepare("SELECT status,payout,profit FROM bets WHERE id='evidenced-loser'").get()).toMatchObject({status:'lost',payout:0,profit:-100});
+  expect(sqlite.prepare("SELECT status,payout,profit FROM bets WHERE id='false-start-pick'").get()).toMatchObject({status:'open',payout:null,profit:null});
+  const waitRace='boat-20990101-01-11';
+  sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,status,data_origin,updated_at) VALUES(?,'boat','b01','2099-01-01',11,'finished','real',?)").run(waitRace,jstIso());
+  sqlite.prepare("INSERT INTO entries(id,race_id,number,name,features_json,available_at,data_origin) VALUES(?,?,5,'False start','{\"finish_code\":\"F\"}',?,'real')").run(`${waitRace}-5`,waitRace,jstIso());
+  sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES('refund-wait',?,'boat','win','5',100,'manual','INSUFFICIENT_DATA',?,'open','real')").run(waitRace,placed);
+  const listed=await app.request('/api/bets?origin=real',{},env());
+  expect((await listed.json() as any[]).find(b=>b.id==='refund-wait')?.resultWaitReason).toBe('refundmissing');
+ });
  it('auto-bets only once per race and promote/rollback exchange active model',async()=>{
   const race=sqlite.prepare("SELECT r.id FROM races r WHERE r.data_origin='sample' AND r.status='scheduled' AND r.sport='boat' LIMIT 1").get() as any;
   const first=sqlite.prepare('SELECT number FROM entries WHERE race_id=? LIMIT 1').get(race.id) as any;

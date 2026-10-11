@@ -5,7 +5,7 @@ export type EdgeLabel = 'HIGH_EDGE' | 'POSITIVE_EDGE' | 'NEUTRAL' | 'NEGATIVE_ED
 export type RaceStatus = 'scheduled' | 'closed' | 'finished' | 'cancelled';
 export type ModelStatus = 'untrained' | 'candidate' | 'active' | 'retired';
 export type BetStatus = 'open' | 'won' | 'lost' | 'void';
-export type ResultWaitReason = 'notstarted' | 'officialresultmissing' | 'payoutmissing' | 'settlementpending' | 'collectionfailed' | 'unknown' | 'cancelled' | 'disqualified' | 'withdrawn' | 'sampledata';
+export type ResultWaitReason = 'notstarted' | 'officialresultmissing' | 'payoutmissing' | 'settlementpending' | 'collectionfailed' | 'unknown' | 'cancelled' | 'disqualified' | 'withdrawn' | 'refundmissing' | 'sampledata';
 
 export interface RaceSummary {
   id: string; sport: Sport; venueId: string; venueName: string; raceDate: string; raceNo: number;

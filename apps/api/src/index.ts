@@ -14,6 +14,14 @@ type Ctx = { Bindings: Env };
 const SAFE_BOAT_SCHEMA = 'boat-venue-v2';
 const TICKET_MODEL_SCHEMA = 'ticket-selection-v1';
 const TICKET_PROBABILITY_SEMANTICS = 'exact-selection-probability-v1';
+// A full field is represented by either an official numeric finish or an
+// explicit non-finisher code parsed from the official K result file.
+const terminalFinishCodeSql = `(json_valid(e.features_json) AND (
+  json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','妨害','落水','エンスト','不完走')
+  OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))`;
+const isTerminalFinishCode = (value: unknown): boolean =>
+  typeof value === 'string' && (['F','L','K','欠場','欠','失格','転覆','妨害','落水','エンスト','不完走'].includes(value)
+    || /^K\d$/.test(value));
 const app = new Hono<Ctx>().basePath('/api');
 app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization'] }));
 // 本番では閲覧系 API を、Cloudflare Access で保護された画面 Worker（Service Binding）経由に限定する。
@@ -282,6 +290,7 @@ async function settleOpen(db: Db) {
     }
     const integrity = await first<any>(db, `SELECT
       (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin=?) entry_count,
+      (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin=? AND ${terminalFinishCodeSql}) terminal_entry_count,
       (SELECT COUNT(*) FROM results res WHERE res.race_id=? AND res.data_origin=?) result_count,
       (SELECT COUNT(DISTINCT res.number) FROM results res WHERE res.race_id=? AND res.data_origin=?) distinct_result_count,
       (SELECT COUNT(*) FROM results res WHERE res.race_id=? AND res.data_origin=? AND EXISTS(
@@ -294,13 +303,14 @@ async function settleOpen(db: Db) {
         WHERE res.race_id=? AND res.data_origin=? AND res.finish_order=1) paid_winner_count,
       (SELECT COUNT(*) FROM payouts p WHERE p.race_id=? AND p.data_origin=? AND p.bet_type=? AND p.payout>0) ticket_payout_count,
       (SELECT COUNT(*) FROM payouts p WHERE p.race_id=? AND p.data_origin=? AND p.bet_type='win' AND p.payout>0 AND NOT EXISTS(
-        SELECT 1 FROM results res WHERE res.race_id=p.race_id AND res.data_origin=p.data_origin AND res.finish_order=1 AND p.selection=CAST(res.number AS TEXT))) nonwinner_win_payout_count`,
-      b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,
-      b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.bet_type,b.race_id,b.data_origin);
+        SELECT 1 FROM results res WHERE res.race_id=p.race_id AND res.data_origin=p.data_origin AND res.finish_order=1 AND p.selection=CAST(res.number AS TEXT))) nonwinner_win_payout_count,
+      (SELECT CASE WHEN json_valid(e.features_json) THEN json_extract(e.features_json,'$.finish_code') END FROM entries e WHERE e.race_id=? AND e.data_origin=? AND CAST(e.number AS TEXT)=? LIMIT 1) selected_finish_code`,
+      b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,
+      b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.bet_type,b.race_id,b.data_origin,b.race_id,b.data_origin,b.selection);
     if (!integrity || integrity.entry_count <= 0
-        || integrity.result_count !== integrity.entry_count
-        || integrity.distinct_result_count !== integrity.entry_count
-        || integrity.matched_result_count !== integrity.entry_count
+        || integrity.result_count + integrity.terminal_entry_count !== integrity.entry_count
+        || integrity.distinct_result_count !== integrity.result_count
+        || integrity.matched_result_count !== integrity.result_count
         || integrity.winner_count <= 0
         || (b.bet_type === 'win' && integrity.nonwinner_win_payout_count > 0)
         || (b.bet_type === 'win' ? integrity.paid_winner_count !== integrity.winner_count : integrity.ticket_payout_count <= 0)) continue;
@@ -317,6 +327,10 @@ async function settleOpen(db: Db) {
       continue;
     }
     const pay = await first<any>(db, 'SELECT payout FROM payouts WHERE race_id=? AND data_origin=? AND bet_type=? AND selection=? AND payout>0', b.race_id, b.data_origin, b.bet_type, b.selection);
+    // A recorded false-start / disqualification does not establish whether
+    // this exact ticket was refunded. Do not turn missing refund evidence into
+    // a loss; keep that bet open while other, fully evidenced picks can settle.
+    if (b.bet_type === 'win' && isTerminalFinishCode(integrity.selected_finish_code) && !pay) continue;
     const values = settleValues(b.stake, pay?.payout ?? null, !!pay);
     const evLost = b.expected_roi > 0 && values.finalOdds !== null && b.predicted_prob * values.finalOdds - 1 <= 0;
     if (!await reserveWorkerWrites(db, evLost ? 2 : 1)) break;
@@ -694,12 +708,13 @@ function resultWaitReason(b:any){
  if(b.data_origin==='sample')return 'sampledata';
  if(b.race_status==='cancelled')return 'cancelled';
  if(b.status!=='open')return null;
+ if(b.finish_code==='F'||b.finish_code==='L')return 'refundmissing';
  if(b.finish_code==='失格'||b.finish_code==='転覆'||b.finish_code==='妨害'||b.finish_code==='落水'||b.finish_code==='エンスト'||b.finish_code==='不完走')return 'disqualified';
  if(b.finish_code==='欠場'||b.finish_code==='欠')return 'withdrawn';
  const postTime=b.post_time?Date.parse(b.post_time):Number.NaN;
  if(Number.isFinite(postTime)&&postTime>Date.now())return 'notstarted';
  if(!Number.isFinite(postTime)&&(b.race_status==='scheduled'||b.race_status==='closed'))return 'unknown';
- if(!b.entry_count||b.result_count!==b.entry_count||b.distinct_result_count!==b.entry_count||b.matched_result_count!==b.entry_count||!b.winner_count){
+ if(!b.entry_count||b.result_count+(b.terminal_entry_count??0)!==b.entry_count||b.distinct_result_count!==b.result_count||b.matched_result_count!==b.result_count||!b.winner_count){
    return b.result_collection_status==='failed'||b.result_collection_status==='partial'?'collectionfailed':'officialresultmissing';
  }
  if(b.paid_winner_count!==b.winner_count)return 'payoutmissing';
@@ -712,6 +727,7 @@ async function quarantineSummary(db: Db, sport: string | null, origin: string | 
 app.get('/bets/quarantine-summary',async c=>{const sport=c.req.query('sport'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');return c.json(await quarantineSummary(c.env.DB,sport||null,origin));});
 app.get('/bets',async c=>{const sport=c.req.query('sport'),status=c.req.query('status'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');const rows=await all<any>(c.env.DB,`SELECT b.*,v.name venue_name,r.race_no,r.status race_status,r.post_time,r.race_date,
  (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin) entry_count,
+ (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin=r.data_origin AND ${terminalFinishCodeSql}) terminal_entry_count,
  (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin) result_count,
  (SELECT COUNT(DISTINCT x.number) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin) distinct_result_count,
  (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin=r.data_origin AND EXISTS(SELECT 1 FROM entries e WHERE e.race_id=x.race_id AND e.number=x.number AND e.data_origin=x.data_origin)) matched_result_count,
