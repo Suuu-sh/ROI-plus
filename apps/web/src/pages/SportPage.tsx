@@ -24,6 +24,7 @@ export function SportPage({ sport }: { sport: Sport }) {
   const [date, setDate] = useState(todayJst)
   const [performanceVersion, setPerformanceVersion] = useState(0)
   const [historyAll, setHistoryAll] = useState(sport === 'boat')
+  useEffect(() => { setHistoryAll(sport === 'boat') }, [sport])
   const [researchOpen, setResearchOpen] = useState(Boolean(raceId))
   const bets = useAsync(() => api.bets(origin, sport), [sport, origin])
   useEffect(() => { if (raceId) setResearchOpen(true) }, [raceId])

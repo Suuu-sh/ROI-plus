@@ -40,3 +40,13 @@ it('shares in-flight identical reads but refreshes settled data and separates or
   await api.bets('real', 'boat')
   expect(fetcher).toHaveBeenCalledTimes(3)
 })
+
+it('resets history period when navigating between sport tabs', async () => {
+  mockReads()
+  const view = render(<MemoryRouter><SportPage sport="boat" /></MemoryRouter>)
+  await screen.findByText('全期間・仮想購入レビュー')
+  view.rerender(<MemoryRouter><SportPage sport="horse" /></MemoryRouter>)
+  await waitFor(() => expect(screen.queryByText('全期間・仮想購入レビュー')).toBeNull())
+  view.rerender(<MemoryRouter><SportPage sport="boat" /></MemoryRouter>)
+  await screen.findByText('全期間・仮想購入レビュー')
+})
