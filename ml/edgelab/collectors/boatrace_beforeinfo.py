@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from edgelab.collectors.boatrace import USER_AGENT, _wait_for_slot
-from edgelab.parsers.boatrace_beforeinfo import beforeinfo_url, parse_beforeinfo
+from edgelab.parsers.boatrace_beforeinfo import (beforeinfo_url, parse_beforeinfo,
+    parse_beforeinfo_cutoff)
 from edgelab.storage import merge_rows
 
 JST = ZoneInfo("Asia/Tokyo")
 MAX_PAGE_BYTES = 512 * 1024
+TRUSTED_CUTOFF_SOURCE = "boatrace-racelist-cutoff-v1"
 
 
 def select_beforeinfo_targets(races: list[Mapping[str, Any]], *, now: datetime,
@@ -74,18 +76,49 @@ def collect_beforeinfo(store: dict[str, list[dict[str, Any]]], *, now: datetime,
     pace = wait_for_slot or _wait_for_slot
     observations: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+    cutoff_unavailable: list[dict[str, str]] = []
+    cutoffs_updated = 0
+    cutoff_conflicts = 0
     for race in targets:
         try:
             race_no, venue = int(race["race_no"]), str(race["venue_id"])
             url = beforeinfo_url(race_no, venue, str(race["race_date"]))
             pace()
             html, digest = fetch(url)
-            fetched = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            fetched_dt = datetime.now(timezone.utc)
+            fetched = fetched_dt.isoformat(timespec="milliseconds")
             observations.extend(parse_beforeinfo(html, race_id=str(race["id"]), source_url=url,
                                                   source_sha256=digest, fetched_at=fetched))
+            try:
+                cutoff_at = parse_beforeinfo_cutoff(html, race_id=str(race["id"]), source_url=url)
+                cutoff_dt = datetime.fromisoformat(cutoff_at)
+                actual_now = datetime.now(timezone.utc)
+                if fetched_dt > actual_now + timedelta(seconds=5):
+                    raise ValueError("future capture timestamp")
+                if cutoff_dt <= fetched_dt.astimezone(JST):
+                    raise ValueError("official cutoff has expired")
+                existing_cutoff = race.get("betting_cutoff_at")
+                if race.get("betting_cutoff_source") == TRUSTED_CUTOFF_SOURCE and existing_cutoff:
+                    try:
+                        same_cutoff = datetime.fromisoformat(str(existing_cutoff).replace("Z", "+00:00")) == cutoff_dt
+                    except ValueError:
+                        same_cutoff = False
+                    if not same_cutoff:
+                        cutoff_conflicts += 1
+                        cutoff_unavailable.append({"raceId": str(race.get("id", "")),
+                                                   "reason": "trusted cutoff conflicts with official page"})
+                        continue
+                race.update({"betting_cutoff_at": cutoff_at,
+                             "betting_cutoff_source": TRUSTED_CUTOFF_SOURCE,
+                             "betting_cutoff_observed_at": fetched})
+                cutoffs_updated += 1
+            except (TypeError, ValueError) as exc:
+                cutoff_unavailable.append({"raceId": str(race.get("id", "")),
+                                           "reason": str(exc) or type(exc).__name__})
         except Exception as exc:
             failures.append({"raceId": str(race.get("id", "")), "reason": type(exc).__name__})
     merge_rows(store, {"prerace_observations": observations})
     return {"status": "partial" if failures and observations else "failed" if failures else "success" if observations else "skipped",
             "targets": len(targets), "requests": len(targets), "observations": len(observations),
-            "failures": failures}
+            "cutoffs_updated": cutoffs_updated, "cutoff_conflicts": cutoff_conflicts,
+            "cutoff_unavailable": cutoff_unavailable, "failures": failures}

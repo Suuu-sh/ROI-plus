@@ -19,6 +19,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _inference_timestamp() -> str:
+    """Capture the real as-of time after collection, never reuse the run start."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
 def _coerce_dt(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
@@ -243,8 +248,9 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         other_runs.append(run)
     rows["collection_runs"] = other_runs
     prediction_error = None
+    inference_as_of = _inference_timestamp()
     try:
-        ticket_predictions = _predict_boat_trifecta_date(rows, day, cutoff)
+        ticket_predictions = _predict_boat_trifecta_date(rows, day, inference_as_of)
     except (FileNotFoundError, OSError, RuntimeError, ValueError, TypeError, KeyError,
             AttributeError, EOFError, pickle.UnpicklingError, ImportError) as exc:
         # Missing, legacy, or non-v2 active artifacts block inference only;
@@ -300,7 +306,8 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     if forecast_reason is None and not ticket_predictions:
         forecast_reason = "no upcoming real races with verified cutoffs produced v2 trifecta predictions at this cutoff"
     forecast_ready = forecast_reason is None
-    return {"date": day, "cutoff": cutoff, "collected_dates": [previous, day],
+    return {"date": day, "cutoff": cutoff, "prediction_as_of": inference_as_of,
+            "collected_dates": [previous, day],
             "daily_collection_success": collection_ready,
             "forecast_ready": forecast_ready,
             "forecast_status": "ready" if forecast_ready else "not_ready",
@@ -337,6 +344,10 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
                     continue
                 try:
                     predicted_at = _primary_prediction_as_of(str(race["betting_cutoff_at"]))
+                    observed_at = datetime.fromisoformat(str(race.get("betting_cutoff_observed_at")).replace("Z", "+00:00"))
+                    target_at = datetime.fromisoformat(predicted_at)
+                    if observed_at.tzinfo is None or observed_at > target_at:
+                        continue
                 except (TypeError, ValueError):
                     continue
                 features = build_boat_prerace_v2_features(group, race=race, predicted_at=predicted_at,

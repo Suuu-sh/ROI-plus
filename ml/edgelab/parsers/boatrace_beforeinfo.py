@@ -7,16 +7,19 @@ observation time from a neighboring race label.
 from __future__ import annotations
 
 from datetime import date, datetime
+from html import unescape
 from html.parser import HTMLParser
 import json
 import re
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
 OFFICIAL_HOST = "www.boatrace.jp"
 BEFOREINFO_PATH = "/owpc/pc/race/beforeinfo"
+_IDENTITY_PAGE_TYPES = {"racelist", "raceresult", "beforeinfo", "pcexpect", "myexpect"}
+_TIME_PATTERN = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)")
 
 
 class _PageParser(HTMLParser):
@@ -84,6 +87,33 @@ class _PageParser(HTMLParser):
             self._cell.append(data.strip())
 
 
+class _PageIdentityParser(HTMLParser):
+    """Collect race links inside the official page's tab3 navigation block."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.div_depth = 0
+        self.tab3_depth: int | None = None
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_map = dict(attrs)
+        if tag == "div":
+            next_depth = self.div_depth + 1
+            classes = (attrs_map.get("class") or "").split()
+            if self.tab3_depth is None and "tab3" in classes:
+                self.tab3_depth = next_depth
+            self.div_depth = next_depth
+        elif tag == "a" and self.tab3_depth is not None and attrs_map.get("href"):
+            self.hrefs.append(str(attrs_map["href"]))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "div" and self.div_depth:
+            if self.tab3_depth == self.div_depth:
+                self.tab3_depth = None
+            self.div_depth -= 1
+
+
 def beforeinfo_url(race_no: int, venue_code: str, target_date: str | date) -> str:
     day = date.fromisoformat(target_date) if isinstance(target_date, str) else target_date
     if not (1 <= int(race_no) <= 12 and str(venue_code).isdigit() and len(str(venue_code)) == 2):
@@ -104,6 +134,60 @@ def _identity_from_url(url: str, race_id: str) -> tuple[str, str, int]:
     if not match or (day, venue, race_no.zfill(2)) != (match.group(1), match.group(2), match.group(3)):
         raise ValueError("pre-race source identity does not match race_id")
     return day, venue, int(race_no)
+
+
+def _identity_from_page(html: str) -> tuple[str, str, int]:
+    """Read the page's selected-race identity from its own tab links."""
+    parser = _PageIdentityParser()
+    parser.feed(html)
+    identities: list[tuple[str, str, int]] = []
+    for href in parser.hrefs:
+        url = urljoin(f"https://{OFFICIAL_HOST}{BEFOREINFO_PATH}", unescape(href))
+        parsed = urlparse(url)
+        page_type = parsed.path.rsplit("/", 1)[-1]
+        if parsed.scheme != "https" or parsed.hostname != OFFICIAL_HOST or page_type not in _IDENTITY_PAGE_TYPES:
+            continue
+        query = parse_qs(parsed.query)
+        day = query.get("hd", [""])[0]
+        venue = query.get("jcd", [""])[0]
+        race_text = query.get("rno", [""])[0]
+        if not re.fullmatch(r"\d{8}", day) or not re.fullmatch(r"\d{2}", venue) or not race_text.isdigit():
+            raise ValueError("malformed official race identity")
+        race_no = int(race_text)
+        if not 1 <= race_no <= 12:
+            raise ValueError("malformed official race identity")
+        identities.append((day, venue, race_no))
+    if len(identities) < 2:
+        raise ValueError("insufficient official race identity evidence")
+    if any(identity != identities[0] for identity in identities[1:]):
+        raise ValueError("conflicting official race identity evidence")
+    return identities[0]
+
+
+def parse_beforeinfo_cutoff(html: str, *, race_id: str, source_url: str) -> str:
+    """Extract only the page-identified, explicitly labelled scheduled cutoff."""
+    expected = _identity_from_url(source_url, race_id)
+    if _identity_from_page(html) != expected:
+        raise ValueError("official beforeinfo page identity mismatch")
+    day, _, race_no = expected
+    tables, _, _ = _tables(html)
+    candidates: list[str] = []
+    for table in tables:
+        for row in table:
+            row_text = " ".join(value for _, value in row)
+            if "締切予定時刻" not in row_text:
+                continue
+            times = [f"{hour.zfill(2)}:{minute}" for hour, minute in _TIME_PATTERN.findall(row_text)]
+            if len(times) == 1:
+                candidates.append(times[0])
+            elif len(times) == 12:
+                candidates.append(times[race_no - 1])
+            else:
+                raise ValueError("official cutoff schedule row is incomplete or ambiguous")
+    if not candidates or len(set(candidates)) != 1:
+        raise ValueError("explicit official cutoff label/time missing or ambiguous")
+    hour, minute = (int(part) for part in candidates[0].split(":"))
+    return datetime.strptime(day, "%Y%m%d").replace(hour=hour, minute=minute, tzinfo=JST).isoformat(timespec="seconds")
 
 
 def _number(value: str) -> float | None:
@@ -130,6 +214,44 @@ def _header_index(headers: list[str], *needles: str) -> int | None:
 def _lane(value: str) -> int | None:
     match = re.search(r"(?:^|\D)([1-6])(?:\D|$)", value.strip())
     return int(match.group(1)) if match else None
+
+
+def _span_values(row_html: str, class_name: str) -> list[str]:
+    values = []
+    for match in re.finditer(r"<span\b([^>]*)>([\s\S]*?)</span>", row_html, flags=re.IGNORECASE):
+        classes = re.search(r"\bclass\s*=\s*([\"'])(.*?)\1", match.group(1), flags=re.IGNORECASE)
+        if not classes or class_name not in classes.group(2).split():
+            continue
+        value = unescape(re.sub(r"<[^>]*>", "", match.group(2))).strip()
+        values.append(value)
+    return values
+
+
+def _start_exhibition_values(html: str) -> dict[int, dict[str, Any]]:
+    """Read boat identity, ST, and course order from official child spans."""
+    values_by_lane: dict[int, dict[str, Any]] = {}
+    course = 0
+    for row_match in re.finditer(r"<tr\b[^>]*>([\s\S]*?)</tr>", html, flags=re.IGNORECASE):
+        row = row_match.group(1)
+        boats = _span_values(row, "table1_boatImage1Number")
+        times = _span_values(row, "table1_boatImage1Time")
+        if not boats and not times:
+            continue
+        if len(boats) != 1 or len(times) != 1:
+            raise ValueError("official start-exhibition boat/time spans are ambiguous")
+        lane = _lane(boats[0])
+        if lane is None or lane in values_by_lane:
+            raise ValueError("official start-exhibition boat identity is invalid or duplicated")
+        course += 1
+        item: dict[str, Any] = {"start_exhibition_course": float(course)}
+        timing = times[0]
+        start = _number(timing)
+        if start is not None:
+            item["start_exhibition"] = start
+        if timing:
+            item["start_exhibition_false_start"] = timing.lstrip().upper().startswith("F")
+        values_by_lane[lane] = item
+    return values_by_lane
 
 
 def _tables(html: str) -> tuple[list[list[list[tuple[str, str]]]], str, list[str]]:
@@ -185,7 +307,10 @@ def _weather(text: str, day: str, classes: list[str] | None = None) -> tuple[dic
 def parse_beforeinfo(html: str, *, race_id: str, source_url: str, source_sha256: str,
                      fetched_at: str) -> list[dict[str, Any]]:
     """Extract authentic exhibition, start-exhibition and page-weather values."""
-    day, _, _ = _identity_from_url(source_url, race_id)
+    expected_identity = _identity_from_url(source_url, race_id)
+    if _identity_from_page(html) != expected_identity:
+        raise ValueError("official beforeinfo page identity mismatch")
+    day, _, _ = expected_identity
     if not re.fullmatch(r"[a-f0-9]{64}", source_sha256):
         raise ValueError("source SHA256 is required")
     fetched = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
@@ -226,43 +351,8 @@ def parse_beforeinfo(html: str, *, race_id: str, source_url: str, source_sha256:
                     exhibition[lane] = item
             break
 
-    for table in tables:
-        for header_row, cells in enumerate(table):
-            headers = [value.strip().upper() for _, value in cells]
-            course_idx = _header_index(headers, "コース")
-            st_idx = _header_index(headers, "ST")
-            if course_idx is None or st_idx is None:
-                continue
-            for row in table[header_row + 1:]:
-                values = [value for _, value in row]
-                if not values or course_idx >= len(values):
-                    continue
-                lane = _lane(values[course_idx])
-                if lane is None:
-                    continue
-                # Some official beforeinfo rows collapse the "並び" and ST
-                # columns into one colspan=3 cell whose spans hold the values.
-                collapsed = st_idx >= len(values)
-                raw = values[st_idx].strip() if not collapsed else " ".join(values[course_idx + 1:])
-                if collapsed:
-                    # The lane number in table1_boatNo and its ST span are adjacent
-                    # in official cell text (for example `2.08`). Drop the boat
-                    # number before parsing the decimal start timing.
-                    raw = re.sub(rf"^\s*{lane}(?=F|\.|\s)", "", raw, count=1, flags=re.IGNORECASE)
-                start_values = re.findall(r"F?\s*(?:\d+\.\d+|\.\d+)", raw, flags=re.IGNORECASE)
-                if not start_values:
-                    continue
-                raw = start_values[-1].strip()
-                number = _number(raw)
-                item = exhibition.setdefault(lane, {})
-                if number is not None:
-                    item["start_exhibition"] = number
-                if "F" in raw.upper():
-                    item["start_exhibition_false_start"] = True
-                else:
-                    item.setdefault("start_exhibition_false_start", False)
-                item["start_exhibition_course"] = float(lane)
-            break
+    for lane, values in _start_exhibition_values(html).items():
+        exhibition.setdefault(lane, {}).update(values)
 
     for lane, values in sorted(exhibition.items()):
         observations.append({"id": f"{race_id}:exhibition:{lane}:{fetched.isoformat()}",
@@ -274,6 +364,10 @@ def parse_beforeinfo(html: str, *, race_id: str, source_url: str, source_sha256:
             "data_origin": "real"})
 
     weather, observed_at, label = _weather(text, day, classes)
+    if observed_at is not None and datetime.fromisoformat(observed_at) > fetched.astimezone(JST):
+        # Do not expose a source clock that is ahead of the page capture. The
+        # preserved label also keeps this weather out of point-in-time features.
+        observed_at = None
     if weather:
         observations.append({"id": f"{race_id}:weather:0:{fetched.isoformat()}",
             "race_id": race_id, "kind": "weather", "entry_number": 0,

@@ -4,22 +4,31 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
+import re
 from zoneinfo import ZoneInfo
 
 from edgelab.cli import _make_training_rows
 from edgelab.collectors.boatrace_beforeinfo import collect_beforeinfo
 from edgelab.features.boat import (PRERACE_V2_FEATURE_COLUMNS, PRERACE_V2_SCHEMA,
     build_boat_prerace_v2_features, completed_racer_history)
-from edgelab.parsers.boatrace_beforeinfo import beforeinfo_url, parse_beforeinfo
+from edgelab.parsers.boatrace_beforeinfo import (beforeinfo_url, parse_beforeinfo,
+    parse_beforeinfo_cutoff)
 
 JST = ZoneInfo("Asia/Tokyo")
 
 
-def _page(day: str, *, ambiguous_weather: bool = False) -> str:
-    # Sanitized from the official page's current DOM shape, including <br>
-    # inside "展示タイム", colspan start rows, and an is-windNN icon class.
+def _page(day: str, *, ambiguous_weather: bool = False, cutoff1: str | None = None,
+          race_no: int = 1) -> str:
+    # Sanitized from the official page's current DOM shape, including tab3
+    # identity links, official cutoff schedule, split header, and real ST rows.
     fixture = (Path(__file__).parent / "fixtures" / "boatrace_beforeinfo_actual_fragment.html").read_text(encoding="utf-8")
-    return fixture.replace("12:34現在", "11R時点") if ambiguous_weather else fixture
+    fixture = fixture.replace("20261011", day.replace("-", ""))
+    fixture = fixture.replace("rno=1", f"rno={race_no}")
+    if cutoff1:
+        fixture = fixture.replace("15:19", cutoff1)
+    if ambiguous_weather:
+        fixture = fixture.replace("20:49現在", "11R時点")
+    return fixture
 
 
 def _observation(race_id: str, kind: str, lane: int, fetched_at: str, values: dict,
@@ -37,42 +46,44 @@ def test_beforeinfo_parser_keeps_real_source_times_and_false_start_marker():
     day = "2026-10-11"
     race_id = "boat-20261011-01-01"
     url = beforeinfo_url(1, "01", day)
-    fetched_at = "2026-10-11T03:34:15+00:00"
+    fetched_at = "2026-10-11T12:00:00+00:00"
     rows = parse_beforeinfo(_page(day), race_id=race_id, source_url=url,
                            source_sha256=hashlib.sha256(b"fixture").hexdigest(), fetched_at=fetched_at)
     exhibit = next(row for row in rows if row["kind"] == "exhibition" and row["entry_number"] == 1)
     values = json.loads(exhibit["values_json"])
-    assert values == {"exhibition_time": 6.71, "tilt": -0.5, "weight": 50.0,
-                      "start_exhibition": 0.07, "start_exhibition_false_start": True,
+    assert values == {"exhibition_time": 6.78, "tilt": -0.5, "weight": 53.3,
+                      "start_exhibition": 0.11, "start_exhibition_false_start": False,
                       "start_exhibition_course": 1.0}
     starts = {row["entry_number"]: json.loads(row["values_json"]) for row in rows
               if row["kind"] == "exhibition"}
-    assert [starts[lane]["start_exhibition"] for lane in range(1, 7)] == [0.07, 0.08, 0.04, 0.06, 0.02, 0.07]
-    assert all(starts[lane]["start_exhibition_false_start"] is False for lane in range(2, 7))
+    assert [starts[lane]["start_exhibition"] for lane in range(1, 7)] == [0.11, 0.09, 0.04, 0.06, 0.02, 0.07]
+    assert all(starts[lane]["start_exhibition_false_start"] is False for lane in range(1, 6))
+    assert starts[6]["start_exhibition_false_start"] is True
     weather = next(row for row in rows if row["kind"] == "weather")
-    assert weather["source_observed_at"] == "2026-10-11T12:34+09:00"
-    assert weather["source_observation_label"] == "12:34現在"
+    assert weather["source_observed_at"] == "2026-10-11T20:49+09:00"
+    assert weather["source_observation_label"] == "20:49現在"
     weather_values = json.loads(weather["values_json"])
     assert weather_values["wind_direction"] == "北"
     assert weather_values["wind_direction_class"] == "is-wind12"
-    assert weather_values["wind_speed"] == 2.0
+    assert weather_values["wind_speed"] == 1.0
+    assert weather_values["wave_height"] == 1.0
     assert weather["fetched_at"] == weather["available_at"] == fetched_at
     assert all(row["source_sha256"] == hashlib.sha256(b"fixture").hexdigest() for row in rows)
     race = {"id": race_id, "sport": "boat", "venue_id": "01", "race_no": 1,
             "race_date": day, "data_origin": "real"}
     entries = [{"race_id": race_id, "number": lane, "data_origin": "real",
         "available_at": "2026-10-11T11:00:00+09:00", "features_json": "{}"} for lane in range(1, 7)]
-    features = build_boat_prerace_v2_features(entries, race=race, predicted_at="2026-10-11T12:40:00+09:00",
+    features = build_boat_prerace_v2_features(entries, race=race, predicted_at="2026-10-11T21:05:00+09:00",
                                                observations=rows)
     assert all(row["lane_wind_y"] is not None for row in features)
-    assert features[0]["lane_wind_y"] == -5.0
+    assert features[0]["lane_wind_y"] == -2.5
 
 
 def test_beforeinfo_keeps_non_clock_weather_label_without_inventing_a_time():
     race_id = "boat-20261011-01-01"
     rows = parse_beforeinfo(_page("2026-10-11", ambiguous_weather=True), race_id=race_id,
         source_url=beforeinfo_url(1, "01", "2026-10-11"), source_sha256="b" * 64,
-        fetched_at="2026-10-11T03:34:15+00:00")
+        fetched_at="2026-10-11T12:00:00+00:00")
     weather = next(row for row in rows if row["kind"] == "weather")
     assert weather["source_observed_at"] is None
     assert weather["source_observation_label"] == "11R時点"
@@ -82,20 +93,62 @@ def test_beforeinfo_rejects_wrong_official_page_identity():
     try:
         parse_beforeinfo(_page("2026-10-11"), race_id="boat-20261011-01-01",
             source_url=beforeinfo_url(2, "01", "2026-10-11"), source_sha256="c" * 64,
-            fetched_at="2026-10-11T03:34:15+00:00")
+            fetched_at="2026-10-11T12:00:00+00:00")
     except ValueError as exc:
         assert "identity" in str(exc)
     else:
         raise AssertionError("source race mismatch must fail closed")
 
 
+def test_beforeinfo_cutoff_parser_uses_exact_labeled_schedule_and_page_race_identity():
+    day = "2026-10-11"
+    race1 = "boat-20261011-01-01"
+    race12 = "boat-20261011-01-12"
+    assert parse_beforeinfo_cutoff(_page(day), race_id=race1,
+        source_url=beforeinfo_url(1, "01", day)) == "2026-10-11T15:19:00+09:00"
+    assert parse_beforeinfo_cutoff(_page(day, race_no=12), race_id=race12,
+        source_url=beforeinfo_url(12, "01", day)) == "2026-10-11T20:45:00+09:00"
+    with_replaced_link = _page(day).replace("raceresult?rno=1", "raceresult?rno=2")
+    try:
+        parse_beforeinfo_cutoff(with_replaced_link, race_id=race1,
+            source_url=beforeinfo_url(1, "01", day))
+    except ValueError as exc:
+        assert "identity" in str(exc)
+    else:
+        raise AssertionError("conflicting page race identity must fail closed")
+    incomplete = _page(day).replace("<td>20:45</td>", "<td>later</td>")
+    try:
+        parse_beforeinfo_cutoff(incomplete, race_id=race1,
+            source_url=beforeinfo_url(1, "01", day))
+    except ValueError as exc:
+        assert "ambiguous" in str(exc)
+    else:
+        raise AssertionError("incomplete cutoff schedule must fail closed")
+
+
+def test_start_exhibition_course_comes_from_row_order_not_boat_number():
+    html = _page("2026-10-11")
+    rows = re.findall(r'<tr><td colspan="3">[\s\S]*?</tr>', html)
+    assert len(rows) == 6
+    reordered = html.replace(rows[0], "__first_start_row__", 1).replace(rows[1], rows[0], 1)
+    reordered = reordered.replace("__first_start_row__", rows[1], 1)
+    observations = parse_beforeinfo(reordered, race_id="boat-20261011-01-01",
+        source_url=beforeinfo_url(1, "01", "2026-10-11"), source_sha256="d" * 64,
+        fetched_at="2026-10-11T12:00:00+00:00")
+    starts = {row["entry_number"]: json.loads(row["values_json"]) for row in observations
+              if row["kind"] == "exhibition"}
+    assert starts[1]["start_exhibition_course"] == 2.0
+    assert starts[2]["start_exhibition_course"] == 1.0
+
+
 def test_collector_is_current_day_bounded_and_stamps_fetch_availability():
     now = datetime.now(JST)
     day = now.date().isoformat()
     race_id = f"boat-{day.replace('-', '')}-01-01"
+    cutoff = now.replace(second=0, microsecond=0) + timedelta(minutes=10)
     race = {"id": race_id, "sport": "boat", "venue_id": "01", "race_no": 1,
             "race_date": day, "status": "scheduled", "data_origin": "real",
-            "post_time": (now + timedelta(minutes=10)).isoformat()}
+            "post_time": cutoff.isoformat()}
     old = {**race, "id": f"boat-{(now.date() - timedelta(days=1)).strftime('%Y%m%d')}-01-01",
            "race_date": (now.date() - timedelta(days=1)).isoformat()}
     late = {**race, "id": f"boat-{day.replace('-', '')}-01-02", "race_no": 2,
@@ -104,16 +157,43 @@ def test_collector_is_current_day_bounded_and_stamps_fetch_availability():
     urls, waits = [], []
     def fetch(url):
         urls.append(url)
-        return _page(day, ambiguous_weather=True), hashlib.sha256(url.encode()).hexdigest()
+        return _page(day, ambiguous_weather=True, cutoff1=cutoff.strftime("%H:%M")), hashlib.sha256(url.encode()).hexdigest()
     result = collect_beforeinfo(store, now=now, max_requests=1, fetcher=fetch,
                                 wait_for_slot=lambda: waits.append(True))
     assert result["status"] == "success"
     assert result["targets"] == result["requests"] == 1
     assert result["observations"] == 7
+    assert result["cutoffs_updated"] == 1
+    assert race["betting_cutoff_at"] == cutoff.isoformat()
+    assert race["betting_cutoff_source"] == "boatrace-racelist-cutoff-v1"
+    observed = datetime.fromisoformat(race["betting_cutoff_observed_at"])
+    assert observed <= datetime.now(ZoneInfo("UTC")) + timedelta(seconds=5)
     assert len(urls) == len(waits) == 1
     assert "rno=1" in urls[0]
     assert {row["race_id"] for row in store["prerace_observations"]} == {race_id}
     assert all(row["available_at"] == row["fetched_at"] for row in store["prerace_observations"])
+
+
+def test_collector_preserves_conflicting_trusted_cutoff_and_reports_unavailability():
+    now = datetime.now(JST).replace(second=0, microsecond=0)
+    day = now.date().isoformat()
+    race_id = f"boat-{day.replace('-', '')}-01-01"
+    existing = now + timedelta(minutes=10)
+    page_cutoff = existing + timedelta(minutes=1)
+    race = {"id": race_id, "sport": "boat", "venue_id": "01", "race_no": 1,
+            "race_date": day, "status": "scheduled", "data_origin": "real",
+            "post_time": existing.isoformat(), "betting_cutoff_at": existing.isoformat(),
+            "betting_cutoff_source": "boatrace-racelist-cutoff-v1",
+            "betting_cutoff_observed_at": now.isoformat()}
+    store = {"races": [race], "prerace_observations": []}
+    result = collect_beforeinfo(store, now=now, max_requests=1,
+        fetcher=lambda url: (_page(day, cutoff1=page_cutoff.strftime("%H:%M")), "e" * 64),
+        wait_for_slot=lambda: None)
+    assert result["cutoff_conflicts"] == 1
+    assert result["cutoffs_updated"] == 0
+    assert result["cutoff_unavailable"][0]["reason"] == "trusted cutoff conflicts with official page"
+    assert race["betting_cutoff_at"] == existing.isoformat()
+    assert race["betting_cutoff_observed_at"] == now.isoformat()
 
 
 def test_prerace_v2_uses_only_prior_available_racer_history_and_matching_timely_observations():
@@ -213,7 +293,8 @@ def test_v2_training_uses_only_races_with_real_racelist_cutoff():
             "race_date": day, "status": "finished", "data_origin": "real",
             "post_time": f"{day}T13:00:00+09:00"}
         if cutoff:
-            race.update(betting_cutoff_at=cutoff, betting_cutoff_source="boatrace-racelist-cutoff-v1")
+            race.update(betting_cutoff_at=cutoff, betting_cutoff_source="boatrace-racelist-cutoff-v1",
+                        betting_cutoff_observed_at=f"{day}T12:57:00+09:00")
         entries = [{"race_id": race_id, "number": lane, "data_origin": "real",
             "available_at": f"{day}T00:00:00+09:00", "national_win_rate": 5,
             "features_json": json.dumps({"racer_id": str(1233 + lane)})}
@@ -224,8 +305,11 @@ def test_v2_training_uses_only_races_with_real_racelist_cutoff():
     cutoff = "2026-10-10T12:59:00+09:00"
     good = cohort("boat-20261010-01-01", "2026-10-10", cutoff)
     missing = cohort("boat-20261009-01-01", "2026-10-09", None)
-    store = {"races": [good[0], missing[0]], "entries": good[1] + missing[1],
-             "results": good[2] + missing[2], "payouts": [], "prerace_observations": [
+    late_cutoff = cohort("boat-20261008-01-01", "2026-10-08", "2026-10-08T12:59:00+09:00")
+    late_cutoff[0]["betting_cutoff_observed_at"] = "2026-10-08T12:58:30+09:00"
+    store = {"races": [good[0], missing[0], late_cutoff[0]],
+             "entries": good[1] + missing[1] + late_cutoff[1],
+             "results": good[2] + missing[2] + late_cutoff[2], "payouts": [], "prerace_observations": [
                 _observation(good[0]["id"], "exhibition", 1, "2026-10-10T12:57:30+09:00",
                              {"exhibition_time": 6.71}),
                 # Available at T-30, after the T-60 model input boundary.
@@ -236,4 +320,4 @@ def test_v2_training_uses_only_races_with_real_racelist_cutoff():
     assert {row["race_id"] for row in rows} == {good[0]["id"]}
     assert {row["predicted_at"] for row in rows} == {"2026-10-10T12:58:00+09:00"}
     assert rows[0]["exhibition_time"] == 6.71
-    assert len(_make_training_rows(store, "boat")) == 12
+    assert len(_make_training_rows(store, "boat")) == 18

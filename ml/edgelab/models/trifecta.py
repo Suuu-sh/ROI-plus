@@ -200,12 +200,15 @@ def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[st
                 continue
             try:
                 target_as_of = datetime.fromisoformat(str(race["betting_cutoff_at"]).replace("Z", "+00:00")) - timedelta(seconds=60)
+                cutoff_observed_at = datetime.fromisoformat(str(race.get("betting_cutoff_observed_at", "")).replace("Z", "+00:00"))
             except (TypeError, ValueError):
                 continue
-            if target_as_of.tzinfo is None or target_as_of <= cutoff_dt:
+            if (target_as_of.tzinfo is None or cutoff_observed_at.tzinfo is None
+                    or target_as_of <= cutoff_dt or cutoff_observed_at > cutoff_dt
+                    or cutoff_observed_at > target_as_of):
                 # Daily precomputation cannot claim a T-60 forecast after its
-                # feature boundary has passed; the next run may use no future
-                # observations and records its own generated-at cutoff.
+                # feature boundary has passed, or use a cutoff fetched only
+                # afterward. The next run may use only then-current evidence.
                 continue
         by_race[rid].append(dict(entry))
     records = []

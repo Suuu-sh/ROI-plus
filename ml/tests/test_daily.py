@@ -38,12 +38,20 @@ def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_back
                              "payout": 150, "data_origin": "real"})
     synced = {}
     collection_calls = []
+    timing_events = []
+    fresh_as_of = "2026-10-08T22:31:02.345+00:00"
     monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(store))
     monkeypatch.setattr(cli, "save_rows", lambda value: None)
     monkeypatch.setattr(cli, "collect_boat", lambda start, end, **kwargs: collection_calls.append((start, end, kwargs)) or 0)
-    monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: [])
+    monkeypatch.setattr(cli, "collect_beforeinfo", lambda day, **kwargs: timing_events.append("collection") or
+                        {"status": "success", "observations": 0})
+    monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: timing_events.append("registry") or [])
+    monkeypatch.setattr(cli, "_inference_timestamp", lambda: timing_events.append("timestamp") or fresh_as_of)
     monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
-    monkeypatch.setattr(cli, "_predict_boat_trifecta_date", lambda rows, day, cutoff: [{"race_id": "today", "bet_type": "trifecta"}])
+    def predict(rows, day, as_of):
+        timing_events.append(("prediction", as_of))
+        return [{"race_id": "today", "bet_type": "trifecta"}]
+    monkeypatch.setattr(cli, "_predict_boat_trifecta_date", predict)
     monkeypatch.setattr(cli, "_predict_boat_date", lambda *args: (_ for _ in ()).throw(AssertionError("daily must not fall back to win")))
     monkeypatch.setattr("edgelab.sync.sync_rows", lambda payload: synced.update(payload) or {"ok": True})
 
@@ -62,6 +70,8 @@ def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_back
     assert result["forecast_ready"] is True
     assert result["forecast_status"] == "ready"
     assert result["forecast_reason"] is None
+    assert result["prediction_as_of"] == fresh_as_of
+    assert timing_events == ["collection", "registry", "timestamp", ("prediction", fresh_as_of)]
 
 
 def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monkeypatch):
