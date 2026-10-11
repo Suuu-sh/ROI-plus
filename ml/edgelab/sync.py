@@ -125,8 +125,11 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
         if not values:
             continue
         responses = []
-        for start in range(0, len(values), 500):
-            payload = json.dumps(values[start:start + 500], ensure_ascii=False).encode("utf-8")
+        # Race ingest isolates/compares existing rows individually; keep its
+        # client batches small to stay within the 30-second request timeout.
+        chunk_size = 50 if table == "races" else 500
+        for start in range(0, len(values), chunk_size):
+            payload = json.dumps(values[start:start + chunk_size], ensure_ascii=False).encode("utf-8")
             req = Request(f"{base_url}/api/ingest/{ENDPOINTS[table]}", data=payload,
                           headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
                                    "User-Agent": "EdgeLab-ML/0.1"}, method="POST")
