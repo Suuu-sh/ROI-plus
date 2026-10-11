@@ -6,6 +6,7 @@ Python 3.11+ 用の収集・特徴量・学習 CLI です。依存は `ml/.venv`
 ```sh
 PYTHONPATH=ml ml/.venv/bin/python -m edgelab collect-boat --from 2026-09-01 --to 2026-09-01
 PYTHONPATH=ml ml/.venv/bin/python -m edgelab train --sport boat
+PYTHONPATH=ml ml/.venv/bin/python -m edgelab train-trifecta
 PYTHONPATH=ml ml/.venv/bin/python -m edgelab predict --sport boat --date 2026-09-02 --cutoff 2026-09-02T08:00:00+09:00
 EDGELAB_API_URL=https://example.invalid INGEST_TOKEN=... PYTHONPATH=ml ml/.venv/bin/python -m edgelab sync
 PYTHONPATH=ml ml/.venv/bin/python -m edgelab backfill --from 2026-01-01 --to 2026-09-01
@@ -16,6 +17,31 @@ ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab li
 ファイルは `data/raw/boatrace` に保持し、再実行時は再取得しません。未開催日は
 スキップ扱いです。番組表は前日利用可能、競走成績内の展示情報は締切 10 分前
 利用可能として扱います。モデル成果物は `ml/artifacts/` に保存されます。
+
+`train-trifecta` は保存済み実データだけで、完全な6艇K着順から pairwise ranking
+候補を学習し、Plackett-Luce による厳密な三連単順序確率を時間順holdoutで採点します。
+三つの単勝確率の積は使いません。holdout払戻リプレイは同一レースの締切10分前より
+前に記録された公式・完全・非締切の三連単オッズ一式がある場合だけ実施し、不足時はROIを算出しません。
+仮想リプレイは5本以上の独立fitによる ticket確率標準偏差を要求し、`(p - std) * odds - 1`
+の保守的ROIと標準偏差上限で1レース1点（最良の三連単）を選びます。これは単一券種の
+過去リプレイであり、全券種をまたぐ運用方針の検証ではありません。候補学習はモデル行をローカルへ記録しますが、
+推論・リモート同期はせず、昇格も自動化しません。過去のB公開時刻は
+実測されておらず、保持された実績も将来利益を証明しません。
+
+`ticketEventPooledEce` は全レースの120 ticket-event行をまとめた micro ECE です。
+レース内ticketは依存するため校正の参考値に限り、レース単位のtop-ticket ECEと各binの
+レース数・予測値・的中率も併記します。いずれも昇格や利益の証明には使いません。
+
+推論にはレジストリ上で明示的に active となり、候補評価の承認ゲート、三連単の意味論、
+特徴量schema、artifact SHA256 がすべて一致するモデルが必要です。例:
+
+```sh
+PYTHONPATH=ml ml/.venv/bin/python -m edgelab predict-trifecta --cutoff 2026-10-10T08:00:00+09:00
+PYTHONPATH=ml ml/.venv/bin/python -m edgelab sync --tables ticket_predictions
+```
+
+前者は保存済みローカル実データに予測行を保存するだけです。後者の同期は明示的な
+ユーザー操作で、API側の buy-eligibility 条件を満たすことを保証しません。
 
 公式サイトの単勝オッズ取得は `ENABLE_BOATRACE_ODDS_SCRAPE=true` の場合のみ有効です。
 締切前25分以内のレースを10分ごとの実行で1回だけ取得し、1回最大30リクエスト、

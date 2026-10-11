@@ -9,7 +9,7 @@ DEFAULT_STORE = Path("ml/data/rows.json")
 def load_rows(path: str | Path = DEFAULT_STORE) -> dict[str, list[dict[str, Any]]]:
     target = Path(path)
     if not target.exists():
-        return {k: [] for k in ("races", "entries", "odds_snapshots", "results", "payouts", "predictions", "models", "collection_runs")}
+        return {k: [] for k in ("races", "entries", "odds_snapshots", "results", "payouts", "predictions", "ticket_predictions", "models", "collection_runs")}
     return json.loads(target.read_text(encoding="utf-8"))
 
 def save_rows(rows: dict[str, list[dict[str, Any]]], path: str | Path = DEFAULT_STORE) -> None:
@@ -23,6 +23,7 @@ def merge_rows(target: dict[str, list[dict[str, Any]]], incoming: dict[str, list
             "payouts": ("race_id", "bet_type", "selection"),
             "odds_snapshots": ("race_id", "bet_type", "selection", "captured_at"),
             "predictions": ("race_id", "model_id", "number", "predicted_at"),
+            "ticket_predictions": ("race_id", "model_id", "bet_type", "selection", "predicted_at"),
             "models": ("id",), "collection_runs": ("id",)}
     for table, new_rows in incoming.items():
         if table not in keys:

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import type { EdgeCandidate, EntryView, RaceDetail, RaceSummary, Sport } from '@edgelab/shared/src/types'
+import type { RankingCandidate, TicketCandidate, EntryView, RaceDetail, RaceSummary, Sport } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
 import { useOrigin } from '../lib/origin'
 import { useAsync } from '../lib/useAsync'
@@ -8,6 +8,7 @@ import { dateTime, freshness, num, odds, pct, signedPct, timeOf, todayJst, tone 
 import { t } from '../i18n'
 import { EdgeBadge, Empty, ErrorState, Loading, OriginBadge, ProbBar, Section, SportIcon } from '../components/ui'
 import { BetSheet } from '../components/BetSheet'
+import { betTypeLabel } from '../lib/betType'
 
 function shiftDate(d: string, days: number) {
   const x = new Date(`${d}T00:00:00Z`)
@@ -39,7 +40,7 @@ export function SportPage({ sport }: { sport: Sport }) {
           <h1 className={`flex items-center gap-2 text-xl font-semibold tracking-tight ${accent}`}>
             <SportIcon sport={sport} className="h-6 w-6" />{t().sport[sport]}
           </h1>
-          <p className="mt-1 text-sm text-muted">{sport === 'horse' ? 'JRA 中央競馬' : '全国24場'}・単勝の1着確率と期待収益率</p>
+          <p className="mt-1 text-sm text-muted">{sport === 'horse' ? 'JRA 中央競馬' : '全国24場'}・検証済み券種の的中確率と期待収益率</p>
         </div>
         <div className="flex items-center gap-1.5">
           <button className="btn-ghost h-8 w-8 px-0" onClick={() => setDate((d) => shiftDate(d, -1))} aria-label="前日">‹</button>
@@ -72,7 +73,7 @@ export function SportPage({ sport }: { sport: Sport }) {
   )
 }
 
-function RankingStrip({ sport, data, loading, error }: { sport: Sport; data: EdgeCandidate[] | null; loading: boolean; error: Error | null }) {
+function RankingStrip({ sport, data, loading, error }: { sport: Sport; data: RankingCandidate[] | null; loading: boolean; error: Error | null }) {
   const top = (data ?? []).filter((c) => c.edge === 'HIGH_EDGE' || c.edge === 'POSITIVE_EDGE').slice(0, 8)
   return (
     <Section title="期待値ランキング" right={<span className="text-xs text-muted">不確実性を差し引いた購入候補</span>}>
@@ -81,14 +82,14 @@ function RankingStrip({ sport, data, loading, error }: { sport: Sport; data: Edg
       ) : (
         <div className="flex gap-3 overflow-x-auto p-4 [scrollbar-width:thin]">
           {top.map((c, i) => (
-            <Link key={`${c.raceId}-${c.number}`} to={`/${sport}/${c.raceId}`}
+            <Link key={`${c.raceId}-${'selection' in c ? c.betType + '-' + c.selection : c.number}`} to={`/${sport}/${c.raceId}`}
               className="focus-ring group min-w-[200px] flex-1 rounded-xl border border-line bg-raised/40 p-3 transition-colors hover:border-ink/30">
               <div className="flex items-center justify-between">
                 <span className="num text-xs text-faint">#{i + 1}</span>
                 <EdgeBadge edge={c.edge} compact />
               </div>
-              <div className="mt-2 truncate text-sm font-semibold">{c.venueName} {c.raceNo}R・{c.number}番</div>
-              <div className="truncate text-xs text-muted">{c.name}</div>
+              <div className="mt-2 truncate text-sm font-semibold">{c.venueName} {c.raceNo}R・{'selection' in c ? `${betTypeLabel[c.betType]} ${c.selection}` : `単勝 ${c.number}番`}</div>
+              <div className="truncate text-xs text-muted">{'name' in c ? c.name : c.modelId}</div>
               <div className="mt-3 flex items-end justify-between">
                 <div>
                   <div className={`num text-xl font-semibold ${tone(c.expectedRoi)}`}>{signedPct(c.expectedRoi, 0)}</div>
@@ -147,6 +148,7 @@ function RacePanel({ raceId, sport, onChanged, onDate }: { raceId: string; sport
   const raceDate = race.data?.raceDate
   useEffect(() => { if (raceDate) onDate(raceDate) }, [raceDate, onDate])
   const [buying, setBuying] = useState<EntryView | null>(null)
+  const [ticketBuying, setTicketBuying] = useState<TicketCandidate | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
   if (race.error) return <div className="card"><ErrorState error={race.error} onRetry={race.reload} /></div>
@@ -187,6 +189,17 @@ function RacePanel({ raceId, sport, onChanged, onDate }: { raceId: string; sport
       <Section title={sport === 'horse' ? '出走馬・AI予測' : '出走艇・AI予測'} right={<span className="hidden text-xs text-muted sm:inline">縦線＝損益分岐勝率</span>}>
         <EntryTable race={r} sport={sport} canBuy={canBuy} onBuy={setBuying} />
       </Section>
+
+      <Section title="券種別の買い目・期待値" right={<span className="text-xs text-muted">不確実性を差し引いた期待値順</span>}>
+        <p className="px-4 pt-3 text-xs text-muted">単勝以外は券種専用モデルと公式オッズが揃った買い目のみ表示します。候補モデルは購入に使用しません。</p>
+        {!(r.tickets ?? []).length ? <Empty>組合せ券種の検証済み予測・オッズはまだありません。</Empty> : (
+          <div className="overflow-x-auto"><table className="w-full min-w-[600px] text-sm"><thead><tr className="text-left text-xs text-muted"><th className="p-3">券種・買い目</th><th>的中確率</th><th>取得オッズ</th><th>保守的期待収益率</th><th>鮮度</th><th /></tr></thead><tbody>
+            {[...(r.tickets ?? [])].sort((a,b) => b.conservativeRoi-a.conservativeRoi).map(ticket => <tr key={`${ticket.betType}-${ticket.selection}`} className="border-t border-line"><td className="p-3 font-mono">{betTypeLabel[ticket.betType]} {ticket.selection}</td><td>{pct(ticket.probability)}</td><td>{odds(ticket.odds)}</td><td className={tone(ticket.conservativeRoi)}>{signedPct(ticket.conservativeRoi)}</td><td>{freshness(ticket.dataFreshnessMinutes)}</td><td><button className="btn-ghost text-xs" disabled={!canBuy || !ticket.buyEligible} onClick={() => setTicketBuying(ticket)}>仮想購入</button></td></tr>)}
+          </tbody></table></div>
+        )}
+      </Section>
+
+      {ticketBuying && <BetSheet race={r} ticket={ticketBuying} onClose={() => setTicketBuying(null)} onPlaced={() => { setTicketBuying(null); race.reload(); onChanged() }} />}
 
       {r.payouts.length > 0 && (
         <Section title="払戻金（確定）">
@@ -279,7 +292,10 @@ function EntryTable({ race, sport, canBuy, onBuy }: { race: RaceDetail; sport: S
                     : <>{num(e.nationalWinRate)} / {num(e.motor2Rate, 1)}% / {num(e.exhibitionTime)}</>}
                 </td>
                 <td className="px-2 py-2.5"><ProbBar p={e.probability} breakEven={e.breakEvenProb} /></td>
-                <td className="num px-2 py-2.5 text-right font-medium">{odds(e.odds)}</td>
+                <td className="num px-2 py-2.5 text-right font-medium">
+                  <div>{odds(e.odds)}</div>
+                  {e.oddsCapturedAt && <div className="mt-0.5 text-[10px] font-normal text-faint">{freshness(Math.max(0, (Date.now() - Date.parse(e.oddsCapturedAt)) / 60000))}</div>}
+                </td>
                 <td className="num px-2 py-2.5 text-right text-muted">{pct(e.breakEvenProb)}</td>
                 <td className={`num px-2 py-2.5 text-right font-semibold ${tone(e.expectedRoi)}`}>{signedPct(e.expectedRoi)}</td>
                 <td className="num px-2 py-2.5 text-right text-xs text-muted" title="予測確率の標準偏差（小さいほど安定）">

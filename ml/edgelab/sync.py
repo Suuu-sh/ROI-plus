@@ -17,10 +17,11 @@ ENDPOINTS = {
     "results": "results",
     "payouts": "payouts",
     "predictions": "predictions",
+    "ticket_predictions": "ticket-predictions",
     "models": "models",
     "collection_runs": "collection-runs",
 }
-SEND_ORDER = ("venues", "races", "entries", "results", "payouts", "odds_snapshots", "models", "predictions", "collection_runs")
+SEND_ORDER = ("venues", "races", "entries", "results", "payouts", "odds_snapshots", "models", "predictions", "ticket_predictions", "collection_runs")
 
 
 def fetch_model_registry(*, base_url: str | None = None, token: str | None = None) -> list[dict[str, Any]]:

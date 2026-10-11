@@ -5,6 +5,7 @@ type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: st
 type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
 export type CollectOddsOptions = {
   maxRequests?: number;
+  requestBudget?: { used: number; max: number };
   sleep?: (ms: number) => Promise<void>;
   fetch?: (input: string, init?: RequestInit) => Promise<FetchResponse>;
 };
@@ -13,7 +14,7 @@ const jstDate = (ms: number) => new Intl.DateTimeFormat('en-CA', { timeZone: 'As
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 export async function selectOddsTargets(db: Db, now: Date, maxRequests = 30): Promise<RaceTarget[]> {
-  const at = now.getTime(), after = jstIso(at), before = jstIso(at + 15 * 60_000), fresh = jstIso(at - 10 * 60_000);
+  const at = now.getTime(), after = jstIso(at), before = jstIso(at + 15 * 60_000), fresh = jstIso(at - 50_000);
   return all<RaceTarget>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date FROM races r
     WHERE r.data_origin='real' AND r.sport='boat' AND r.status='scheduled'
       AND r.post_time>=? AND r.post_time<=?
@@ -23,57 +24,63 @@ export async function selectOddsTargets(db: Db, now: Date, maxRequests = 30): Pr
 
 export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = {}) {
   const maxRequests = Math.min(30, Math.max(0, Math.floor(opts.maxRequests ?? 30)));
-  // Cron がまれに二重起動するため、settings の行を使った原子的なロックで5分に1回だけ実行する
+  // Cron の重複実行を避ける。正常終了時に解放し、異常終了時だけ5分で期限切れにする。
   const nowIso = jstIso(now.getTime()), staleIso = jstIso(now.getTime() - 5 * 60_000);
   await db.prepare(`INSERT INTO settings(key,value) VALUES('odds_lock','') ON CONFLICT(key) DO NOTHING`).run();
   const lock = await db.prepare(`UPDATE settings SET value=? WHERE key='odds_lock' AND value<?`).bind(nowIso, staleIso).run();
   if (!lock.meta?.changes) return { status: 'skipped' as const, records: 0, targets: 0 };
-  const targets = await selectOddsTargets(db, now, maxRequests);
-  if (!targets.length) return { status: 'skipped' as const, records: 0, targets: 0 };
-  const fetcher = opts.fetch ?? ((url, init) => fetch(url, init));
-  const sleep = opts.sleep ?? pause;
-  const statements: Statement[] = [];
-  const errors: string[] = [];
-  let failed = 0, records = 0, attempted = 0;
-  for (const race of targets) {
-    try {
-      let html = '';
-      let requestError: unknown;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        if (attempted >= 49) throw new Error('subrequest budget exhausted');
-        if (attempted > 0) await sleep(3000);
-        attempted++;
-        try {
-          const response = await fetcher(oddsUrl(race.race_no, race.venue_id, race.race_date), { headers: { 'User-Agent': USER_AGENT } });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          html = await response.text();
-          requestError = undefined;
-          break;
-        } catch (error) { requestError = error; }
+  try {
+    const targets = await selectOddsTargets(db, now, maxRequests);
+    if (!targets.length) return { status: 'skipped' as const, records: 0, targets: 0 };
+    const fetcher = opts.fetch ?? ((url, init) => fetch(url, init));
+    const sleep = opts.sleep ?? pause;
+    const requestBudget = opts.requestBudget ?? { used: 0, max: 49 };
+    const statements: Statement[] = [];
+    const errors: string[] = [];
+    let failed = 0, records = 0, attempted = 0;
+    for (const race of targets) {
+      try {
+        let html = '';
+        let requestError: unknown;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (requestBudget.used >= requestBudget.max) throw new Error('shared subrequest budget exhausted');
+          if (attempted > 0 || requestBudget.used > 0) await sleep(3000);
+          attempted++; requestBudget.used++;
+          try {
+            const response = await fetcher(oddsUrl(race.race_no, race.venue_id, race.race_date), { headers: { 'User-Agent': USER_AGENT } });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            html = await response.text();
+            requestError = undefined;
+            break;
+          } catch (error) { requestError = error; }
+        }
+        if (requestError !== undefined) throw requestError;
+        const parsed = parseWinOdds(html);
+        if (!parsed.final && !isStablePool(parsed.odds)) throw new Error('odds pool not stable (overround out of range)');
+        const capturedAt = jstIso(now.getTime());
+        const source = parsed.final ? 'boatrace-odds-tf-final' : 'boatrace-odds-tf';
+        for (const [n, odds] of parsed.odds) {
+          if (odds === null || !Number.isFinite(odds)) continue;
+          statements.push(db.prepare(`INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin)
+            VALUES(?,?,'win',?,?,?,?,'real') ON CONFLICT(race_id,bet_type,selection,captured_at) DO UPDATE SET odds=excluded.odds,source=excluded.source,data_origin='real'`)
+            .bind(`${race.id}:win:${n}:${capturedAt}`, race.id, String(n), odds, capturedAt, source));
+          records++;
+        }
+      } catch (error) {
+        failed++;
+        errors.push(`${race.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (requestError !== undefined) throw requestError;
-      const parsed = parseWinOdds(html);
-      if (!parsed.final && !isStablePool(parsed.odds)) throw new Error('odds pool not stable (overround out of range)');
-      const capturedAt = jstIso(now.getTime());
-      const source = parsed.final ? 'boatrace-odds-tf-final' : 'boatrace-odds-tf';
-      for (const [n, odds] of parsed.odds) {
-        if (odds === null || !Number.isFinite(odds)) continue;
-        statements.push(db.prepare(`INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin)
-          VALUES(?,?,'win',?,?,?,?,'real') ON CONFLICT(race_id,bet_type,selection,captured_at) DO UPDATE SET odds=excluded.odds,source=excluded.source,data_origin='real'`)
-          .bind(`${race.id}:win:${n}:${capturedAt}`, race.id, String(n), odds, capturedAt, source));
-        records++;
-      }
-    } catch (error) {
-      failed++;
-      errors.push(`${race.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
+    const status = failed === 0 ? 'success' : failed === targets.length ? 'failed' : 'partial';
+    const startedAt = jstIso(now.getTime());
+    statements.push(db.prepare(`INSERT INTO collection_runs(id,source,sport,target_date,started_at,finished_at,status,records,error)
+      VALUES(?, 'boatrace-odds-worker','boat',?,?,?,?,?,?)`)
+      .bind(crypto.randomUUID(), jstDate(now.getTime()), startedAt, jstIso(Date.now()), status, records, errors.length ? errors.join('; ').slice(0, 2000) : null));
+    if (db.batch) await db.batch(statements);
+    else for (const statement of statements) await statement.run();
+    return { status, records, targets: targets.length, failed };
+  } finally {
+    // If cleanup fails, the five-minute lease still prevents a stuck lock forever.
+    await db.prepare(`UPDATE settings SET value='' WHERE key='odds_lock' AND value=?`).bind(nowIso).run().catch(() => undefined);
   }
-  const status = failed === 0 ? 'success' : failed === targets.length ? 'failed' : 'partial';
-  const startedAt = jstIso(now.getTime());
-  statements.push(db.prepare(`INSERT INTO collection_runs(id,source,sport,target_date,started_at,finished_at,status,records,error)
-    VALUES(?, 'boatrace-odds-worker','boat',?,?,?,?,?,?)`)
-    .bind(crypto.randomUUID(), jstDate(now.getTime()), startedAt, jstIso(Date.now()), status, records, errors.length ? errors.join('; ').slice(0, 2000) : null));
-  if (db.batch) await db.batch(statements);
-  else for (const statement of statements) await statement.run();
-  return { status, records, targets: targets.length, failed };
 }
