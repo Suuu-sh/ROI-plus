@@ -406,7 +406,27 @@ async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false, trifectaO
   const oldRows=await first<any>(db, `SELECT COUNT(*) count FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at)`, cutoff);
   const cleanupCount=Math.min(10,Number(oldRows?.count??0));
   if(cleanupCount>0&&await reserveOptionalWorkerWrites(db,cleanupCount)) await run(db, `DELETE FROM odds_snapshots WHERE rowid IN (SELECT rowid FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at) LIMIT 10)`, cutoff).catch(()=>{});
+  await cleanupOldQualityRuns(db);
   return {settled,bought};
+}
+
+// Quality-only collector telemetry is short-lived. Preserve mixed runs and
+// anything that also saved records; delete at most ten rows per 10-minute cron.
+async function cleanupOldQualityRuns(db: Db, now = Date.now()) {
+  const cutoff = new Date(now - 60 * 60_000).toISOString();
+  const candidates = await all<any>(db, `SELECT id,started_at,records,error,reason FROM collection_runs
+    WHERE source IN ('boatrace-odds-worker','boatrace-trifecta-odds-worker')
+      AND records=0 AND julianday(started_at) < julianday(?)
+      AND (error LIKE '%odds pool not stable (overround out of range)%' OR reason LIKE 'quality_excluded: %')
+    ORDER BY julianday(started_at) ASC LIMIT 100`, cutoff);
+  const ids = candidates.filter(row => {
+    const issues = collectionIssues(row);
+    return Number.isFinite(Date.parse(row.started_at)) && issues.quality.length > 0 && !issues.error && Number(row.records ?? 0) === 0;
+  }).slice(0, 10).map(row => row.id);
+  if (!ids.length || !await reserveOptionalWorkerWrites(db, ids.length)) return 0;
+  const placeholders = ids.map(() => '?').join(',');
+  await run(db, `DELETE FROM collection_runs WHERE id IN (${placeholders})`, ...ids);
+  return ids.length;
 }
 app.get('/health', async c=>c.json({ok:true,service:'edgelab-api',d1WriteBudget:await readWriteBudget(c.env.DB)}));
 app.get('/ingest/write-budget', async c=>{
@@ -913,7 +933,8 @@ app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,
   return {source:latest.source,sport:latest.sport,enabled,lastRunAt:latest.started_at,lastSuccessAt,successRate:attempts.length?successes.length/attempts.length:null,runs:group.length,records:group.reduce((n,r)=>n+(r.records??0),0),qualityExclusions:group.reduce((n,r)=>n+r.quality.length,0),freshnessMinutes:latest.started_at?Math.max(0,(Date.now()-Date.parse(latest.started_at))/60000):null,note:latest.source==='jra'?'規約上自動取得不可':null};
  });
  const errors=classified.filter(r=>(r.status==='failed'||r.status==='partial') && (r.error||!r.quality.length)).slice(0,50).map(r=>({at:r.started_at,source:r.source,error:r.error??r.reason??r.status}));
- const qualityExclusions=classified.filter(r=>r.quality.length).slice(0,50).map(r=>({at:r.started_at,source:r.source,count:r.quality.length,reason:r.quality.join(' | ')}));
+ const recentQualityCutoff=Date.now()-60*60_000;
+ const qualityExclusions=classified.filter(r=>r.quality.length && Date.parse(r.started_at)>=recentQualityCutoff).slice(0,50).map(r=>({at:r.started_at,source:r.source,count:r.quality.length,reason:r.quality.join(' | ')}));
  return c.json({sources,errors,qualityExclusions,tableCounts,d1WriteBudget:await readWriteBudget(db),freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowsNote:'合計は保存中のテーブル行数の概算で、Cloudflareアカウント全体のquota使用量ではありません。'}});
 });
 for(const route of Object.keys(ingestTables)) app.post(`/ingest/${route}` as any,c=>ingest(c,route));
