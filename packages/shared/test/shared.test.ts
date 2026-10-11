@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { breakEvenProb, conservativeRoi, edgeLabel, expectedRoi, normalizeProbs } from '../src/ev';
+import { breakEvenProb, canonicalTicketSelection, conservativeRoi, edgeLabel, expectedRoi, isCompleteTicketDistribution, normalizeProbs } from '../src/ev';
 import { brierScore, expectedCalibrationError, logLoss, maxDrawdown, roi } from '../src/metrics';
 
 describe('EV helpers', () => {
@@ -24,6 +24,16 @@ describe('EV helpers', () => {
     expect(edgeLabel(0.8, 4, 'active', 0.051)).toBe('INSUFFICIENT_DATA');
     expect(edgeLabel(0.8, 4, 'untrained', 0)).toBe('INSUFFICIENT_DATA');
     expect(edgeLabel(null, 4, 'active', 0)).toBe('INSUFFICIENT_DATA');
+  });
+
+  it('canonicalizes unordered ticket selections and requires complete normalized exact-order coverage', () => {
+    expect(canonicalTicketSelection('trifecta', '3-1-2')).toBe('3-1-2');
+    expect(canonicalTicketSelection('trio', '3-1-2')).toBe('1-2-3');
+    expect(canonicalTicketSelection('trifecta', '1-1-2')).toBeNull();
+    const selections = ['1-2-3','1-3-2','2-1-3','2-3-1','3-1-2','3-2-1'];
+    expect(isCompleteTicketDistribution('trifecta', [1,2,3], selections, Array(6).fill(1/6))).toBe(true);
+    expect(isCompleteTicketDistribution('trifecta', [1,2,3], selections.slice(1), Array(5).fill(0.2))).toBe(false);
+    expect(isCompleteTicketDistribution('trifecta', [1,2,3], selections, Array(6).fill(0.1))).toBe(false);
   });
 });
 

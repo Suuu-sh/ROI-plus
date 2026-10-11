@@ -15,7 +15,7 @@ export type WriteBudgetStatus = {
   state: 'known' | 'exhausted' | 'missing' | 'invalid';
 };
 export type WriteCategory = 'odds' | 'ingest' | 'worker';
-export type IngestTable = 'venues' | 'races' | 'entries' | 'odds_snapshots' | 'results' | 'payouts' | 'predictions' | 'models' | 'collection_runs';
+export type IngestTable = 'venues' | 'races' | 'entries' | 'odds_snapshots' | 'results' | 'payouts' | 'predictions' | 'ticket_predictions' | 'models' | 'collection_runs';
 
 const validDate = (value: unknown): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
 function parse(value: string): WriteBudget | null {
@@ -78,7 +78,7 @@ export async function seedUnknownWriteBudget(db: Db, date: string): Promise<bool
 // enough that a full 500-row entries/predictions chunk can still fit a day.
 const INGEST_WRITE_FACTOR: Record<IngestTable, number> = {
   venues: 3, races: 5, entries: 4, odds_snapshots: 5, results: 3,
-  payouts: 2, predictions: 4, models: 3, 'collection_runs': 5,
+  payouts: 2, predictions: 4, ticket_predictions: 5, models: 3, 'collection_runs': 5,
 };
 // +8 includes the atomic ledger CAS plus fixed statement/index margin; odds
 // +32 includes lock acquire/release and one collection-run row per batch.

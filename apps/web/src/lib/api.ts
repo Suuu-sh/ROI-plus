@@ -1,5 +1,5 @@
 import type {
-  Bet, Breakdown, CollectionStatus, EdgeCandidate, ModelInfo, Overview, RaceDetail, RaceSummary, Sport,
+  Bet, BetType, Breakdown, CollectionStatus, RankingCandidate, ModelInfo, Overview, RaceDetail, RaceSummary, Sport,
 } from '@edgelab/shared/src/types'
 import type { OriginFilter } from './origin'
 
@@ -38,8 +38,8 @@ export const api = {
     req<RaceSummary[]>(`/races${qs({ sport, date, origin })}`),
   race: (id: string) => req<RaceDetail>(`/races/${encodeURIComponent(id)}`),
   rankings: (sport: Sport, date: string, origin: OriginFilter) =>
-    req<EdgeCandidate[]>(`/rankings${qs({ sport, date, origin })}`),
-  placeBet: (b: { raceId: string; betType: 'win'; selection: string; stake: number }) =>
+    req<RankingCandidate[]>(`/rankings${qs({ sport, date, origin })}`),
+  placeBet: (b: { raceId: string; betType: BetType; selection: string; stake: number }) =>
     req<Bet>('/bets', { method: 'POST', body: JSON.stringify(b) }),
   placeBetBatch: (b: { raceId: string; betType: 'win'; requestId: string; selections: { selection: string; stake: number }[] }) =>
     req<{ groupId: string; bets: Bet[] }>('/bets', { method: 'POST', body: JSON.stringify(b) }),

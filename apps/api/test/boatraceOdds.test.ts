@@ -20,7 +20,7 @@ beforeEach(() => {
   sqlite.prepare("INSERT INTO settings(key,value) VALUES('roi_d1_write_budget_utc',?)").run(JSON.stringify({ date: new Date().toISOString().slice(0, 10), reserved: 0, oddsReserved: 0 }));
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('24','boat','Fixture')").run();
 });
-afterEach(() => sqlite.close());
+afterEach(() => { vi.unstubAllGlobals(); sqlite.close(); });
 function race(id: string, post: number, origin = 'real', status = 'scheduled', no = 1) {
   sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at)
     VALUES(?,'boat','24',?,?,?, ?,?,?)`).run(id, today, no, stamp(post), status, origin, stamp(now.getTime()));
@@ -72,7 +72,7 @@ describe('Boatrace win odds collection', () => {
     expect(sqlite.prepare('SELECT source,status,records,error FROM collection_runs').get()).toMatchObject({ source: 'boatrace-odds-worker', status: 'success', records: 12, error: null });
   });
 
-  it('runs only once when the cron fires twice within five minutes', async () => {
+  it('skips a duplicate cron poll inside the polling cooldown', async () => {
     race('dup-race', now.getTime() + 5 * 60_000);
     const html = readFileSync(resolve(root, 'data/fixtures/boatrace/oddstf_24_12_20261009.html'), 'utf8');
     const fetch = vi.fn(async () => ({ ok: true, status: 200, text: async () => html }));
@@ -83,6 +83,19 @@ describe('Boatrace win odds collection', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('releases the lock and polls again on the next minute', async () => {
+    race('minute-race', now.getTime() + 5 * 60_000);
+    const html = readFileSync(resolve(root, 'data/fixtures/boatrace/oddstf_24_12_20261009.html'), 'utf8');
+    const fetch = vi.fn(async () => ({ ok: true, status: 200, text: async () => html }));
+    const sleep = vi.fn(async () => {});
+    await collectOdds(DB, now, { fetch, sleep });
+    expect(sqlite.prepare("SELECT value FROM settings WHERE key='odds_lock'").get()).toMatchObject({ value: '' });
+
+    const nextMinute = await collectOdds(DB, new Date(now.getTime() + 60_000), { fetch, sleep });
+    expect(nextMinute).toMatchObject({ status: 'success', targets: 1 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('does nothing when the Worker flag is disabled', async () => {
     race('flag-race', now.getTime() + 5 * 60_000);
     const fetch = vi.fn();
@@ -90,5 +103,23 @@ describe('Boatrace win odds collection', () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(sqlite.prepare('SELECT COUNT(*) n FROM odds_snapshots').get()).toMatchObject({ n: 0 });
     expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({ n: 0 });
+  });
+
+  it('runs only odds collection on the minute trigger', async () => {
+    race('scheduled-minute-race', Date.now() + 5 * 60_000);
+    const html = readFileSync(resolve(root, 'data/fixtures/boatrace/oddstf_24_12_20261009.html'), 'utf8');
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, text: async () => html })));
+    await worker.scheduled({ cron: '* * * * *' } as never, { DB, ENABLE_AUTO_BET: 'true', ENABLE_BOATRACE_ODDS_SCRAPE: 'true' } as never);
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='scheduled-minute-race'").get()).toMatchObject({ n: 6 });
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM bets').get()).toMatchObject({ n: 0 });
+  });
+
+  it('keeps odds fetches off the ten-minute maintenance trigger', async () => {
+    race('scheduled-maintenance-race', Date.now() + 5 * 60_000);
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    await worker.scheduled({ cron: '*/10 * * * *' } as never, { DB, ENABLE_AUTO_BET: 'true', ENABLE_BOATRACE_ODDS_SCRAPE: 'true' } as never);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM odds_snapshots').get()).toMatchObject({ n: 0 });
   });
 });

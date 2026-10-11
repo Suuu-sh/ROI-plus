@@ -14,3 +14,5 @@ crons = ["* * * * *"]
 [vars]
 ENABLE_AUTO_BET = "true"
 ENABLE_BOATRACE_ODDS_SCRAPE = "true"
+
+ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE = "true"

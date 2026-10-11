@@ -6,6 +6,7 @@ type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: st
 type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
 export type CollectOddsOptions = {
   maxRequests?: number;
+  requestBudget?: { used: number; max: number };
   sleep?: (ms: number) => Promise<void>;
   fetch?: (input: string, init?: RequestInit) => Promise<FetchResponse>;
 };
@@ -44,6 +45,7 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
     const admittedTargets = targets.slice(0, maxTargets);
     const fetcher = opts.fetch ?? ((url, init) => fetch(url, init));
     const sleep = opts.sleep ?? pause;
+    const requestBudget = opts.requestBudget ?? { used: 0, max: 49 };
     const statements: Statement[] = [];
     const errors: string[] = [];
     let failed = 0, records = 0, attempted = 0;
@@ -52,9 +54,9 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
         let html = '';
         let requestError: unknown;
         for (let attempt = 0; attempt < 2; attempt++) {
-          if (attempted >= 49) throw new Error('subrequest budget exhausted');
-          if (attempted > 0) await sleep(3000);
-          attempted++;
+          if (requestBudget.used >= requestBudget.max) throw new Error('shared subrequest budget exhausted');
+          if (attempted > 0 || requestBudget.used > 0) await sleep(3000);
+          attempted++; requestBudget.used++;
           try {
             const response = await fetcher(oddsUrl(race.race_no, race.venue_id, race.race_date), { headers: { 'User-Agent': USER_AGENT } });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);

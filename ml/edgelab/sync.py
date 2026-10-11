@@ -18,10 +18,11 @@ ENDPOINTS = {
     "results": "results",
     "payouts": "payouts",
     "predictions": "predictions",
+    "ticket_predictions": "ticket-predictions",
     "models": "models",
     "collection_runs": "collection-runs",
 }
-SEND_ORDER = ("venues", "races", "results", "payouts", "entries", "odds_snapshots", "models", "predictions", "collection_runs")
+SEND_ORDER = ("venues", "races", "results", "payouts", "entries", "odds_snapshots", "models", "predictions", "ticket_predictions", "collection_runs")
 
 
 class WriteBudgetRefused(RuntimeError):

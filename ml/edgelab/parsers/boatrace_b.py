@@ -70,8 +70,7 @@ def _venue_from_line(line: str) -> str | None:
     compact = re.sub(r"\s+", "", line)
     if "ボートレース" not in compact and "[成績]" not in compact:
         return None
-    # Prefer the full venue token when one venue name contains another
-    # (e.g. 唐津 contains the shorter venue name 津).
+    # Prefer the longest full venue token when a venue name contains another.
     for name, code in sorted(_VENUE_CODES.items(), key=lambda item: len(item[0]), reverse=True):
         if name in compact:
             return code

@@ -30,6 +30,7 @@ export interface RaceDetail extends RaceSummary {
   windSpeed: number | null; waveHeight: number | null;
   model: ModelInfo | null; predictedAt: string | null; dataFreshnessMinutes: number | null;
   entries: EntryView[];
+  tickets: TicketCandidate[];
   payouts: { betType: BetType; selection: string; payout: number; popularity: number | null }[];
 }
 
@@ -39,6 +40,17 @@ export interface EdgeCandidate {
   breakEvenProb: number; expectedRoi: number; conservativeRoi: number; edge: EdgeLabel;
   modelId: string; dataFreshnessMinutes: number | null; dataOrigin: DataOrigin;
 }
+
+/** EV row for a model prediction over an exact multi-runner ticket selection. */
+export interface TicketCandidate {
+  raceId: string; sport: Sport; venueName: string; raceNo: number; postTime: string | null;
+  betType: Exclude<BetType, 'win'>; selection: string; probability: number; probStd: number;
+  odds: number; oddsCapturedAt: string | null; breakEvenProb: number; expectedRoi: number; conservativeRoi: number;
+  edge: EdgeLabel; modelId: string; dataFreshnessMinutes: number | null; dataOrigin: DataOrigin;
+  buyEligible: boolean;
+}
+
+export type RankingCandidate = EdgeCandidate | TicketCandidate;
 
 export interface Bet {
   id: string; raceId: string; sport: Sport; betType: BetType; selection: string; stake: number;

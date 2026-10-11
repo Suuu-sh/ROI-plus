@@ -3,12 +3,16 @@ import { cors } from 'hono/cors';
 import { all, first, run, type Db, type Statement } from './repo/db.js';
 import { candidate, betId, payoutYen, settleValues, validateYenStake } from './services/logic.js';
 import { collectOdds } from './services/collectBoatraceOdds.js';
+import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
+import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, seedUnknownWriteBudget, utcDate, type IngestTable } from './services/writeBudget.js';
-import type { Sport, DataOrigin } from '@edgelab/shared';
+import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
-interface Env { DB: Db; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; PROXY_TOKEN?: string; }
+interface Env { DB: Db; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; PROXY_TOKEN?: string; }
 type Ctx = { Bindings: Env };
 const SAFE_BOAT_SCHEMA = 'boat-venue-v2';
+const TICKET_MODEL_SCHEMA = 'ticket-selection-v1';
+const TICKET_PROBABILITY_SEMANTICS = 'exact-selection-probability-v1';
 const app = new Hono<Ctx>().basePath('/api');
 app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization'] }));
 // 本番では閲覧系 API を、Cloudflare Access で保護された画面 Worker（Service Binding）経由に限定する。
@@ -49,6 +53,7 @@ const ingestTables: Record<string,{table:string; required:string[]; conflict:str
   results:{table:'results',required:['race_id','finish_order','number','data_origin'],conflict:'race_id,number'},
   payouts:{table:'payouts',required:['race_id','bet_type','selection','payout','data_origin'],conflict:'race_id,bet_type,selection'},
   predictions:{table:'predictions',required:['id','race_id','model_id','number','probability','predicted_at','data_origin'],conflict:'race_id,model_id,number,predicted_at'},
+  'ticket-predictions':{table:'ticket_predictions',required:['id','race_id','model_id','bet_type','selection','probability','predicted_at','data_origin','feature_schema_version','artifact_sha256'],conflict:'race_id,model_id,bet_type,selection,predicted_at'},
   models:{table:'models',required:['id','sport','bet_type','version','algorithm','status'],conflict:'id'},
   'collection-runs':{table:'collection_runs',required:['id','source','sport','target_date','started_at','status'],conflict:'id'},
 };
@@ -56,10 +61,11 @@ const allowedColumns: Record<string,string[]> = {
   venues:'id sport name'.split(' '),
   races:'id sport venue_id race_date race_no name distance surface track_condition weather wind_speed wave_height post_time status data_origin updated_at'.split(' '),
   entries:'id race_id number frame name jockey trainer weight_carried horse_weight racer_class national_win_rate local_win_rate motor_no motor_2rate boat_no boat_2rate exhibition_time start_exhibition features_json available_at data_origin'.split(' '),
-  odds_snapshots:'id race_id bet_type selection odds captured_at source data_origin'.split(' '),
+  odds_snapshots:'id race_id bet_type selection odds captured_at source data_origin source_url source_sha256 quality_status'.split(' '),
   results:'race_id finish_order number data_origin'.split(' '),
   payouts:'race_id bet_type selection payout popularity data_origin'.split(' '),
   predictions:'id race_id model_id number probability prob_std predicted_at data_origin'.split(' '),
+  ticket_predictions:'id race_id model_id bet_type selection probability prob_std predicted_at data_origin feature_schema_version artifact_sha256'.split(' '),
   models:'id sport bet_type version algorithm status train_from train_to valid_from valid_to test_from test_to n_train metrics_json trained_at notes'.split(' '),
   collection_runs:'id source sport target_date started_at finished_at status records error reason'.split(' '),
 };
@@ -67,7 +73,8 @@ const updateColumns: Record<string,string[]> = {
   venues:['sport','name'],
   races:'sport venue_id race_date race_no name distance surface track_condition weather wind_speed wave_height post_time status data_origin updated_at'.split(' '),
   entries:'frame name jockey trainer weight_carried horse_weight racer_class national_win_rate local_win_rate motor_no motor_2rate boat_no boat_2rate exhibition_time start_exhibition features_json available_at data_origin'.split(' '),
-  odds_snapshots:'odds source data_origin'.split(' '), results:['finish_order','data_origin'], predictions:'probability prob_std data_origin'.split(' '),
+  odds_snapshots:'odds source data_origin source_url source_sha256 quality_status'.split(' '), results:['finish_order','data_origin'], predictions:'probability prob_std data_origin'.split(' '),
+  ticket_predictions:'probability prob_std data_origin feature_schema_version artifact_sha256'.split(' '),
   payouts:'payout popularity data_origin'.split(' '),
   models:'sport bet_type version algorithm status train_from train_to valid_from valid_to test_from test_to n_train metrics_json trained_at notes'.split(' '),
   collection_runs:'source sport target_date started_at finished_at status records error reason'.split(' '),
@@ -96,6 +103,28 @@ async function ingest(c: any, name: string) {
       if (!existing || existing.status !== row.status) return jsonError(c, 'ingest cannot change model lifecycle status');
     }
     if (table === 'models' && !['candidate','untrained','active','retired'].includes(String(row.status))) return jsonError(c, 'invalid model status');
+    if (table === 'ticket_predictions') {
+      const model = await first<any>(db, 'SELECT sport,bet_type,metrics_json,trained_at FROM models WHERE id=?', String(row.model_id));
+      let metrics: any;
+      try { metrics = JSON.parse(model?.metrics_json || '{}'); } catch { return jsonError(c, 'ticket model metadata is invalid'); }
+      const selection = typeof row.selection === 'string' ? canonicalTicketSelection(String(row.bet_type) as BetType, row.selection) : null;
+      if (!model || model.sport !== (await first<any>(db, 'SELECT sport FROM races WHERE id=?', String(row.race_id)))?.sport
+          || model.bet_type !== row.bet_type || row.bet_type === 'win'
+          || metrics.ticketModelSchemaVersion !== TICKET_MODEL_SCHEMA
+          || metrics.ticketPredictionSemantics !== TICKET_PROBABILITY_SEMANTICS
+          || metrics.ticketBetType !== row.bet_type
+          || typeof metrics.ticketArtifactSha256 !== 'string'
+          || !/^[a-f0-9]{64}$/.test(metrics.ticketArtifactSha256)
+          || row.feature_schema_version !== TICKET_MODEL_SCHEMA
+          || row.artifact_sha256 !== metrics.ticketArtifactSha256
+          || !selection || selection !== row.selection
+          || typeof row.predicted_at !== 'string' || !Number.isFinite(Date.parse(row.predicted_at)) || Date.parse(row.predicted_at) > Date.now()
+          || !model.trained_at || !Number.isFinite(Date.parse(model.trained_at)) || Date.parse(model.trained_at) >= Date.parse(row.predicted_at)
+          || typeof row.probability !== 'number' || !Number.isFinite(row.probability) || row.probability < 0 || row.probability > 1
+          || (row.prob_std !== undefined && row.prob_std !== null && (!Number.isFinite(row.prob_std) || Number(row.prob_std) < 0))) {
+        return jsonError(c, 'ticket prediction does not match a compatible exact-type model contract');
+      }
+    }
     const cols = Object.keys(row).filter(k => allowed.includes(k) && row[k] !== undefined);
     if (config.required.some(k => !cols.includes(k))) return jsonError(c, 'missing required fields');
     // IDs and server-generated updated_at are not natural-key data; avoid
@@ -165,15 +194,31 @@ async function settleOpen(db: Db) {
       (SELECT COUNT(*) FROM results res JOIN payouts p ON p.race_id=res.race_id
         AND p.data_origin=res.data_origin AND p.bet_type='win'
         AND p.selection=CAST(res.number AS TEXT) AND p.payout>0
-        WHERE res.race_id=? AND res.data_origin=? AND res.finish_order=1) paid_winner_count`,
+        WHERE res.race_id=? AND res.data_origin=? AND res.finish_order=1) paid_winner_count,
+      (SELECT COUNT(*) FROM payouts p WHERE p.race_id=? AND p.data_origin=? AND p.bet_type=? AND p.payout>0) ticket_payout_count,
+      (SELECT COUNT(*) FROM payouts p WHERE p.race_id=? AND p.data_origin=? AND p.bet_type='win' AND p.payout>0 AND NOT EXISTS(
+        SELECT 1 FROM results res WHERE res.race_id=p.race_id AND res.data_origin=p.data_origin AND res.finish_order=1 AND p.selection=CAST(res.number AS TEXT))) nonwinner_win_payout_count`,
       b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,
-      b.race_id,b.data_origin,b.race_id,b.data_origin);
+      b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.bet_type,b.race_id,b.data_origin);
     if (!integrity || integrity.entry_count <= 0
         || integrity.result_count !== integrity.entry_count
         || integrity.distinct_result_count !== integrity.entry_count
         || integrity.matched_result_count !== integrity.entry_count
         || integrity.winner_count <= 0
-        || integrity.paid_winner_count !== integrity.winner_count) continue;
+        || (b.bet_type === 'win' && integrity.nonwinner_win_payout_count > 0)
+        || (b.bet_type === 'win' ? integrity.paid_winner_count !== integrity.winner_count : integrity.ticket_payout_count <= 0)) continue;
+    if (b.bet_type === 'trifecta') {
+      const fullOrder = await all<any>(db, 'SELECT number,finish_order FROM results WHERE race_id=? AND data_origin=? ORDER BY finish_order,number', b.race_id, b.data_origin);
+      if (integrity.entry_count !== 6 || integrity.winner_count !== 1 || fullOrder.length !== 6
+          || fullOrder.some((x: any, i: number) => x.finish_order !== i + 1)) continue;
+      const winningSelection = fullOrder.slice(0,3).map((x: any) => String(x.number)).join('-');
+      const trifectaPayouts = await all<any>(db, "SELECT selection,payout FROM payouts WHERE race_id=? AND data_origin=? AND bet_type='trifecta' AND payout>0", b.race_id, b.data_origin);
+      if (trifectaPayouts.length !== 1 || trifectaPayouts[0].selection !== winningSelection) continue;
+    } else if (b.bet_type !== 'win') {
+      // Other ticket settlement semantics require their own exact outcome
+      // contract; leave historical/manual rows open rather than guessing.
+      continue;
+    }
     const pay = await first<any>(db, 'SELECT payout FROM payouts WHERE race_id=? AND data_origin=? AND bet_type=? AND selection=? AND payout>0', b.race_id, b.data_origin, b.bet_type, b.selection);
     const values = settleValues(b.stake, pay?.payout ?? null, !!pay);
     const evLost = b.expected_roi > 0 && values.finalOdds !== null && b.predicted_prob * values.finalOdds - 1 <= 0;
@@ -205,30 +250,46 @@ async function autoBet(db: Db, enabled: boolean) {
     AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')`, now(), oddsFreshAfter(), now(), oddsFreshAfter(), now(), now());
   const grouped = new Map<string, any[]>();
   for (const row of candidates) { const list=grouped.get(row.race_id)??[]; list.push(row); grouped.set(row.race_id,list); }
+  const ticketRaces=await all<any>(db,`SELECT r.*,v.name venue_name FROM races r JOIN venues v ON v.id=r.venue_id WHERE r.sport='boat' AND r.data_origin='real' AND r.status='scheduled' AND julianday(r.post_time)>julianday(?) AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto') AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,now());
+  for(const race of ticketRaces){for(const t of await ticketCandidatesForRace(db,race,maxStd)){if(!t.buyEligible||t.expectedRoi<minRoi)continue;const list=grouped.get(race.id)??[];list.push({race_id:race.id,sport:race.sport,data_origin:race.data_origin,bet_type:t.betType,selection:t.selection,probability:t.probability,prob_std:t.probStd,model_id:t.modelId,model_status:'active',odds:t.odds,odds_captured_at:t.oddsCapturedAt});grouped.set(race.id,list);}}
   let n=0;
   for (const rows of grouped.values()) {
-    const ranked=rows.map(row=>({...row, edgeData:candidate(row.probability,row.odds,row.prob_std,row.model_status,maxStd)}))
+    const bestTicket=rows.filter(row=>row.bet_type==='trifecta').sort((a,b)=>(candidate(b.probability,b.odds,b.prob_std,'active',maxStd).conservativeRoi??-Infinity)-(candidate(a.probability,a.odds,a.prob_std,'active',maxStd).conservativeRoi??-Infinity))[0];
+    const bestWinConservative=Math.max(-Infinity,...rows.filter(row=>!row.bet_type).map(row=>candidate(row.probability,row.odds,row.prob_std,row.model_status,maxStd).conservativeRoi??-Infinity));
+    const ticketWins=bestTicket&&(candidate(bestTicket.probability,bestTicket.odds,bestTicket.prob_std,'active',maxStd).conservativeRoi??-Infinity)>bestWinConservative;
+    const ranked=(ticketWins?[bestTicket]:rows.filter(row=>!row.bet_type)).map(row=>({...row, edgeData:candidate(row.probability,row.odds,row.prob_std,row.model_status,maxStd)}))
       .filter(row=>row.odds!==null && row.odds!==undefined && row.edgeData.expectedRoi!==null)
       .sort((a,b)=>b.edgeData.expectedRoi-a.edgeData.expectedRoi || Number(a.number)-Number(b.number));
     const selected=ranked.map((row,index)=>({...row,candidateRank:index+1,candidateCount:ranked.length}))
       .filter(row=>row.edgeData.expectedRoi>=minRoi && ['HIGH_EDGE','POSITIVE_EDGE'].includes(row.edgeData.edge)).slice(0,Math.min(maxPicks,6,raceBudget));
     if (!selected.length) continue;
     const groupId=betId(), placedAt=now(), totalStake=raceBudget,baseStake=Math.floor(raceBudget/selected.length),remainder=raceBudget%selected.length;
-    const payload=selected.map((row,index)=>({id:betId(),race_id:row.race_id,sport:row.sport,selection:String(row.number),stake:baseStake+(index<remainder?1:0),
+    const payload=selected.map((row,index)=>({id:betId(),race_id:row.race_id,sport:row.sport,bet_type:row.bet_type??'win',selection:row.selection??String(row.number),stake:baseStake+(index<remainder?1:0),
       predicted_prob:row.probability,odds_at_bet:row.odds,expected_roi:row.edgeData.expectedRoi,edge_label:row.edgeData.edge,
       model_id:row.model_id,placed_at:placedAt,data_origin:row.data_origin,candidate_rank:row.candidateRank,
       candidate_count:row.candidateCount,odds_captured_at:row.odds_captured_at,predicted_at_at_bet:row.predicted_at}));
     if (!await reserveWorkerWrites(db, payload.length * 2)) break;
     const inserted=await run(db,`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin,bet_group_id,candidate_rank,candidate_count,odds_captured_at,predicted_at_at_bet)
-      SELECT json_extract(value,'$.id'),json_extract(value,'$.race_id'),json_extract(value,'$.sport'),'win',json_extract(value,'$.selection'),json_extract(value,'$.stake'),'auto',json_extract(value,'$.predicted_prob'),json_extract(value,'$.odds_at_bet'),json_extract(value,'$.expected_roi'),json_extract(value,'$.edge_label'),json_extract(value,'$.model_id'),json_extract(value,'$.placed_at'),'open',json_extract(value,'$.data_origin'),?,json_extract(value,'$.candidate_rank'),json_extract(value,'$.candidate_count'),json_extract(value,'$.odds_captured_at'),json_extract(value,'$.predicted_at_at_bet')
+      SELECT json_extract(value,'$.id'),json_extract(value,'$.race_id'),json_extract(value,'$.sport'),json_extract(value,'$.bet_type'),json_extract(value,'$.selection'),json_extract(value,'$.stake'),'auto',json_extract(value,'$.predicted_prob'),json_extract(value,'$.odds_at_bet'),json_extract(value,'$.expected_roi'),json_extract(value,'$.edge_label'),json_extract(value,'$.model_id'),json_extract(value,'$.placed_at'),'open',json_extract(value,'$.data_origin'),?,json_extract(value,'$.candidate_rank'),json_extract(value,'$.candidate_count'),json_extract(value,'$.odds_captured_at'),json_extract(value,'$.predicted_at_at_bet')
       FROM json_each(?) WHERE ${availableBankrollSql}>=? AND NOT EXISTS(SELECT 1 FROM bets WHERE race_id=? AND mode='auto')
       ON CONFLICT(race_id,bet_type,selection) WHERE mode='auto' DO NOTHING`,groupId,JSON.stringify(payload),totalStake,rows[0].race_id);
     n+=Number(inserted.meta?.changes??0);
   }
   return n;
 }
-async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false) {
-  if (oddsEnabled) await collectOdds(db, new Date());
+async function collectScheduledOdds(db: Db, oddsEnabled: boolean, trifectaOddsEnabled: boolean) {
+  const requestBudget={used:0,max:49};
+  if (trifectaOddsEnabled) {
+    // Reserve a small bounded slice for the opt-in parser before legacy win
+    // collection; both collectors share the existing per-run 49-fetch cap.
+    requestBudget.max=20;
+    await collectTrifectaOdds(db,new Date(),{maxRequests:10,requestBudget});
+  }
+  requestBudget.max=49;
+  if (oddsEnabled) await collectOdds(db, new Date(),{requestBudget});
+}
+async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false, trifectaOddsEnabled = false) {
+  await collectScheduledOdds(db, oddsEnabled, trifectaOddsEnabled);
   const settled=await settleOpen(db), bought=await autoBet(db,autoEnabled);
   const cutoff=new Date(Date.now()-30*86400000).toISOString();
   const oldRows=await first<any>(db, `SELECT COUNT(*) count FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at)`, cutoff);
@@ -274,16 +335,37 @@ app.get('/races/:id', async c=>{
  const payouts=(await all<any>(db,`SELECT bet_type,selection,payout,popularity FROM payouts WHERE race_id=? ORDER BY CASE bet_type WHEN 'win' THEN 1 WHEN 'place' THEN 2 WHEN 'exacta' THEN 3 WHEN 'quinella' THEN 4 WHEN 'wide' THEN 5 WHEN 'trifecta' THEN 6 WHEN 'trio' THEN 7 ELSE 8 END,selection`,r.id)).map(p=>({betType:p.bet_type,selection:p.selection,payout:p.payout,popularity:p.popularity}));
  const entryViews=entries.map(x=>{const a=candidate(x.probability,x.odds,x.prob_std,x.model_status,maxStd);return {number:x.number,frame:x.frame,name:x.name,jockey:x.jockey,trainer:x.trainer,weightCarried:x.weight_carried,horseWeight:x.horse_weight,racerClass:x.racer_class,nationalWinRate:x.national_win_rate,localWinRate:x.local_win_rate,motorNo:x.motor_no,motor2Rate:x.motor_2rate,boatNo:x.boat_no,boat2Rate:x.boat_2rate,exhibitionTime:x.exhibition_time,startExhibition:x.start_exhibition,odds:x.odds,oddsCapturedAt:x.captured_at,probability:x.probability,probStd:x.prob_std,breakEvenProb:x.odds?1/x.odds:null,expectedRoi:a.expectedRoi,conservativeRoi:a.conservativeRoi,edge:a.edge,finishOrder:x.finish_order??null}});
  const best=entryViews.filter(x=>x.expectedRoi!==null).sort((a,b)=>(b.expectedRoi??-Infinity)-(a.expectedRoi??-Infinity))[0];
- return c.json({id:r.id,sport:r.sport,venueId:r.venue_id,venueName:r.venue_name,raceDate:r.race_date,raceNo:r.race_no,name:r.name,distance:r.distance,surface:r.surface,trackCondition:r.track_condition,weather:r.weather,windSpeed:r.wind_speed,waveHeight:r.wave_height,postTime:r.post_time,status:r.status,dataOrigin:r.data_origin,entryCount:entries.length,topEdge:best?.edge??'INSUFFICIENT_DATA',bestExpectedRoi:best?.expectedRoi??null,model:modelRow?mapModel(modelRow):null,predictedAt:entries.find(x=>x.predicted_at)?.predicted_at??null,dataFreshnessMinutes:entries.find(x=>x.captured_at)?Math.max(0,(Date.now()-Date.parse(entries.find(x=>x.captured_at).captured_at))/60000):null,entries:entryViews,payouts});
+ const tickets=await ticketCandidatesForRace(db,r,maxStd);
+ return c.json({id:r.id,sport:r.sport,venueId:r.venue_id,venueName:r.venue_name,raceDate:r.race_date,raceNo:r.race_no,name:r.name,distance:r.distance,surface:r.surface,trackCondition:r.track_condition,weather:r.weather,windSpeed:r.wind_speed,waveHeight:r.wave_height,postTime:r.post_time,status:r.status,dataOrigin:r.data_origin,entryCount:entries.length,topEdge:best?.edge??'INSUFFICIENT_DATA',bestExpectedRoi:best?.expectedRoi??null,model:modelRow?mapModel(modelRow):null,predictedAt:entries.find(x=>x.predicted_at)?.predicted_at??null,dataFreshnessMinutes:entries.find(x=>x.captured_at)?Math.max(0,(Date.now()-Date.parse(entries.find(x=>x.captured_at).captured_at))/60000):null,entries:entryViews,tickets,payouts});
 });
 function mapModel(m:any){return {id:m.id,sport:m.sport,betType:m.bet_type,version:m.version,algorithm:m.algorithm,status:m.status,trainFrom:m.train_from,trainTo:m.train_to,validFrom:m.valid_from,validTo:m.valid_to,testFrom:m.test_from,testTo:m.test_to,nTrain:m.n_train,metrics:JSON.parse(m.metrics_json||'{}'),trainedAt:m.trained_at,notes:m.notes};}
 app.get('/rankings',async c=>{
  const db=c.env.DB,sport=c.req.query('sport'),date=c.req.query('date'),origin=originFilter(c.req.query('origin')); if(sport&&!validSport(sport))return jsonError(c,'invalid sport'); if(!date)return jsonError(c,'date is required');
  const rows=await all<any>(db,`SELECT r.id race_id,r.sport,r.data_origin,r.race_no,r.post_time,v.name venue_name,e.number,e.name,p.probability,p.prob_std,p.model_id,m.status model_status,o.odds,o.captured_at,p.predicted_at FROM races r JOIN venues v ON v.id=r.venue_id JOIN entries e ON e.race_id=r.id AND e.data_origin=r.data_origin JOIN predictions p ON p.id=(SELECT p2.id FROM predictions p2 JOIN models pm ON pm.id=p2.model_id AND pm.status='active' AND pm.sport=r.sport AND pm.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(pm.metrics_json) THEN (json_type(pm.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(pm.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(pm.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(pm.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(pm.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(pm.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) WHERE p2.race_id=r.id AND p2.number=e.number AND p2.data_origin=r.data_origin AND julianday(p2.predicted_at)<=julianday(?) AND julianday(p2.predicted_at)<=julianday(r.post_time) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1) JOIN models m ON m.id=p.model_id AND m.status='active' AND m.sport=r.sport AND m.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(m.metrics_json) THEN (json_type(m.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) JOIN odds_snapshots o ON o.race_id=r.id AND o.data_origin=r.data_origin AND o.bet_type='win' AND o.selection=CAST(e.number AS TEXT) AND o.captured_at=(SELECT o2.captured_at FROM odds_snapshots o2 WHERE o2.race_id=r.id AND o2.data_origin=r.data_origin AND o2.bet_type='win' AND o2.selection=CAST(e.number AS TEXT) AND julianday(o2.captured_at)<=julianday(?) AND julianday(o2.captured_at)>=julianday(?) AND julianday(o2.captured_at)<=julianday(r.post_time) ORDER BY julianday(o2.captured_at) DESC LIMIT 1) WHERE julianday(p.predicted_at)<=julianday(?) AND r.race_date=? AND r.status='scheduled' AND r.post_time IS NOT NULL AND julianday(r.post_time)>julianday(?) AND (? IS NULL OR r.sport=?) AND (? IS NULL OR r.data_origin=?) AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,now(),now(),oddsFreshAfter(),now(),date,now(),sport||null,sport||null,origin,origin);
- const maxStd=Number(await setting(db,'max_prob_std','0.05')); return c.json(rows.map(x=>({...candidate(x.probability,x.odds,x.prob_std,x.model_status,maxStd),raceId:x.race_id,sport:x.sport,venueName:x.venue_name,raceNo:x.race_no,postTime:x.post_time,number:x.number,name:x.name,probability:x.probability,probStd:x.prob_std,odds:x.odds,breakEvenProb:1/x.odds,modelId:x.model_id,dataFreshnessMinutes:Math.max(0,(Date.now()-Date.parse(x.captured_at))/60000),dataOrigin:x.data_origin})).sort((a,b)=>(b.expectedRoi??-Infinity)-(a.expectedRoi??-Infinity)));
+ const maxStd=Number(await setting(db,'max_prob_std','0.05'));
+ const winCandidates=rows.map(x=>({...candidate(x.probability,x.odds,x.prob_std,x.model_status,maxStd),raceId:x.race_id,sport:x.sport,venueName:x.venue_name,raceNo:x.race_no,postTime:x.post_time,number:x.number,name:x.name,probability:x.probability,probStd:x.prob_std,odds:x.odds,breakEvenProb:1/x.odds,modelId:x.model_id,dataFreshnessMinutes:Math.max(0,(Date.now()-Date.parse(x.captured_at))/60000),dataOrigin:x.data_origin}));
+ const ticketRaces=await all<any>(db,`SELECT r.*,v.name venue_name FROM races r JOIN venues v ON v.id=r.venue_id WHERE r.race_date=? AND r.status='scheduled' AND (? IS NULL OR r.sport=?) AND (? IS NULL OR r.data_origin=?) AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)`,date,sport||null,sport||null,origin,origin);
+ const tickets=(await Promise.all(ticketRaces.map((race:any)=>ticketCandidatesForRace(db,race,maxStd)))).flat();
+ return c.json([...winCandidates,...tickets].sort((a,b)=>(b.expectedRoi??-Infinity)-(a.expectedRoi??-Infinity)));
 });
 app.post('/bets',async c=>{
  const db=c.env.DB, body=await c.req.json().catch(()=>null) as any;
+ if(body?.betType==='trifecta'){
+   if(typeof body.raceId!=='string'||typeof body.selection!=='string'||!validateYenStake(body.stake))return jsonError(c,'invalid request');
+   const race=await first<any>(db,'SELECT * FROM races WHERE id=? AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=races.id)',body.raceId);
+   if(!race)return jsonError(c,'race not found',404);
+   if(race.status!=='scheduled'||!race.post_time||Date.parse(race.post_time)<=Date.now())return jsonError(c,'race is not scheduled');
+   const venue=await first<any>(db,'SELECT name venue_name FROM venues WHERE id=?',race.venue_id);
+   const maxStd=Number(await setting(db,'max_prob_std','0.05'));
+   const ticket=(await ticketCandidatesForRace(db,{...race,venue_name:venue?.venue_name},maxStd)).find(x=>x.selection===body.selection);
+   if(!ticket?.buyEligible)return jsonError(c,'ticket model or audited fresh odds are unavailable');
+   const bet={id:betId(),race_id:race.id,sport:race.sport,bet_type:'trifecta',selection:ticket.selection,stake:body.stake,mode:'manual',predicted_prob:ticket.probability,odds_at_bet:ticket.odds,expected_roi:ticket.expectedRoi,edge_label:ticket.edge,model_id:ticket.modelId,placed_at:now(),status:'open',data_origin:'real',odds_captured_at:ticket.oddsCapturedAt};
+   if(!await reserveWorkerWrites(db,1))return c.json({error:'daily D1 write budget unavailable or exhausted',budget:await readWriteBudget(db)},429);
+   const inserted=await run(db,`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,predicted_prob,odds_at_bet,expected_roi,edge_label,model_id,placed_at,status,data_origin,odds_captured_at)
+   SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${availableBankrollSql} >= ?`,...Object.values(bet),body.stake);
+   if(!inserted.meta?.changes)return jsonError(c,'insufficient bankroll');
+   return c.json(mapBet(bet),201);
+ }
  const legacyRequest=!!body&&Array.isArray(body.selections)===false&&typeof body.selection==='string';
  const rawSelections=Array.isArray(body?.selections)?body.selections:(legacyRequest?[{selection:body.selection,stake:body.stake}]:null);
  if(!body||typeof body.raceId!=='string'||body.betType!=='win'||!rawSelections||rawSelections.length<1||rawSelections.length>6)return jsonError(c,'invalid request');
@@ -350,6 +432,80 @@ app.post('/bets',async c=>{
  const bets=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY candidate_rank',groupId);
  return c.json(legacyRequest?mapBet(bets[0]):{groupId,bets:bets.map(mapBet)},201);
 });
+const SHA256 = /^[a-f0-9]{64}$/;
+function ticketMetadata(metrics: any, betType: string): boolean {
+  return metrics?.ticketModelSchemaVersion === TICKET_MODEL_SCHEMA
+    && metrics?.ticketPredictionSemantics === TICKET_PROBABILITY_SEMANTICS
+    && metrics?.ticketBetType === betType
+    && typeof metrics?.ticketArtifactSha256 === 'string' && SHA256.test(metrics.ticketArtifactSha256);
+}
+function ticketValidationEvidence(metrics: any, betType: string): boolean {
+  const v = metrics?.ticketValidation;
+  const validatedAt = typeof v?.validatedAt === 'string' ? Date.parse(v.validatedAt) : NaN;
+  return ticketMetadata(metrics, betType) && metrics.promotionEligible === true && v?.status === 'independently_validated'
+    && v?.policyVersion === TICKET_MODEL_SCHEMA && v?.betType === betType
+    && v?.artifactSha256 === metrics.ticketArtifactSha256 && typeof v?.reportSha256 === 'string' && SHA256.test(v.reportSha256)
+    && typeof v?.independentReviewId === 'string' && v.independentReviewId.length > 0
+    && v?.dataOrigin === 'real' && v?.completeCombinationCoverage === true
+    && v?.probabilitiesNormalized === true && v?.outOfSampleValidated === true && v?.pointInTimeSafe === true
+    && Number.isFinite(validatedAt) && validatedAt <= Date.now() && Date.now() - validatedAt <= 30 * 86400_000;
+}
+function validatedTicketModel(model: any, betType: string): boolean {
+  let metrics: any;
+  try { metrics = JSON.parse(model?.metrics_json || '{}'); } catch { return false; }
+  return model?.status === 'active' && model?.bet_type === betType && ticketValidationEvidence(metrics, betType);
+}
+function officialTrifectaUrl(sourceUrl: unknown, race: any): boolean {
+  if (typeof sourceUrl !== 'string') return false;
+  try {
+    const u = new URL(sourceUrl);
+    return u.protocol === 'https:' && u.hostname === 'www.boatrace.jp' && u.pathname === '/owpc/pc/race/odds3t'
+      && u.searchParams.get('jcd') === String(race.venue_id)
+      && u.searchParams.get('rno') === String(race.race_no)
+      && u.searchParams.get('hd') === String(race.race_date).replaceAll('-', '');
+  } catch { return false; }
+}
+async function ticketCandidatesForRace(db: Db, race: any, maxStd: number): Promise<TicketCandidate[]> {
+  // Initial support is exact-order trifecta only. Other ticket types stay absent
+  // until a compatible model and audited odds source are registered.
+  if (await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',race.id)) return [];
+  if (race.sport !== 'boat' || race.data_origin !== 'real' || race.status !== 'scheduled'
+      || !race.post_time || Date.parse(race.post_time) <= Date.now()) return [];
+  const runners = await all<any>(db, 'SELECT number FROM entries WHERE race_id=? AND data_origin=? ORDER BY number', race.id, race.data_origin);
+  const numbers = runners.map((x: any) => Number(x.number));
+  if (numbers.length !== 6 || new Set(numbers).size !== 6 || numbers.some((n: number) => !Number.isInteger(n) || n < 1 || n > 6)) return [];
+  const models = await all<any>(db, "SELECT * FROM models WHERE sport='boat' AND bet_type='trifecta' AND status='active'");
+  const output: TicketCandidate[] = [];
+  for (const model of models) {
+    if (!validatedTicketModel(model, 'trifecta')) continue;
+    const latest = await first<any>(db, `SELECT MAX(predicted_at) predicted_at FROM ticket_predictions WHERE race_id=? AND model_id=? AND bet_type='trifecta' AND data_origin='real' AND julianday(predicted_at)<=julianday(?) AND julianday(predicted_at)<=julianday(?)`, race.id, model.id, now(), race.post_time);
+    if (!latest?.predicted_at) continue;
+    const predictions = await all<any>(db, `SELECT * FROM ticket_predictions WHERE race_id=? AND model_id=? AND bet_type='trifecta' AND data_origin='real' AND predicted_at=?`, race.id, model.id, latest.predicted_at);
+    let metrics: any; try { metrics = JSON.parse(model.metrics_json || '{}'); } catch { continue; }
+    if (!model.trained_at || !Number.isFinite(Date.parse(model.trained_at)) || Date.parse(model.trained_at) >= Date.parse(latest.predicted_at)) continue;
+    if (predictions.some((p: any) => p.feature_schema_version !== TICKET_MODEL_SCHEMA || p.artifact_sha256 !== metrics.ticketArtifactSha256 || p.prob_std === null || p.prob_std === undefined)) continue;
+    if (predictions.some((p: any) => p.probability === null || p.probability === undefined || !Number.isFinite(p.probability))) continue;
+    if (!isCompleteTicketDistribution('trifecta', numbers, predictions.map((p: any) => p.selection), predictions.map((p: any) => Number(p.probability)))) continue;
+    const latestOdds = await first<any>(db, `SELECT captured_at,source_url,source_sha256 FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND source_sha256 IS NOT NULL AND julianday(captured_at)>=julianday(?) AND julianday(captured_at)<=julianday(?) AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1`, race.id, oddsFreshAfter(), now(), race.post_time);
+    if (!latestOdds || !SHA256.test(latestOdds.source_sha256) || !officialTrifectaUrl(latestOdds.source_url, race)) continue;
+    const oddsRows = await all<any>(db, `SELECT selection,odds FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND captured_at=? AND source_url=? AND source_sha256=?`, race.id, latestOdds.captured_at, latestOdds.source_url, latestOdds.source_sha256);
+    if (oddsRows.some((o: any) => o.odds === null || !Number.isFinite(o.odds) || o.odds <= 0)
+        || !isCompleteTicketDistribution('trifecta', numbers, oddsRows.map((x: any) => x.selection), oddsRows.map(() => 1 / oddsRows.length))) continue;
+    const oddsBySelection = new Map(oddsRows.map((o: any) => [o.selection, Number(o.odds)]));
+    const predictionBySelection = new Map(predictions.map((p: any) => [p.selection, p]));
+    for (const selection of [...predictionBySelection.keys()].sort()) {
+      const p: any = predictionBySelection.get(selection), odds = oddsBySelection.get(selection);
+      if (odds === undefined) continue;
+      const score = candidate(p.probability, odds, p.prob_std, 'active', maxStd);
+    output.push({ raceId: race.id, sport: race.sport, venueName: race.venue_name, raceNo: race.race_no, postTime: race.post_time,
+        betType: 'trifecta', selection, probability: p.probability, probStd: p.prob_std, odds, oddsCapturedAt: latestOdds.captured_at,
+        breakEvenProb: 1 / odds, expectedRoi: score.expectedRoi!, conservativeRoi: score.conservativeRoi!, edge: score.edge,
+        modelId: model.id, dataFreshnessMinutes: Math.max(0, (Date.now() - Date.parse(latestOdds.captured_at)) / 60000),
+        dataOrigin: 'real', buyEligible: score.edge === 'HIGH_EDGE' || score.edge === 'POSITIVE_EDGE' });
+    }
+  }
+  return output;
+}
 function resultWaitReason(b:any){
  if(b.data_origin==='sample')return 'sampledata';
  if(b.race_status==='cancelled')return 'cancelled';
@@ -509,7 +665,8 @@ app.post('/models/:id/promote',async c=>{
  } else {
    if(metrics.promotionEligible===false)return jsonError(c,typeof metrics.promotionReason==='string'?metrics.promotionReason:'candidate failed same-holdout promotion criteria');
    if(m.sport==='boat'&&metrics.promotionEligible!==true)return jsonError(c,'boat candidates require an eligible same-holdout comparison or explicit initial-baseline approval');
-   if(!hasSafeBoatRuntime(m))return jsonError(c,'validated safe boat runtime schema is required before boat promotion');
+   if(m.bet_type!=='win'&&!ticketValidationEvidence(metrics,m.bet_type))return jsonError(c,'ticket model requires a recent artifact-bound validation and explicit complete-ticket quality gate');
+   if(m.bet_type==='win'&&!hasSafeBoatRuntime(m))return jsonError(c,'validated safe boat runtime schema is required before boat win promotion');
  }
  if(!await reserveWorkerWrites(db,2)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}
  if(db.batch){
@@ -525,8 +682,8 @@ app.post('/models/:id/promote',async c=>{
  const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!updated||updated.status!=='active')return jsonError(c,'model promotion state changed; retry after review',409);
  return c.json(mapModel(updated));
 });
-app.post('/models/:id/rollback',async c=>{const db=c.env.DB,id=c.req.param('id'),m=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!m)return jsonError(c,'model not found',404);if(m.status!=='active')return jsonError(c,'model is not active');const old=await first<any>(db,"SELECT * FROM models WHERE sport=? AND bet_type=? AND status='retired' ORDER BY rowid DESC LIMIT 1",m.sport,m.bet_type);if(!old)return jsonError(c,'no retired model to rollback');if(!hasSafeBoatRuntime(old))return jsonError(c,'rollback target lacks validated safe boat runtime schema');if(!await reserveWorkerWrites(db,2)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}if(db.batch){await db.batch([db.prepare("UPDATE models SET status='retired' WHERE id=? AND status='active'").bind(id),db.prepare("UPDATE models SET status='active' WHERE id=? AND status='retired'").bind(old.id)]);}else{await run(db,"UPDATE models SET status='retired' WHERE id=? AND status='active'",id);await run(db,"UPDATE models SET status='active' WHERE id=? AND status='retired'",old.id);}const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',old.id);if(!updated||updated.status!=='active')return jsonError(c,'rollback state changed; retry after review',409);return c.json(mapModel(updated));});
-app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,'SELECT * FROM collection_runs ORDER BY started_at DESC'), tables=['venues','races','entries','odds_snapshots','results','payouts','models','predictions','bets','collection_runs','daily_summaries','settings'], tableCounts:Record<string,number>={};for(const t of tables)tableCounts[t]=(await first<any>(db,`SELECT COUNT(*) n FROM ${t}`))?.n??0;
+app.post('/models/:id/rollback',async c=>{const db=c.env.DB,id=c.req.param('id'),m=await first<any>(db,'SELECT * FROM models WHERE id=?',id);if(!m)return jsonError(c,'model not found',404);if(m.status!=='active')return jsonError(c,'model is not active');const old=await first<any>(db,"SELECT * FROM models WHERE sport=? AND bet_type=? AND status='retired' ORDER BY rowid DESC LIMIT 1",m.sport,m.bet_type);if(!old)return jsonError(c,'no retired model to rollback');if(m.bet_type!=='win'){let metrics:any;try{metrics=JSON.parse(old.metrics_json||'{}')}catch{return jsonError(c,'rollback ticket model metadata is invalid')}if(!ticketValidationEvidence(metrics,m.bet_type))return jsonError(c,'rollback target lacks current validated ticket quality evidence')}if(m.bet_type==='win'&&!hasSafeBoatRuntime(old))return jsonError(c,'rollback target lacks validated safe boat runtime schema');if(!await reserveWorkerWrites(db,2)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}if(db.batch){await db.batch([db.prepare("UPDATE models SET status='retired' WHERE id=? AND status='active'").bind(id),db.prepare("UPDATE models SET status='active' WHERE id=? AND status='retired'").bind(old.id)]);}else{await run(db,"UPDATE models SET status='retired' WHERE id=? AND status='active'",id);await run(db,"UPDATE models SET status='active' WHERE id=? AND status='retired'",old.id);}const updated=await first<any>(db,'SELECT * FROM models WHERE id=?',old.id);if(!updated||updated.status!=='active')return jsonError(c,'rollback state changed; retry after review',409);return c.json(mapModel(updated));});
+app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,'SELECT * FROM collection_runs ORDER BY started_at DESC'), tables=['venues','races','entries','odds_snapshots','results','payouts','models','predictions','ticket_predictions','bets','collection_runs','daily_summaries','settings'], tableCounts:Record<string,number>={};for(const t of tables)tableCounts[t]=(await first<any>(db,`SELECT COUNT(*) n FROM ${t}`))?.n??0;
  const sources=await all<any>(db,`SELECT source,sport,COUNT(*) runs,SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) successes,SUM(COALESCE(records,0)) records,MAX(started_at) lastRunAt,MAX(CASE WHEN status='success' THEN started_at END) lastSuccessAt,(SELECT cr.status FROM collection_runs cr WHERE cr.source=collection_runs.source AND cr.sport=collection_runs.sport ORDER BY cr.started_at DESC LIMIT 1) latestStatus FROM collection_runs GROUP BY source,sport`);
  return c.json({sources:sources.map(s=>({source:s.source,sport:s.sport,enabled:s.latestStatus==='skipped'||s.source==='jra' ? false : true,lastRunAt:s.lastRunAt,lastSuccessAt:s.lastSuccessAt,successRate:s.runs?s.successes/s.runs:null,runs:s.runs,records:s.records,freshnessMinutes:s.lastRunAt?Math.max(0,(Date.now()-Date.parse(s.lastRunAt))/60000):null,note:s.source==='jra'?'規約上自動取得不可':null})),errors:runs.filter(r=>r.status==='failed'||r.status==='partial').slice(0,50).map(r=>({at:r.started_at,source:r.source,error:r.error??r.reason??r.status})),tableCounts,freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowLimitNote:'D1 無料枠: 保存容量 5GB、日次読取 500万行、日次書込 10万行。件数はテーブル行数の合計で概算。'}});
 });
@@ -539,9 +696,9 @@ app.get('/ingest/models',async c=>{
 app.post('/admin/settle',async c=>{if(!auth(c))return jsonError(c,'unauthorized',401);return c.json({settled:await settleOpen(c.env.DB)});});
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env) => {
   if (event.cron !== '* * * * *') return;
-  if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true') {
+  if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true' || env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE === 'true') {
     // A collection quota/write failure must not block ten-minute settlement.
-    await collectOdds(env.DB, new Date()).catch(() => undefined);
+    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true', env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true').catch(() => undefined);
   }
   if (Math.floor(event.scheduledTime / 60_000) % 10 !== 0) return;
   await cron(env.DB, env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true');
