@@ -14,6 +14,19 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab backfill-sync --since 2026-01-01 --
 ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab live --date 2026-10-09 --window-min 25
 ```
 
+アーカイブexport APIのリリース後は、既存の `EDGELAB_API_URL` / `INGEST_TOKEN` で
+1日ずつ取得・検証し、ローカルstoreへ追加できます。これは読み取り専用で、結果をD1へ同期しません。
+
+```sh
+EDGELAB_API_URL=https://example.invalid INGEST_TOKEN=... PYTHONPATH=ml ml/.venv/bin/python -m edgelab import-prerace-archives --date 2026-10-11
+```
+
+アーカイブ本文のSHA256、日付・レースID・公式URL・パーサーバージョン・完全な120通りを検証します。
+beforeinfoは既存 `prerace_observations` 形式に保存します。取得済み時刻・利用可能時刻は原本の
+capture時刻を保ち、確認済み締切の同値証跡は最も早い取得時刻を保持します。三連単オッズは
+同期対象外のローカル専用 `prerace_capture_odds` に隔離し、オフラインリプレイだけで使います。
+同じmanifestとchecksumは再取込せず、拒否した件数と理由を出力します。
+
 ネットワーク収集は公式ボートレース日次 LZH のみを対象にします。取得済み
 ファイルは `data/raw/boatrace` に保持し、再実行時は再取得しません。未開催日は
 スキップ扱いです。番組表は前日利用可能、競走成績内の展示情報は締切 10 分前
@@ -23,9 +36,13 @@ ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab li
 候補を学習し、Plackett-Luce による厳密な三連単順序確率を時間順holdoutで採点します。
 三つの単勝確率の積は使いません。holdout払戻リプレイは同一レースの締切10分前より
 前に記録された公式・完全・非締切の三連単オッズ一式がある場合だけ実施し、不足時はROIを算出しません。
-仮想リプレイは5本以上の独立fitによる ticket確率標準偏差を要求し、`(p - std) * odds - 1`
-の保守的ROIと標準偏差上限で1レース1点（最良の三連単）を選びます。これは単一券種の
-過去リプレイであり、全券種をまたぐ運用方針の検証ではありません。候補学習はモデル行をローカルへ記録しますが、
+仮想リプレイは5本以上の独立fitによるticket確率標準偏差を要求し、運用と同じ期待ROI降順・
+選択文字列昇順で同率順序を決めます。期待ROIと `(p - std) * odds - 1` の保守的ROIが
+それぞれ5%以上で、標準偏差が5%以下の候補から最大6点を選び、整数円のレース予算を配分します。
+既定は運用の初期設定と同じ1点・100円で、`train-trifecta --replay-max-picks 3 --replay-race-budget 300`
+のように実際の設定に合わせられます。0点も許容し、リプレイ出力には
+`trifecta-runtime-ev-multipick-v1` と閾値・点数・予算を記録します。
+これは単一券種の過去リプレイであり、全券種をまたぐ運用方針の検証ではありません。候補学習はモデル行をローカルへ記録しますが、
 推論・リモート同期はせず、昇格も自動化しません。過去のB公開時刻は
 実測されておらず、保持された実績も将来利益を証明しません。
 V2 training rows use the official betting cutoff minus 60 seconds as their feature as-of boundary;
@@ -79,81 +96,4 @@ feedback artifactは各Actionの `learning-feedback-*` / `learning-report-*` と
 - `CLOUDFLARE_API_TOKEN`: Wrangler D1 情報取得用 token
 - `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account ID
 
-### venue v2 キャッシュ移行と単勝候補の復旧
-
-`daily.yml` は `ml/data/boat-venue-v2.json` がない場合、対になったキャッシュ済み
-B/K ファイルだけからローカル正規化行を再構築します。過去予測・オッズ履歴は保持し、
-旧レース・結果・払戻・モデル状態は再利用しません。この移行処理自体は API へ同期せず、
-マーカー作成後の日次処理は通常どおり続きます。
-
-`.github/workflows/recover-win-baseline.yml` は手動 dispatch 専用です。既定の厳密な日次
-キャッシュキー以外を拒否し、cache fallback や公式データの再取得はしません。候補を固定
-train/validation/test 期間で評価し、candidate 状態だけを登録します。認証済みレジストリ
-検証レポートと JSON/pickle artifact ペアを90日保存します。自動昇格・仮想購入の有効化は
-しません。手動昇格後に daily でartifactを復旧する場合は、`validated_model_run_id` と
-その run の正確な `validated_model_artifact_name` を指定してください。
-
-`backfill` はローカル履歴を収集するコマンドです。`backfill-sync` は既定でリモート
-D1書込を拒否し、`--dry-run` の推定だけを実行します。過去履歴のリモート同期は
-日次ワークフローからも外しており、将来の明示的な運用判断なしに実行しません。
-Actions cache が空の場合は履歴をローカル収集しますが、D1へ自動送信することはありません。
-学習済みモデルは `ml/artifacts/` の cache が空だと推論だけが not-ready になります。
-必要なら `workflow_dispatch` で `retrain.yml` を実行して cache を作成してください。
-
-### ローカル Worker へ同期
-
-別ターミナルで `apps/api` のローカル Worker を起動します:
-
-```sh
-npm -w apps/api run dev
-```
-
-Worker は `http://127.0.0.1:8787` で起動します。`apps/api/.dev.vars.example` の
-`INGEST_TOKEN` と同じ値を `apps/api/.dev.vars` に設定し、次のように同期します
-（トークン自体は共有・記録しないでください）:
-
-```sh
-EDGELAB_API_URL=http://127.0.0.1:8787 INGEST_TOKEN='<.dev.vars と同じ値>' PYTHONPATH=ml ml/.venv/bin/python -m edgelab sync
-```
-
-同期は venues → races → models → results → payouts → entries → predictions → ticket-predictions → odds → collection-runs の順で行い、親行とモデル状態の後に結果・払戻を先行します。各 POST は最大 500 行です（race依存テーブルは最大50行）。
-
-パーサー・リーク防止・分割・学習・比較の確認:
-
-```sh
-ml/.venv/bin/python -m pytest ml/tests -q
-```
-
-ローカル保存予測の採点は network-free です:
-
-```sh
-PYTHONPATH=ml ml/.venv/bin/python -m edgelab feedback
-```
-
-レポートは `ml/data/learning/report.json`、replay-safe な採点記録と学習checkpointは
-`ml/data/learning/` に保存されます。実データ・全艇の結果・完全な事前予測cohort・
-安全なartifact feature schemaを検証できない予測は除外します。旧v1の遅い特徴列を
-使った可能性がある履歴は採点対象にしません。ROIは事前の実オッズと記録済み勝者払戻を
-使う counterfactual replay で、実購入や本番auto-betの利益を証明しません。詳細は
-[docs/LEARNING.md](../docs/LEARNING.md)。
-
-ユーザー提供の競馬 CSV のみを取り込みます。サンプルの競馬データは同梱・生成
-しません。予測・払戻・オッズ等、ソースで得られない値は欠損として残します。
-
-
-### テスト用フィクスチャ
-
-`data/fixtures/boatrace/` の B/K テキストとオッズ HTML は、パーサー確認用の合成データです。
-個人名・実際のレース結果・オッズなどの公式実データは含みません。従来の公式取得ファイルは
-ローカルの `data/private_fixtures/boatrace/` に移動しており、Git 管理対象外です。
-テストや CI は合成フィクスチャを使用します。公式データが必要な場合は、公式サイトから
-対象ファイルを個別に取得し、次の対応でローカルに配置してください。
-
-- 番組表 B: `data/private_fixtures/boatrace/b260901.txt`（CP932）または
-  `b260901.utf8.txt`（UTF-8）
-- 競走成績 K: `data/private_fixtures/boatrace/k260901.txt`（CP932）または
-  `k260901.utf8.txt`（UTF-8）
-- オッズ HTML: `data/private_fixtures/boatrace/oddstf_24_12_20261009.html`（UTF-8）
-
-ファイル名は例です。ローカルの処理に合わせて実際の取得ファイル名で保存し、
-`data/private_fixtures/` 以下のファイルは Git にコミットしないでください（ignore 済み）。
+###
