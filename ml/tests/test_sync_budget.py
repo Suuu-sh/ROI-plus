@@ -79,16 +79,36 @@ def test_daily_sync_prioritizes_results_and_payouts_before_entries(monkeypatch):
     assert sent == ["races", "results", "payouts", "entries", "models", "predictions"]
 
 
-def test_race_ingest_chunks_are_limited_to_50_rows(monkeypatch):
+@pytest.mark.parametrize("table", [
+    "races", "results", "payouts", "entries", "odds_snapshots", "predictions", "ticket_predictions",
+])
+def test_race_related_ingests_chunk_at_50_rows(monkeypatch, table):
     payload_sizes = []
 
     def accept(req, **_kwargs):
-        payload_sizes.append(len(json.loads(req.data)))
-        return _Response({"upserted": len(json.loads(req.data)), "changed": len(json.loads(req.data))})
+        size = len(json.loads(req.data))
+        payload_sizes.append(size)
+        return _Response({"upserted": size, "changed": size})
 
     monkeypatch.setattr(sync, "urlopen", accept)
-    result = sync.sync_rows({"races": [{"id": f"r{i}"} for i in range(123)]},
+    result = sync.sync_rows({table: [{"id": f"row{i}"} for i in range(123)]},
                             base_url="https://example.test", token="t")
     assert payload_sizes == [50, 50, 23]
     assert sum(payload_sizes) == 123
-    assert len(result["races"]) == 3
+    assert len(result[table]) == 3
+
+
+@pytest.mark.parametrize("table", ["venues", "models", "collection_runs"])
+def test_metadata_ingests_keep_500_row_chunk(monkeypatch, table):
+    payload_sizes = []
+
+    def accept(req, **_kwargs):
+        size = len(json.loads(req.data))
+        payload_sizes.append(size)
+        return _Response({"upserted": size, "changed": size})
+
+    monkeypatch.setattr(sync, "urlopen", accept)
+    result = sync.sync_rows({table: [{"id": f"row{i}"} for i in range(123)]},
+                            base_url="https://example.test", token="t")
+    assert payload_sizes == [123]
+    assert result[table]["upserted"] == 123

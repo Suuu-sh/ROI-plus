@@ -125,9 +125,11 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
         if not values:
             continue
         responses = []
-        # Race ingest isolates/compares existing rows individually; keep its
-        # client batches small to stay within the 30-second request timeout.
-        chunk_size = 50 if table == "races" else 500
+        # These race-related ingests perform per-row existing-record checks;
+        # keep client batches small to stay within the 30-second timeout.
+        row_checked_tables = {"races", "results", "payouts", "entries", "odds_snapshots",
+                              "predictions", "ticket_predictions"}
+        chunk_size = 50 if table in row_checked_tables else 500
         for start in range(0, len(values), chunk_size):
             payload = json.dumps(values[start:start + chunk_size], ensure_ascii=False).encode("utf-8")
             req = Request(f"{base_url}/api/ingest/{ENDPOINTS[table]}", data=payload,
