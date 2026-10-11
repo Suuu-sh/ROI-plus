@@ -1,5 +1,5 @@
 import json
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -81,7 +81,7 @@ def test_sync_prioritizes_parent_rows_then_results_and_payouts_before_entries(mo
 
 
 @pytest.mark.parametrize("table", [
-    "races", "results", "payouts", "entries", "odds_snapshots", "predictions", "ticket_predictions",
+    "results", "payouts", "entries", "odds_snapshots", "predictions", "ticket_predictions",
 ])
 def test_race_related_ingests_chunk_at_50_rows(monkeypatch, table):
     payload_sizes = []
@@ -97,6 +97,67 @@ def test_race_related_ingests_chunk_at_50_rows(monkeypatch, table):
     assert payload_sizes == [50, 50, 23]
     assert sum(payload_sizes) == 123
     assert len(result[table]) == 3
+
+
+def test_race_ingest_uses_smaller_chunks_for_sequential_worker_lookups(monkeypatch):
+    payload_sizes = []
+
+    def accept(req, **_kwargs):
+        size = len(json.loads(req.data))
+        payload_sizes.append(size)
+        return _Response({"upserted": size, "changed": size})
+
+    monkeypatch.setattr(sync, "urlopen", accept)
+    result = sync.sync_rows({"races": [{"id": f"race{i}"} for i in range(23)]},
+                            base_url="https://example.test", token="t")
+    assert payload_sizes == [10, 10, 3]
+    assert sum(payload_sizes) == 23
+    assert len(result["races"]) == 3
+
+
+def test_ingest_retries_one_timed_out_idempotent_chunk(monkeypatch):
+    requests = []
+
+    def timeout_then_accept(req, **_kwargs):
+        requests.append(req.data)
+        if len(requests) == 1:
+            raise TimeoutError("response timed out")
+        return _Response({"upserted": 1, "changed": 0})
+
+    monkeypatch.setattr(sync, "urlopen", timeout_then_accept)
+    monkeypatch.setattr(sync.time, "sleep", lambda _seconds: None)
+    result = sync.sync_rows({"races": [{"id": "race"}]},
+                            base_url="https://example.test", token="t")
+    assert len(requests) == 2
+    assert requests[0] == requests[1]
+    assert result["races"]["noop"] is True
+
+
+def test_ingest_does_not_retry_non_timeout_or_repeat_timeout(monkeypatch):
+    requests = []
+
+    def refused(req, **_kwargs):
+        requests.append(req)
+        raise URLError("connection refused")
+
+    monkeypatch.setattr(sync, "urlopen", refused)
+    with pytest.raises(RuntimeError, match="ingest races failed"):
+        sync.sync_rows({"races": [{"id": "race"}]},
+                       base_url="https://example.test", token="t")
+    assert len(requests) == 1
+
+    requests.clear()
+
+    def repeated_timeout(req, **_kwargs):
+        requests.append(req)
+        raise TimeoutError("timeout")
+
+    monkeypatch.setattr(sync, "urlopen", repeated_timeout)
+    monkeypatch.setattr(sync.time, "sleep", lambda _seconds: None)
+    with pytest.raises(RuntimeError, match="ingest races failed"):
+        sync.sync_rows({"races": [{"id": "race"}]},
+                       base_url="https://example.test", token="t")
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize("table", ["venues", "models", "collection_runs"])
