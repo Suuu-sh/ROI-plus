@@ -115,6 +115,38 @@ describe('EdgeLab API',()=>{
   const rollover=await readWriteBudget(DB,tomorrow.toISOString().slice(0,10));
   expect(rollover).toMatchObject({limit:20_000,essentialLimit:16_000,optionalLimit:4_000,reserved:0,allowance:null});
  });
+ it('serves only authenticated, current-JST, point-in-time-safe boat forecast inputs',async()=>{
+  const today=jstDate(), cutoff=new Date().toISOString(), raceId=`boat-${today.replaceAll('-','')}-98-01`;
+  sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('98','boat','Forecast fixture')").run();
+  sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES(?,'boat','98',?,1,?,'scheduled','real',?)")
+   .run(raceId,today,jstIso(Date.now()+60*60_000),jstIso());
+  sqlite.prepare("INSERT INTO entries(id,race_id,number,name,available_at,data_origin) VALUES(?,?,1,'Available',?,'real'),(?,?,2,'Late',?,'real')")
+   .run(`${raceId}-1`,raceId,jstIso(Date.now()-60_000),`${raceId}-2`,raceId,jstIso(Date.now()+60_000));
+  expect((await app.request(`/api/ingest/today-boat-forecast-inputs?date=${today}&cutoff=${encodeURIComponent(cutoff)}`,{},env())).status).toBe(401);
+  const response=await app.request(`/api/ingest/today-boat-forecast-inputs?date=${today}&cutoff=${encodeURIComponent(cutoff)}`,{headers:{authorization:'Bearer test-token'}},env());
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({date:today,races:[{id:raceId}],entries:[{id:`${raceId}-1`,available_at:jstIso(Date.now()-60_000),data_origin:'real'}]});
+  expect((await app.request(`/api/ingest/today-boat-forecast-inputs?date=2099-01-01&cutoff=${encodeURIComponent(cutoff)}`,{headers:{authorization:'Bearer test-token'}},env())).status).toBe(400);
+  expect((await app.request(`/api/ingest/today-boat-forecast-inputs?date=${today}&cutoff=${encodeURIComponent(new Date(Date.now()-10*60_000).toISOString())}`,{headers:{authorization:'Bearer test-token'}},env())).status).toBe(400);
+ });
+ it('keeps the operator odds endpoint explicit, current-day, and collector-flag gated',async()=>{
+  const headers={authorization:'Bearer test-token','content-type':'application/json'}, body=JSON.stringify({date:new Date().toISOString().slice(0,10),confirmed:true});
+  expect((await app.request('/api/ingest/collect-win-odds',{method:'POST',headers,body},env())).status).toBe(409);
+  expect((await app.request('/api/ingest/collect-win-odds',{method:'POST',headers,body:JSON.stringify({date:new Date().toISOString().slice(0,10),confirmed:true,mode:'all'})},env({ENABLE_BOATRACE_ODDS_SCRAPE:'true'}))).status).toBe(400);
+  expect((await app.request('/api/ingest/collect-win-odds',{method:'POST',headers,body},env({ENABLE_BOATRACE_ODDS_SCRAPE:'true'}))).status).toBe(409);
+ });
+ it('routes the fixed authenticated baseline operator through the existing promotion gates',async()=>{
+  const modelId='boat-win-lgbm-20261010-14b4a90a',today=new Date().toISOString().slice(0,10);
+  sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status,metrics_json) VALUES(?,'boat','win','fixed','fixture','candidate',?)")
+    .run(modelId,JSON.stringify({initialBaselineEligible:false,boatVenueSchemaVersion:'boat-venue-v2',correctedTrainingDataSha256:'f'.repeat(64),boatArtifactSha256:'a'.repeat(64)}));
+  const headers={authorization:'Bearer test-token','content-type':'application/json'};
+  const invalid=await app.request('/api/ingest/approved-boat-baseline/promote',{method:'POST',headers,body:JSON.stringify({date:today,confirmed:true,validationFingerprint:'a'.repeat(64)})},env());
+  expect(invalid.status).toBe(400);
+  const rejected=await app.request('/api/ingest/approved-boat-baseline/promote',{method:'POST',headers,body:JSON.stringify({date:today,confirmed:true,validationFingerprint:'a5596554c3def74853149fdaba5b54557473459ba12ffb717d2d6ad805e0acec'})},env());
+  expect(rejected.status).toBe(400);
+  expect(await rejected.json()).toMatchObject({error:'initial-baseline validation is not eligible'});
+  expect(sqlite.prepare('SELECT status FROM models WHERE id=?').get(modelId)).toMatchObject({status:'candidate'});
+ });
  it('rejects historical ingest without an open bet, but protects open-bet settlement inputs',async()=>{
   const raceId='boat-20010101-01-01', auth={authorization:'Bearer test-token','content-type':'application/json'};
   sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,status,data_origin,updated_at) VALUES(?,'boat','b01','2001-01-01',1,'finished','real',?)").run(raceId,jstIso());
