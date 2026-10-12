@@ -8,6 +8,7 @@ import time
 from datetime import date
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from typing import Any, Mapping
 
@@ -21,12 +22,13 @@ ENDPOINTS = {
     "payouts": "payouts",
     "predictions": "predictions",
     "ticket_predictions": "ticket-predictions",
+    "prerace_observations": "prerace-observations",
     "models": "models",
     "collection_runs": "collection-runs",
 }
 # Keep required current-day facts ahead of optional payloads. Parent rows are
 # first, and model lifecycle state must arrive before predictions.
-SEND_ORDER = ("venues", "races", "models", "results", "payouts", "entries",
+SEND_ORDER = ("venues", "races", "prerace_observations", "models", "results", "payouts", "entries",
               "predictions", "ticket_predictions", "odds_snapshots", "collection_runs")
 
 
@@ -37,6 +39,8 @@ class WriteBudgetRefused(RuntimeError):
 _SAFE_INGEST_ERROR_CODES = {
     "d1_write_budget_unavailable", "d1_write_budget_exhausted", "historical_ingest_disabled",
 }
+_MAX_CAPTURE_EXPORT_PAGE_BYTES = 2 * 1024 * 1024
+_MAX_CAPTURE_EXPORT_PAGES = 1000
 
 
 def _safe_ingest_error_code(exc: HTTPError) -> str | None:
@@ -113,6 +117,54 @@ def fetch_model_registry(*, base_url: str | None = None, token: str | None = Non
     return [row for row in models if isinstance(row, dict)]
 
 
+def fetch_prerace_capture_archives(target_date: str, *, base_url: str | None = None,
+                                   token: str | None = None, opener=None) -> list[dict[str, Any]]:
+    """Read one bounded date of immutable archive exports with existing ingest auth."""
+    try:
+        if date.fromisoformat(target_date).isoformat() != target_date:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise ValueError("archive export date must be YYYY-MM-DD") from exc
+    base_url = (base_url or os.environ.get("EDGELAB_API_URL", "")).rstrip("/")
+    token = token or os.environ.get("INGEST_TOKEN", "")
+    if not base_url or not token:
+        raise RuntimeError("EDGELAB_API_URL and INGEST_TOKEN are required")
+    open_request = opener or urlopen
+    pages, seen_cursors = [], set()
+    cursor = None
+    for _ in range(_MAX_CAPTURE_EXPORT_PAGES):
+        params = {"date": target_date, "limit": "25"}
+        if cursor:
+            params["cursor"] = cursor
+        request = Request(f"{base_url}/api/ingest/prerace-capture-archives?{urlencode(params)}", headers={
+            "Authorization": f"Bearer {token}", "Accept": "application/json",
+            "User-Agent": "EdgeLab-ML/0.1"}, method="GET")
+        try:
+            with open_request(request, timeout=30) as response:
+                body = response.read(_MAX_CAPTURE_EXPORT_PAGE_BYTES + 1)
+            if not body or len(body) > _MAX_CAPTURE_EXPORT_PAGE_BYTES:
+                raise RuntimeError("archive export page is empty or oversized")
+            payload = json.loads(body.decode("utf-8"))
+        except HTTPError as exc:
+            raise RuntimeError(f"archive export read failed: HTTP {exc.code}") from exc
+        except (URLError, TimeoutError, ValueError, UnicodeDecodeError) as exc:
+            raise RuntimeError(f"archive export read failed: {type(exc).__name__}") from exc
+        if (not isinstance(payload, dict) or payload.get("schema") != "boat-prerace-capture-export-v1"
+                or payload.get("date") != target_date or payload.get("limit") != 25
+                or not isinstance(payload.get("archives"), list)
+                or len(payload["archives"]) > 25):
+            raise RuntimeError("archive export page has an invalid envelope")
+        pages.append(payload)
+        next_cursor = payload.get("nextCursor")
+        if next_cursor is None:
+            return pages
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+            raise RuntimeError("archive export pagination cursor is invalid or repeated")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    raise RuntimeError("archive export exceeded the page safety limit")
+
+
 def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False,
               output_dir: str | Path = "ml/outbox", base_url: str | None = None,
               token: str | None = None) -> dict[str, Any]:
@@ -148,7 +200,7 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
         # These endpoints perform several sequential D1 lookups per row. Keep
         # their chunks small to bound lookup, batch, and D1 write amplification.
         row_checked_tables = {"races", "results", "payouts", "entries", "odds_snapshots",
-                              "predictions", "ticket_predictions"}
+                              "predictions", "ticket_predictions", "prerace_observations"}
         chunk_size = 10 if table in {"races", "payouts", "entries"} else 50 if table in row_checked_tables else 500
         for start in range(0, len(values), chunk_size):
             payload = json.dumps(values[start:start + chunk_size], ensure_ascii=False).encode("utf-8")

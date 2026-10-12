@@ -4,7 +4,12 @@ import { USER_AGENT } from './boatraceOdds.js';
 import { reserveWriteBudgets, utcDate } from './writeBudget.js';
 
 export const RESULTS_SOURCE = 'boatrace-results-worker-v1';
-const MAX_TARGETS = 4;
+// Preserve the existing worst-case request envelope (eight target races, with
+// one retry each) while allowing successful pages to advance farther. These
+// are request-attempt budgets, not product-level race caps.
+const HOURLY_MAX_ATTEMPTS = 16;
+const MANUAL_MAX_ATTEMPTS = 8;
+const TARGET_BATCH_SIZE = 8;
 const BODY_LIMIT = 512 * 1024;
 const RESULT_FETCH_TIMEOUT_MS = 30_000;
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -13,7 +18,8 @@ type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: st
 export type CollectResultsOptions = {
   // Set only by the authenticated, explicitly confirmed manual route.
   mode?: 'hourly' | 'manual';
-  maxRequests?: number;
+  // Per-invocation network attempt limit. Retries use the same budget.
+  maxAttempts?: number;
   requestBudget?: ResultsRequestBudget;
   sleep?: (ms: number) => Promise<void>;
   fetch?: (input: string, init?: RequestInit) => Promise<Response>;
@@ -21,7 +27,7 @@ export type CollectResultsOptions = {
 const runId = (raceId: string) => `boat-result:${raceId}`;
 export const resultUrl = (race: RaceTarget) => `https://www.boatrace.jp/owpc/pc/race/raceresult?rno=${race.race_no}&jcd=${race.venue_id}&hd=${race.race_date.replaceAll('-', '')}`;
 
-export async function selectResultsTargets(db: Db, now: Date, maximum = MAX_TARGETS) {
+export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_BATCH_SIZE) {
   // Old open purchases may still need settlement; no history-wide collection.
   // Least recently attempted first prevents an unpublished race starving others.
   return all<RaceTarget>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date FROM races r
@@ -44,7 +50,7 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = MAX_TARG
             AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3)))
       )
     ORDER BY julianday(cr.started_at) ASC,julianday(r.post_time) ASC,r.id ASC LIMIT ?`, RESULTS_SOURCE,
-    new Date(now.getTime()-5*60_000).toISOString(), Math.min(MAX_TARGETS, Math.max(0, Math.floor(maximum))));
+    new Date(now.getTime()-5*60_000).toISOString(), Math.max(0, Math.floor(maximum)));
 }
 
 type FetchFailureCode = 'http-status' | 'http-redirect-rejected' | 'body-missing' | 'body-too-large' | 'body-read-failed' | 'utf8-rejected' | 'hash-failed' | 'fetch-timeout' | 'fetch-rejected';
@@ -110,32 +116,52 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
     if(!Number.isFinite(until))return {...skipped,reason:'manual lock state unavailable'};
     if(until>now.getTime())return {...skipped,reason:'manual run in progress or throttled'};
   } else if(!manual&&prior&&prior.value>=hour)return skipped;
-  const capacity=Math.min(MAX_TARGETS,Math.max(0,Math.floor(opts.maxRequests ?? MAX_TARGETS)),Math.max(0,budget.max-budget.used));
-  if (!capacity) return skipped;
-  const targets = await selectResultsTargets(db,now,capacity);
+  const attemptStart=budget.used;
+  const attemptLimit=Math.min(manual?MANUAL_MAX_ATTEMPTS:HOURLY_MAX_ATTEMPTS,
+    Math.max(0,Math.floor(opts.maxAttempts ?? Number.MAX_SAFE_INTEGER)),
+    Math.max(0,budget.max-budget.used));
+  if (!attemptLimit) return skipped;
+  const targets = await selectResultsTargets(db,now,attemptLimit);
   if (!targets.length) return skipped;
-  // Reserve worst-case results+payouts+status+control and log amplification BEFORE
-  // any fetch or collector lock. Never refund a reservation after a crash/race.
-  if (!await reserveWriteBudgets(db,utcDate(now),[
-    {units:16+targets.length*55,category:'essential'},
-    {units:targets.length*5,category:'collection'},
-  ])) return {...skipped,reason:'daily D1 write budget unavailable or exhausted'};
-  // The manual lease bypasses only the hourly marker. A 5-minute lease
-  // covers the bounded 261s fetch path; after completion retain a 60s throttle.
   const lease=manual?new Date(now.getTime()+5*60_000).toISOString():hour;
-  const lock=manual
-    ?await db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
-      WHERE julianday(settings.value)<=julianday(?)`).bind(lockKey,lease,now.toISOString()).run()
-    :await db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
-      WHERE settings.value<excluded.value`).bind(lockKey,lease).run();
-  if(!lock.meta?.changes)return {...skipped,reason:manual?'manual run in progress or throttled':'hourly run already claimed'};
   const fetcher=opts.fetch ?? ((input,init)=>fetch(input,init)),sleep=opts.sleep ?? pause;
-  let attempted=0,records=0,failed=0,verified=0;
+  let attempted=0,records=0,failed=0,verified=0,processedTargets=0,batches=0,lockClaimed=false;
   const fetchFailures:Array<FetchFailure & {count:number}>=[];
+  const hasAttemptCapacity=()=>budget.used-attemptStart<attemptLimit&&budget.used<budget.max;
+  const reserveBatch=async (count:number)=>reserveWriteBudgets(db,utcDate(now),[
+    {units:16+count*55,category:'essential'},
+    {units:count*5,category:'collection'},
+  ]);
+  const claimLock=async ()=>{
+    const lock=manual
+      ?await db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        WHERE julianday(settings.value)<=julianday(?)`).bind(lockKey,lease,now.toISOString()).run()
+      :await db.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        WHERE settings.value<excluded.value`).bind(lockKey,lease).run();
+    return Boolean(lock.meta?.changes);
+  };
   try {
-  for (const [index,race] of targets.entries()) {
-    if (budget.used>=budget.max) break;
-    const url=resultUrl(race),startedAt=new Date(now.getTime()+index).toISOString();
+  for (let offset=0;offset<targets.length&&hasAttemptCapacity();) {
+    // Keep each reservation and processing batch bounded for D1. A failed
+    // reservation is retried at smaller sizes so remaining daily headroom can
+    // still make progress. Unprocessed targets stay queued for the next run.
+    const remainingAttempts=attemptLimit-(budget.used-attemptStart);
+    let batchSize=Math.min(TARGET_BATCH_SIZE,Math.ceil(remainingAttempts/2),targets.length-offset);
+    let reserved=false;
+    while(batchSize>0){
+      if(await reserveBatch(batchSize)){reserved=true;break;}
+      batchSize=Math.floor(batchSize/2);
+    }
+    if(!reserved) return {...skipped,...(processedTargets?{status:'partial' as const,records,verified,targets:processedTargets,attempted,failed,fetchFailures}:{}),reason:'daily D1 write budget unavailable or exhausted'};
+    batches++;
+    if(!lockClaimed){
+      if(!await claimLock())return {...skipped,reason:manual?'manual run in progress or throttled':'hourly run already claimed'};
+      lockClaimed=true;
+    }
+    for (let index=0;index<batchSize&&hasAttemptCapacity();index++) {
+    const race=targets[offset+index];
+    processedTargets++;
+    const url=resultUrl(race),startedAt=new Date(now.getTime()+processedTargets).toISOString();
     let sha256:string|null=null,reason='official-result-unavailable';
     let fetchFailure:FetchFailure|undefined;
     try {
@@ -153,8 +179,9 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       reason='official-result-unavailable';
       let body:{html:string;sha256:string}|undefined;
       for(let retry=0;retry<2;retry++) {
-        if(budget.used>=budget.max)break;
+        if(!hasAttemptCapacity())break;
         if(budget.used>0)await sleep(3000);
+        if(!hasAttemptCapacity())break;
         budget.used++;attempted++;
         try {
           const response=await fetcher(url,{headers:{'User-Agent':USER_AGENT,'Accept':'text/html'},redirect:'manual',signal:AbortSignal.timeout(RESULT_FETCH_TIMEOUT_MS)});
@@ -200,10 +227,12 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       // arbitrary upstream errors. Latest evidence only, one row per race.
       await db.batch([logStatement(db,race,startedAt,'failed',0,{raceId:race.id,url,sha256,quality:'unavailable-or-unsupported',fetchedAt:new Date().toISOString(),reason,...(fetchFailure?{fetchFailure}:{})})]);
     }
+    }
+    offset+=batchSize;
   }
-  return {status:records?(failed?'partial' as const:'success' as const):'failed' as const,records,verified,targets:targets.length,attempted,failed,fetchFailures};
+  return {status:records?(failed?'partial' as const:'success' as const):'failed' as const,records,verified,targets:processedTargets,attempted,failed,fetchFailures,batches};
   } finally {
-    if(manual)await db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?')
+    if(manual&&lockClaimed)await db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?')
       .bind(new Date(Date.now()+60_000).toISOString(),lockKey,lease).run().catch(()=>undefined);
   }
 }

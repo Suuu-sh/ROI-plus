@@ -64,10 +64,10 @@ describe('purchased real boat hourly results',()=>{
   });
   it('prevents duplicate hourly runs, rotates failed targets fairly, and keeps one log per race',async()=>{
     seed(1);seed(2);const fetcher=vi.fn(async(_input:string)=>new Response('not ready'));
-    await collectResults(DB,now,{maxRequests:1,fetch:fetcher});
-    await collectResults(DB,now,{maxRequests:1,fetch:fetcher});expect(fetcher).toHaveBeenCalledTimes(1);
-    await collectResults(DB,new Date(now.getTime()+3600000),{maxRequests:1,fetch:fetcher});expect(fetcher.mock.calls[1][0]).toContain('rno=2');
-    await collectResults(DB,new Date(now.getTime()+7200000),{maxRequests:1,fetch:fetcher});expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:2});
+    await collectResults(DB,now,{maxAttempts:1,fetch:fetcher});
+    await collectResults(DB,now,{maxAttempts:1,fetch:fetcher});expect(fetcher).toHaveBeenCalledTimes(1);
+    await collectResults(DB,new Date(now.getTime()+3600000),{maxAttempts:1,fetch:fetcher});expect(fetcher.mock.calls[1][0]).toContain('rno=2');
+    await collectResults(DB,new Date(now.getTime()+7200000),{maxAttempts:1,fetch:fetcher});expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:2});
   });
   it('shares capped fetch attempts and three-second spacing including its single network retry',async()=>{
     seed(1);seed(2);const requestBudget={used:47,max:49},pauses:number[]=[];
@@ -80,7 +80,7 @@ describe('purchased real boat hourly results',()=>{
     expect(await collectResults(DB,new Date(now.getTime()+3600000),{fetch:fetcher})).toMatchObject({status:'skipped',attempted:0});expect(fetcher).not.toHaveBeenCalled();
   });
   it('attributes result collection only to the exact purchased race, never another race or odds source',async()=>{
-    seed(1);seed(2);await collectResults(DB,now,{maxRequests:1,fetch:fetchPage});
+    seed(1);seed(2);await collectResults(DB,now,{maxAttempts:1,fetch:fetchPage});
     const response=await app.request('/api/bets?origin=real',{}, {DB});const bets=await response.json() as {raceId:string;resultCollectionSource:string|null}[];
     expect(bets.find(x=>x.raceId===id())?.resultCollectionSource).toBe(RESULTS_SOURCE);expect(bets.find(x=>x.raceId===id(2))?.resultCollectionSource).toBeNull();
   });
@@ -101,13 +101,22 @@ describe('purchased real boat hourly results',()=>{
     expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:0});expect(sqlite.prepare('SELECT COUNT(*) n FROM payouts').get()).toMatchObject({n:0});
     const log=sqlite.prepare('SELECT status,reason FROM collection_runs').get() as {status:string;reason:string};expect(log.status).toBe('failed');expect(JSON.parse(log.reason).reason).toBe('source-state-changed');
   });
-  it('bounds the four-target pass to fewer than 50 D1 statements including reservations and atomic batches',async()=>{
-    for(let raceNo=1;raceNo<=5;raceNo++)seed(raceNo);
-    let queries=0;const prepare=DB.prepare.bind(DB);
-    DB.prepare=(sql:string)=>{queries++;return prepare(sql);};
-    const result=await collectResults(DB,now,{fetch:fetchPage,sleep:async()=>{}});
-    expect(result).toMatchObject({targets:4,records:32,verified:4,attempted:4});
-    expect(queries).toBe(33);expect(queries).toBeLessThan(50);
+  it('continues through attempt-budgeted batches and rotates a persistently unsupported oldest race',async()=>{
+    for(let raceNo=1;raceNo<=20;raceNo++)seed(raceNo);
+    const fetcher=vi.fn(async(input:string)=>Number(new URL(input).searchParams.get('rno'))===1
+      ?new Response('unavailable',{status:403}):fetchPage(input));
+    const budget={used:0,max:49};
+    const first=await collectResults(DB,now,{requestBudget:budget,fetch:fetcher,sleep:async()=>{}});
+    expect(first).toMatchObject({targets:15,verified:14,attempted:16,batches:4});
+    expect(budget.used).toBe(16);
+    expect(first.targets).toBeGreaterThan(8);
+
+    const next=await collectResults(DB,new Date(now.getTime()+3600000),{fetch:fetcher,sleep:async()=>{}});
+    expect(next).toMatchObject({targets:6,verified:5,failed:1,attempted:7});
+    expect(fetcher.mock.calls.filter(([url])=>url.includes('rno=1'))).toHaveLength(4);
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE data_origin=\'real\'').get()).toMatchObject({n:19*6});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(id(1))).toMatchObject({n:0});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:20});
   });
   it.each([
     {code:'http-status',httpStatus:403,response:()=>new Response('private upstream body',{status:403})},
@@ -190,10 +199,10 @@ describe('purchased real boat hourly results',()=>{
     expect(fetcher).toHaveBeenCalledTimes(1);
     const retry=await collectResults(DB,new Date(now.getTime()+61_000),{mode:'manual',fetch:async()=>new Response('not published')});expect(retry.attempted).toBe(1);
   });
-  it('manual result mode still bounds four targets to 34 D1 statements including lease release',async()=>{
+  it('manual result mode shares attempt-based batch progression and stays within its five-minute lease',async()=>{
     for(let raceNo=1;raceNo<=5;raceNo++)seed(raceNo);let queries=0;const prepare=DB.prepare.bind(DB);
     DB.prepare=(sql:string)=>{queries++;return prepare(sql);};
-    expect(await collectResults(DB,now,{mode:'manual',fetch:fetchPage,sleep:async()=>{}})).toMatchObject({targets:4,verified:4,attempted:4});expect(queries).toBe(34);
+    expect(await collectResults(DB,now,{mode:'manual',fetch:fetchPage,sleep:async()=>{}})).toMatchObject({targets:5,verified:5,attempted:5,batches:2});expect(queries).toBeLessThan(80);
   });
   it('manual result route also preserves ingest-bearer operator authentication',async()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);vi.stubGlobal('fetch',fetchPage);

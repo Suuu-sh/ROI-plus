@@ -53,3 +53,69 @@ jobs:
           name: learning-report-${{ github.run_id }}
           path: ml/data/learning/report.json
           if-no-files-found: ignore
+      - name: Verify current-run candidate bundle
+        id: candidate-bundle
+        if: always() && !cancelled()
+        env:
+          PYTHONPATH: ml
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from edgelab.artifact_bundle import verify_candidate_model_bundle
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          sidecars = Path("ml/artifacts").glob("candidate-model-artifact-*.manifest.json")
+          matches = []
+          for sidecar in sidecars:
+              try:
+                  manifest = json.loads(sidecar.read_text(encoding="utf-8"))
+              except (OSError, ValueError):
+                  continue
+              provenance = manifest.get("provenance") if isinstance(manifest, dict) else None
+              if isinstance(provenance, dict) and provenance.get("artifactRunId") == os.environ["GITHUB_RUN_ID"]:
+                  matches.append((sidecar, manifest))
+
+          if len(matches) > 1:
+              raise RuntimeError("multiple current-run candidate bundles are ambiguous")
+          if not matches:
+              output.write_text("artifact_name=\nmodel_id=\nbundle_file=\nmanifest_file=\n", encoding="utf-8")
+              print("No candidate bundle was produced in this run.")
+              raise SystemExit(0)
+
+          sidecar, manifest = matches[0]
+          model_id = manifest.get("modelId")
+          artifact_name = f"candidate-model-artifact-{model_id}"
+          bundle_path = Path("ml/artifacts") / str(manifest.get("bundleFile") or "")
+          loose_pickle_path = Path("ml/artifacts") / f"{model_id}.pkl"
+          loose_metadata_path = Path("ml/artifacts") / f"{model_id}.json"
+          verified = verify_candidate_model_bundle(
+              bundle_path, expected_model_id=model_id, manifest_path=sidecar,
+              loose_pickle_path=loose_pickle_path, loose_metadata_path=loose_metadata_path)
+          provenance = verified.get("provenance") or {}
+          if (verified.get("artifactName") != artifact_name
+                  or provenance.get("artifactRunId") != os.environ["GITHUB_RUN_ID"]
+                  or str(provenance.get("artifactRunAttempt")) != os.environ["GITHUB_RUN_ATTEMPT"]
+                  or provenance.get("repository") != os.environ["GITHUB_REPOSITORY"]
+                  or provenance.get("commitSha") != os.environ["GITHUB_SHA"]):
+              raise RuntimeError("candidate artifact run/name provenance does not match this Actions run")
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"artifact_name={artifact_name}\n")
+              stream.write(f"model_id={model_id}\n")
+              stream.write(f"bundle_file={bundle_path.name}\n")
+              stream.write(f"manifest_file={sidecar.name}\n")
+          print(f"Verified candidate artifact {artifact_name} from run {provenance['artifactRunId']}.")
+          PY
+      - name: Archive candidate model bundle for future restore
+        if: always() && !cancelled() && steps.candidate-bundle.outputs.artifact_name != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.candidate-bundle.outputs.artifact_name }}
+          path: |
+            ml/artifacts/${{ steps.candidate-bundle.outputs.model_id }}.pkl
+            ml/artifacts/${{ steps.candidate-bundle.outputs.model_id }}.json
+            ml/artifacts/${{ steps.candidate-bundle.outputs.bundle_file }}
+            ml/artifacts/${{ steps.candidate-bundle.outputs.manifest_file }}
+          if-no-files-found: error
+          retention-days: 90

@@ -59,7 +59,7 @@ export function OverviewPage() {
       <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-3 xl:grid-cols-6">
         <Kpi label="仮想資産" value={yen(performance.bankroll)} />
         <Kpi label="確定損益" value={signedYen(performance.totalProfit)} valueClass={tone(performance.totalProfit)} />
-        <Kpi label="回収率" value={pct(performance.roi)} valueClass={performance.roi == null ? '' : performance.roi >= 1 ? 'text-pos' : 'text-neg'} sub="確定払戻 ÷ 購入額" />
+        <Kpi label="回収率" value={pct(performance.roi)} valueClass={performance.roi == null ? '' : performance.roi >= 1 ? 'text-pos' : 'text-neg'} sub="確定払戻 ÷ 確定購入額（返還除外）" />
         <Kpi label="購入点数" value={performance.betCount.toLocaleString()} sub={`確定 ${performance.settledCount}`} />
         <Kpi label="的中率" value={pct(performance.hitRate)} />
         <Kpi label="未確定" value={unresolved.toLocaleString()} sub="損益・回収率の集計対象外" />

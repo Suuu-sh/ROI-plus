@@ -23,35 +23,8 @@ export async function selectOddsTargets(db: Db, now: Date, maxRequests = 30): Pr
       AND r.race_date=?
       AND r.post_time>=? AND r.post_time<=?
       AND NOT EXISTS (SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-      AND EXISTS (
-        SELECT 1 FROM models m JOIN predictions p ON p.model_id=m.id
-        WHERE m.sport='boat' AND m.bet_type='win' AND m.status='active'
-          AND CASE WHEN json_valid(m.metrics_json) THEN
-            json_type(m.metrics_json,'$.boatArtifactSha256')='text'
-            AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2'
-            AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64
-            AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*'
-            AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64
-            AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*'
-          ELSE 0 END
-          AND p.race_id=r.id AND p.data_origin='real'
-          AND julianday(p.predicted_at)<=julianday(?) AND julianday(p.predicted_at)<=julianday(r.post_time)
-          AND p.predicted_at=(SELECT MAX(p2.predicted_at) FROM predictions p2
-            WHERE p2.race_id=r.id AND p2.model_id=m.id AND p2.data_origin='real'
-              AND julianday(p2.predicted_at)<=julianday(?) AND julianday(p2.predicted_at)<=julianday(r.post_time))
-          AND p.probability IS NOT NULL AND p.probability>0 AND p.probability<=1
-          AND p.prob_std IS NOT NULL AND p.prob_std>=0
-          AND (SELECT COUNT(*) FROM predictions p3 WHERE p3.race_id=r.id AND p3.model_id=m.id
-            AND p3.data_origin='real' AND p3.predicted_at=p.predicted_at
-            AND p3.probability IS NOT NULL AND p3.probability>0 AND p3.probability<=1
-            AND p3.prob_std IS NOT NULL AND p3.prob_std>=0)
-            =(SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')
-          AND NOT EXISTS (SELECT 1 FROM predictions p4 WHERE p4.race_id=r.id AND p4.model_id=m.id
-            AND p4.data_origin='real' AND p4.predicted_at=p.predicted_at
-            AND NOT EXISTS (SELECT 1 FROM entries e4 WHERE e4.race_id=r.id AND e4.data_origin='real' AND e4.number=p4.number))
-      )
       AND NOT EXISTS (SELECT 1 FROM odds_snapshots o WHERE o.race_id=r.id AND o.data_origin='real' AND o.bet_type='win' AND o.captured_at>=?)
-    ORDER BY r.post_time ASC LIMIT ?`, jstDate(at), after, before, after, after, fresh, Math.min(30, Math.max(0, Math.floor(maxRequests))));
+    ORDER BY r.post_time ASC LIMIT ?`, jstDate(at), after, before, fresh, Math.min(30, Math.max(0, Math.floor(maxRequests))));
 }
 
 export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = {}) {

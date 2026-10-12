@@ -14,6 +14,19 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab backfill-sync --since 2026-01-01 --
 ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab live --date 2026-10-09 --window-min 25
 ```
 
+アーカイブexport APIのリリース後は、既存の `EDGELAB_API_URL` / `INGEST_TOKEN` で
+1日ずつ取得・検証し、ローカルstoreへ追加できます。これは読み取り専用で、結果をD1へ同期しません。
+
+```sh
+EDGELAB_API_URL=https://example.invalid INGEST_TOKEN=... PYTHONPATH=ml ml/.venv/bin/python -m edgelab import-prerace-archives --date 2026-10-11
+```
+
+アーカイブ本文のSHA256、日付・レースID・公式URL・パーサーバージョン・完全な120通りを検証します。
+beforeinfoは既存 `prerace_observations` 形式に保存します。取得済み時刻・利用可能時刻は原本の
+capture時刻を保ち、確認済み締切の同値証跡は最も早い取得時刻を保持します。三連単オッズは
+同期対象外のローカル専用 `prerace_capture_odds` に隔離し、オフラインリプレイだけで使います。
+同じmanifestとchecksumは再取込せず、拒否した件数と理由を出力します。
+
 ネットワーク収集は公式ボートレース日次 LZH のみを対象にします。取得済み
 ファイルは `data/raw/boatrace` に保持し、再実行時は再取得しません。未開催日は
 スキップ扱いです。番組表は前日利用可能、競走成績内の展示情報は締切 10 分前
@@ -23,11 +36,18 @@ ENABLE_BOATRACE_ODDS_SCRAPE=true PYTHONPATH=ml ml/.venv/bin/python -m edgelab li
 候補を学習し、Plackett-Luce による厳密な三連単順序確率を時間順holdoutで採点します。
 三つの単勝確率の積は使いません。holdout払戻リプレイは同一レースの締切10分前より
 前に記録された公式・完全・非締切の三連単オッズ一式がある場合だけ実施し、不足時はROIを算出しません。
-仮想リプレイは5本以上の独立fitによる ticket確率標準偏差を要求し、`(p - std) * odds - 1`
-の保守的ROIと標準偏差上限で1レース1点（最良の三連単）を選びます。これは単一券種の
-過去リプレイであり、全券種をまたぐ運用方針の検証ではありません。候補学習はモデル行をローカルへ記録しますが、
+仮想リプレイは5本以上の独立fitによるticket確率標準偏差を要求し、運用と同じ期待ROI降順・
+選択文字列昇順で同率順序を決めます。期待ROIと `(p - std) * odds - 1` の保守的ROIが
+それぞれ5%以上で、標準偏差が5%以下の候補から最大6点を選び、整数円のレース予算を配分します。
+既定は運用の初期設定と同じ1点・100円で、`train-trifecta --replay-max-picks 3 --replay-race-budget 300`
+のように実際の設定に合わせられます。0点も許容し、リプレイ出力には
+`trifecta-runtime-ev-multipick-v1` と閾値・点数・予算を記録します。
+これは単一券種の過去リプレイであり、全券種をまたぐ運用方針の検証ではありません。候補学習はモデル行をローカルへ記録しますが、
 推論・リモート同期はせず、昇格も自動化しません。過去のB公開時刻は
 実測されておらず、保持された実績も将来利益を証明しません。
+V2 training rows use the official betting cutoff minus 60 seconds as their feature as-of boundary;
+T-30 observations are excluded. The standard weekly `learn` command still trains the separate
+boat win candidate and does not invoke `train-trifecta`.
 
 `ticketEventPooledEce` は全レースの120 ticket-event行をまとめた micro ECE です。
 レース内ticketは依存するため校正の参考値に限り、レース単位のtop-ticket ECEと各binの
@@ -49,8 +69,13 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab sync --tables ticket_predictions
 リクエスト間隔は最低3秒とします。同一レースの直近10分以内の取得と確定オッズは
 再取得しません。運営負荷を避け、定期実行は10分間隔を超えて頻繁に行わないでください。
 
-GitHub Actions の `daily.yml` は当日・前日の結果と払戻を優先し、出走表・安全な
-activeモデルの予測を同期して、保存予測の feedback scoring を行います。過去履歴の
+GitHub Actions の `daily.yml` は当日・前日の結果と払戻を優先し、出走表と確認済み
+active `boat-prerace-v2` trifecta model の `ticket_predictions` を同期して、保存予測の
+feedback scoring を行います。日次予測は実際のAction実行時刻を予測時刻として保存し、
+T-60より先の観測を使いません。ActionがT-60より早い場合は、その実行時点で取得済みの
+観測だけを使うため、後着の展示／気象情報は含まれません。締切、V2 active artifact、
+または時点情報が確認できない場合は単勝へフォールバックせず `not_ready` / abstention
+にします。過去履歴の
 D1 backfill は日次のD1同期から完全に分離しています。ローカル正規化キャッシュと Actions
 cache は学習・feedback 用に維持し、cache miss 時の過去データ収集もローカル保存のみで
 続けます。D1の日次書込枠を過去履歴で消費しません。
@@ -62,7 +87,7 @@ feedbackを続行します。`retrain.yml` は週次に
 限り別IDの候補artifactを作成・同一 temporal holdout で評価します。比較不能・
 非改善の候補は `metrics_json.promotionEligible=false` になり、手動昇格も拒否されます。
 どのActionも自動昇格しません。日次は認証済みモデルレジストリからactive IDを
-読み、artifact欠損・旧late-feature列の場合は推論だけを止めて結果収集/同期を続けます。
+読み、三連単ticket semantics・V2 feature schema・artifact digestが合わない場合は推論だけを止めて結果収集/同期を続けます。`train-trifecta` は明示的な候補学習コマンドであり、週次workflowからは起動しません。候補を作ってもD1へ自動同期／昇格しません。
 feedback artifactは各Actionの `learning-feedback-*` / `learning-report-*` として保存されます。
 必要な Actions secrets:
 
@@ -85,6 +110,26 @@ train/validation/test 期間で評価し、candidate 状態だけを登録しま
 しません。手動昇格後に daily でartifactを復旧する場合は、`validated_model_run_id` と
 その run の正確な `validated_model_artifact_name` を指定してください。
 
+定期 daily の復旧は現在、model ID `boat-win-lgbm-20261010-14b4a90a` の検証済み
+artifact 1組だけを Actions run `38053091327` から取得します。この artifact は
+2027-01-08 に期限切れです。PR #43 の daily consumer はこの現行モデル用に固定されており、
+週次 candidate を自動選択したりモデルを有効化したりしません。artifactが未取得、または
+registry SHA・provenance と一致しない場合、予測は `not_ready` のままです。
+
+PR #45 の週次候補 workflow は `candidate-model-artifact-{modelId}` 名で、root-level の
+`<modelId>.pkl` / `<modelId>.json`、両ファイルのSHA-256とサイズを含むmanifest、portable ZIPを
+Actions artifactに90日保存します。manifestとJSON metadataはmodel ID、candidate状態、artifact名、
+run ID/attempt、workflow、repository、commit SHA、学習期間、両ファイルのSHA-256を記録します。
+registryの `metrics_json` にもrun ID、artifact名、ZIP/manifest SHA-256を記録します。
+`verify_candidate_model_bundle` はZIP、manifest、JSON、pickleのidentity・hash・サイズを照合し、
+weekly workflowは別アップロードされた loose pickle/JSON もZIP内の同じmemberと照合します。
+どちらもpickleを読み込む前に検証します。
+
+将来、独立検証後に人が候補を承認した場合だけ、正確な `artifactRunId` と `artifactName` を
+既存の `validated_model_run_id` / `validated_model_artifact_name` 入力へ渡して復旧できます。
+PR #43 はdaily consumerと現行モデルの固定復旧を所有し、PR #45 は週次candidate bundleの
+producer・完全性検証・registry provenanceを所有します。candidate作成やbundle保存だけでは
+dailyの固定対象を変更せず、自動昇格もしません。
 `backfill` はローカル履歴を収集するコマンドです。`backfill-sync` は既定でリモート
 D1書込を拒否し、`--dry-run` の推定だけを実行します。過去履歴のリモート同期は
 日次ワークフローからも外しており、将来の明示的な運用判断なしに実行しません。

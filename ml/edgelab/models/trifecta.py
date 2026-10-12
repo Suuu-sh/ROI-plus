@@ -13,19 +13,26 @@ import json
 import math
 import pickle
 import random
+import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from edgelab.features.boat import BASE_FEATURE_COLUMNS
+from edgelab.features.boat import (BASE_FEATURE_COLUMNS, PRERACE_V2_FEATURE_COLUMNS,
+                                   PRERACE_V2_SCHEMA, build_boat_prerace_v2_features,
+                                   completed_racer_history)
 from edgelab.models.compare import temporal_split
+from edgelab.models.trifecta_coverage import (audit_trifecta_coverage,
+                                               evaluate_candidate_qualification,
+                                               validate_ticket_probabilities)
 from edgelab.normalization.availability import available_by
 
 TICKET_SCHEMA = "ticket-selection-v1"
 PREDICTION_SEMANTICS = "exact-selection-probability-v1"
+REPLAY_SELECTION_POLICY = "trifecta-runtime-ev-multipick-v1"
 
 
 def _group_races(rows: Sequence[Mapping[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -141,9 +148,40 @@ def ensemble_ordered_triples(artifact: Mapping[str, Any], group: Sequence[Mappin
     return mean, std
 
 
+def _has_recent_independent_ticket_validation(metrics: Mapping[str, Any], artifact_sha256: str) -> bool:
+    """Mirror the API's artifact-bound validation gate before local inference."""
+    validation = metrics.get("ticketValidation")
+    if not isinstance(validation, Mapping) or validation.get("fixture") is True:
+        return False
+    if (validation.get("status") != "independently_validated"
+            or validation.get("policyVersion") != TICKET_SCHEMA
+            or validation.get("betType") != "trifecta"
+            or validation.get("artifactSha256") != artifact_sha256
+            or validation.get("dataOrigin") != "real"
+            or validation.get("completeCombinationCoverage") is not True
+            or validation.get("probabilitiesNormalized") is not True
+            or validation.get("outOfSampleValidated") is not True
+            or validation.get("pointInTimeSafe") is not True
+            or not isinstance(validation.get("independentReviewId"), str)
+            or not validation.get("independentReviewId")
+            or not re.fullmatch(r"[a-f0-9]{64}", str(validation.get("reportSha256") or ""))):
+        return False
+    validated_at = validation.get("validatedAt")
+    try:
+        stamp = datetime.fromisoformat(str(validated_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        return False
+    now = datetime.now(timezone.utc)
+    stamp = stamp.astimezone(timezone.utc)
+    return stamp <= now and now - stamp <= timedelta(days=30)
+
+
 def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[str, Any],
                               artifact: Mapping[str, Any], model_id: str, cutoff: str,
-                              artifact_sha256: str) -> list[dict[str, Any]]:
+                              artifact_sha256: str, race_date: str | None = None,
+                              require_verified_cutoff: bool = False) -> list[dict[str, Any]]:
     """Build exact-order records only for an explicitly active, validated model."""
     from datetime import datetime, timedelta
     from edgelab.features.boat import build_boat_features
@@ -156,41 +194,73 @@ def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[st
         except (TypeError, ValueError):
             metrics = {}
     meta = artifact.get("metadata") or {}
+    feature_schema = metrics.get("boatFeatureSchemaVersion") or meta.get("boatFeatureSchemaVersion") or "boat-base-v1"
+    allowed_columns = (BASE_FEATURE_COLUMNS if feature_schema == "boat-base-v1"
+                       else PRERACE_V2_FEATURE_COLUMNS if feature_schema == PRERACE_V2_SCHEMA else ())
     if (model_row.get("status") != "active"
             or metrics.get("ticketModelSchemaVersion") != TICKET_SCHEMA
             or metrics.get("ticketPredictionSemantics") != PREDICTION_SEMANTICS
             or metrics.get("ticketBetType") != "trifecta"
             or metrics.get("promotionEligible") is not True
             or metrics.get("ticketArtifactSha256") != artifact_sha256
+            or not _has_recent_independent_ticket_validation(metrics, artifact_sha256)
             or meta.get("id") != model_id
             or meta.get("ticketModelSchemaVersion") != TICKET_SCHEMA
             or meta.get("ticketPredictionSemantics") != PREDICTION_SEMANTICS
             or meta.get("ticketBetType") != "trifecta"
-            or any(column not in BASE_FEATURE_COLUMNS for column in artifact.get("columns", []))
+            or meta.get("boatFeatureSchemaVersion", "boat-base-v1") != feature_schema
+            or not artifact.get("columns")
+            or any(column not in allowed_columns for column in artifact.get("columns", []))
             or not artifact.get("model")):
         raise ValueError("active trifecta model lacks validated matching schema/semantics/artifact evidence")
     cutoff_dt = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+    if cutoff_dt.tzinfo is None:
+        raise ValueError("prediction cutoff must include a timezone")
     trained_at = meta.get("trainedAt")
     if not trained_at or datetime.fromisoformat(str(trained_at).replace("Z", "+00:00")) >= cutoff_dt:
         raise ValueError("artifact was not trained strictly before prediction cutoff")
     races = {r.get("id"): r for r in store.get("races", [])
              if r.get("sport") == "boat" and r.get("data_origin") == "real"
-             and r.get("status") not in {"finished", "cancelled"}}
+             and r.get("status") not in {"finished", "cancelled"}
+             and (race_date is None or r.get("race_date") == race_date)}
     by_race: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in store.get("entries", []):
         rid = str(entry.get("race_id"))
         race = races.get(rid)
-        if (race and entry.get("data_origin") == "real" and race.get("post_time")
+        if not (race and entry.get("data_origin") == "real" and race.get("post_time")
                 and datetime.fromisoformat(str(race["post_time"]).replace("Z", "+00:00")) > cutoff_dt
                 and available_by(entry, cutoff)):
-            by_race[rid].append(dict(entry))
+            continue
+        if require_verified_cutoff:
+            if race.get("betting_cutoff_source") != "boatrace-racelist-cutoff-v1" or not race.get("betting_cutoff_at"):
+                continue
+            try:
+                target_as_of = datetime.fromisoformat(str(race["betting_cutoff_at"]).replace("Z", "+00:00")) - timedelta(seconds=60)
+                cutoff_observed_at = datetime.fromisoformat(str(race.get("betting_cutoff_observed_at", "")).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if (target_as_of.tzinfo is None or cutoff_observed_at.tzinfo is None
+                    or target_as_of <= cutoff_dt or cutoff_observed_at > cutoff_dt
+                    or cutoff_observed_at > target_as_of):
+                # Daily precomputation cannot claim a T-60 forecast after its
+                # feature boundary has passed, or use a cutoff fetched only
+                # afterward. The next run may use only then-current evidence.
+                continue
+        by_race[rid].append(dict(entry))
     records = []
+    history = completed_racer_history(store) if feature_schema == PRERACE_V2_SCHEMA else []
     for race_id, entries in by_race.items():
         if len(entries) != 6 or len({str(e.get("number")) for e in entries}) != 6:
             continue
         date = races[race_id].get("race_date")
-        features = build_boat_features(entries, race_date=date, predicted_at=cutoff)
-        group = [{**{key: value for key, value in entry.items() if key not in BASE_FEATURE_COLUMNS}, **feature}
+        if feature_schema == PRERACE_V2_SCHEMA:
+            features = build_boat_prerace_v2_features(entries, race=races[race_id], predicted_at=cutoff,
+                history=history, observations=store.get("prerace_observations", []))
+            feature_columns = PRERACE_V2_FEATURE_COLUMNS
+        else:
+            features = build_boat_features(entries, race_date=date, predicted_at=cutoff)
+            feature_columns = BASE_FEATURE_COLUMNS
+        group = [{**{key: value for key, value in entry.items() if key not in feature_columns}, **feature}
                  for entry, feature in zip(entries, features)]
         probabilities, deviations = ensemble_ordered_triples(artifact, group)
         for selection, probability in probabilities.items():
@@ -223,9 +293,12 @@ def _lane_order_model(groups: Sequence[Sequence[Mapping[str, Any]]], alpha: floa
 
 
 def _proper_ticket_metrics(groups, distributions):
+    if len(groups) != len(distributions):
+        raise ValueError("one complete 120-ticket distribution is required per race")
     losses, briers, calibration = [], [], []
     top_calibration = []
-    for group, probs in zip(groups, distributions):
+    for group, raw_probs in zip(groups, distributions):
+        probs = validate_ticket_probabilities(raw_probs)
         actual = _actual_selection(group)
         losses.append(-math.log(max(1e-15, probs[actual])))
         briers.append(sum((prob - (selection == actual)) ** 2
@@ -261,7 +334,8 @@ def _proper_ticket_metrics(groups, distributions):
             "nDates": len({str(group[0].get("race_date")) for group in groups}),
             "topTicketEce": top_ece,
             "topTicketCalibration": top_detail,
-            "raceLogLosses": losses}
+            "raceLogLosses": losses,
+            "raceBriers": briers}
 
 
 def _date_cluster_interval(groups, candidate_losses, baseline_losses, *, samples=1000, seed=17):
@@ -283,6 +357,31 @@ def _date_cluster_interval(groups, candidate_losses, baseline_losses, *, samples
             "interpretation": "negative favors candidate; date-cluster bootstrap, not a profitability interval"}
 
 
+def _paired_delta_interval(groups, candidate_values, baseline_values, *, cluster="race",
+                           samples=1000, seed=17):
+    """Paired 95% bootstrap interval for a proper-score delta (negative is better)."""
+    if len(groups) != len(candidate_values) or len(groups) != len(baseline_values):
+        raise ValueError("paired score vectors must match the race groups")
+    by_cluster: dict[str, list[float]] = defaultdict(list)
+    for index, (group, candidate, baseline) in enumerate(zip(groups, candidate_values, baseline_values)):
+        key = (str(group[0].get("race_date")) if cluster == "date"
+               else str(group[0].get("race_id", index)))
+        by_cluster[key].append(float(candidate) - float(baseline))
+    keys = sorted(by_cluster)
+    cluster_values = [sum(by_cluster[key]) / len(by_cluster[key]) for key in keys]
+    if len(cluster_values) < 2:
+        return {"nClusters": len(cluster_values), "meanDeltaCandidateMinusBaseline": None, "ci95": None,
+                "interpretation": "negative favors candidate; bootstrap is unavailable with fewer than two clusters"}
+    rng = random.Random(seed)
+    means = [sum(rng.choices(cluster_values, k=len(cluster_values))) / len(cluster_values)
+             for _ in range(samples)]
+    means.sort()
+    return {"nClusters": len(cluster_values),
+            "meanDeltaCandidateMinusBaseline": sum(cluster_values) / len(cluster_values),
+            "ci95": [means[int(.025 * (samples - 1))], means[int(.975 * (samples - 1))]],
+            "interpretation": "negative favors candidate; proper-score interval, not a profitability interval"}
+
+
 def _temperature(valid: Sequence[Mapping[str, Any]], model: Mapping[str, Any]) -> float:
     if not valid:
         return 1.0
@@ -302,8 +401,9 @@ def _temperature(valid: Sequence[Mapping[str, Any]], model: Mapping[str, Any]) -
 def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
                    post_time: str) -> dict[str, float]:
     """Use one coherent official, non-final, complete 120-ticket market."""
-    from datetime import datetime
-    cutoff = datetime.fromisoformat(predicted_at.replace("Z", "+00:00"))
+    from datetime import datetime, timedelta
+    as_of = datetime.fromisoformat(predicted_at.replace("Z", "+00:00"))
+    fresh_after = as_of - timedelta(minutes=10)
     deadline = datetime.fromisoformat(post_time.replace("Z", "+00:00"))
     race = next((r for r in store.get("races", []) if str(r.get("id")) == race_id), None)
     if not race:
@@ -319,7 +419,7 @@ def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
                     f"rno={race_no}&jcd={venue}&hd={race_date}")
     expected = {f"{a}-{b}-{c}" for a, b, c in itertools.permutations(range(1, 7), 3)}
     cohorts: dict[tuple[str, str, str], dict[str, tuple[datetime, float]]] = defaultdict(dict)
-    for row in store.get("odds_snapshots", []):
+    for row in [*store.get("odds_snapshots", []), *store.get("prerace_capture_odds", [])]:
         if (row.get("data_origin") != "real" or row.get("race_id") != race_id
                 or row.get("bet_type") != "trifecta" or not row.get("captured_at")
                 or row.get("source") != "boatrace-trifecta-official-v1"
@@ -334,9 +434,10 @@ def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
             odds = float(row.get("odds"))
         except (TypeError, ValueError):
             continue
-        if captured.tzinfo is None or cutoff.tzinfo is None or deadline.tzinfo is None:
+        if captured.tzinfo is None or as_of.tzinfo is None or deadline.tzinfo is None:
             continue
-        if captured > cutoff or captured >= deadline or not math.isfinite(odds) or odds <= 0:
+        if (captured < fresh_after or captured > as_of or captured >= deadline
+                or not math.isfinite(odds) or odds <= 0):
             continue
         selection = str(row.get("selection") or "")
         if selection not in expected:
@@ -351,21 +452,44 @@ def _captured_odds(store: Mapping[str, Any], race_id: str, predicted_at: str,
     return {selection: value[1] for selection, value in latest.items()}
 
 
-def _select_conservative_ticket(probabilities: Mapping[str, float], deviations: Mapping[str, float],
-                                odds: Mapping[str, float], *, max_std: float = 0.05,
-                                min_conservative_roi: float = 0.05):
-    """Mirror the current one-ticket-per-race virtual choice rule."""
+def _select_runtime_like_tickets(probabilities: Mapping[str, float], deviations: Mapping[str, float],
+                                 odds: Mapping[str, float], *, max_std: float = 0.05,
+                                 min_expected_roi: float = 0.05,
+                                 min_conservative_roi: float = 0.05,
+                                 max_picks: int = 6, race_budget: int = 100):
+    """Mirror the runtime's EV rank, conservative-edge gate, cap, and stake split."""
+    if (not isinstance(max_picks, int) or isinstance(max_picks, bool) or not 1 <= max_picks <= 6
+            or not isinstance(race_budget, int) or isinstance(race_budget, bool)
+            or not 1 <= race_budget <= 2_147_483_647
+            or not _finite(max_std) or float(max_std) < 0
+            or not _finite(min_expected_roi) or not _finite(min_conservative_roi)):
+        raise ValueError("invalid replay policy configuration")
     candidates = []
     for selection, probability in probabilities.items():
         std, price = deviations.get(selection), odds.get(selection)
-        if std is None or not _finite(std) or price is None or not _finite(price):
+        if (not re.fullmatch(r"[1-6]-[1-6]-[1-6]", str(selection))
+                or len(set(str(selection).split("-"))) != 3
+                or not _finite(probability) or not 0 <= float(probability) <= 1
+                or std is None or not _finite(std) or float(std) < 0
+                or price is None or not _finite(price) or float(price) <= 0):
             continue
-        if std > max_std:
+        if float(std) > float(max_std):
             continue
+        expected_roi = float(probability) * float(price) - 1
         conservative_roi = (float(probability) - float(std)) * float(price) - 1
-        if conservative_roi >= min_conservative_roi:
-            candidates.append((selection, float(probability), float(std), float(price), conservative_roi))
-    return max(candidates, key=lambda item: (item[4], item[1], item[0])) if candidates else None
+        # Runtime ranks by expected ROI, then applies its conservative edge label.
+        if expected_roi >= min_expected_roi and conservative_roi >= min_conservative_roi:
+            candidates.append({"selection": str(selection), "probability": float(probability),
+                               "probStd": float(std), "odds": float(price),
+                               "expectedRoi": expected_roi, "conservativeRoi": conservative_roi})
+    ranked = sorted(candidates, key=lambda item: (-item["expectedRoi"], item["selection"]))
+    selected = ranked[:min(max_picks, 6, race_budget)]
+    if not selected:
+        return []
+    base_stake, remainder = divmod(race_budget, len(selected))
+    for index, item in enumerate(selected):
+        item["stake"] = base_stake + (1 if index < remainder else 0)
+    return selected
 
 
 def _consistent_payout(rows: Sequence[Mapping[str, Any]], race_id: str, actual: str):
@@ -386,9 +510,43 @@ def _consistent_payout(rows: Sequence[Mapping[str, Any]], race_id: str, actual: 
     return matching[0]
 
 
+def _replay_roi_intervals(rows: Sequence[Mapping[str, Any]], *, samples: int = 2000,
+                          seed: int = 17) -> tuple[list[float] | None, list[float] | None]:
+    """Bootstrap race and date-cluster ROI for actually observed payouts only."""
+    selected = [row for row in rows if int(row.get("stake") or 0) > 0]
+    if len(selected) < 2:
+        return None, None
+    rng = random.Random(seed)
+
+    def roi(sampled):
+        stake = sum(int(row["stake"]) for row in sampled)
+        payout = sum(int(row["payout"]) for row in sampled)
+        return payout / stake - 1 if stake else 0.0
+
+    race_samples = sorted(roi(rng.choices(selected, k=len(selected))) for _ in range(samples))
+    by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in selected:
+        by_date[str(row.get("race_date") or "")].append(dict(row))
+    dates = sorted(key for key in by_date if key)
+    if len(dates) < 2:
+        return ([race_samples[int(.025 * (samples - 1))], race_samples[int(.975 * (samples - 1))]], None)
+    date_samples = []
+    for _ in range(samples):
+        chosen = rng.choices(dates, k=len(dates))
+        date_samples.append(roi([row for day in chosen for row in by_date[day]]))
+    date_samples.sort()
+    return ([race_samples[int(.025 * (samples - 1))], race_samples[int(.975 * (samples - 1))]],
+            [date_samples[int(.025 * (samples - 1))], date_samples[int(.975 * (samples - 1))]])
+
+
 def _replay(store: Mapping[str, Any], test_groups: Sequence[Sequence[Mapping[str, Any]]],
-            artifact: Mapping[str, Any]) -> dict[str, Any]:
-    selected, skipped = [], defaultdict(int)
+            artifact: Mapping[str, Any], *, max_picks: int = 1, race_budget: int = 100,
+            min_expected_roi: float = 0.05, max_std: float = 0.05,
+            min_conservative_roi: float = 0.05) -> dict[str, Any]:
+    _select_runtime_like_tickets({}, {}, {}, max_std=max_std,
+        min_expected_roi=min_expected_roi, min_conservative_roi=min_conservative_roi,
+        max_picks=max_picks, race_budget=race_budget)
+    selected, skipped, selected_ticket_rois = [], defaultdict(int), []
     for group in test_groups:
         race_id = str(group[0].get("race_id"))
         race = next((r for r in store.get("races", []) if r.get("id") == race_id), {})
@@ -406,41 +564,63 @@ def _replay(store: Mapping[str, Any], test_groups: Sequence[Sequence[Mapping[str
                for selection in odds):
             skipped["missing_ensemble_probability_std"] += 1
             continue
-        selected_ticket = _select_conservative_ticket(probs, deviations, odds)
-        if not selected_ticket:
-            skipped["no_positive_expected_value_tickets"] += 1
-            continue
         actual = _actual_selection(group)
         payout = _consistent_payout(store.get("payouts", []), race_id, actual)
         if payout is None:
             skipped["missing_or_inconsistent_trifecta_payout_vs_finish_order"] += 1
             continue
-        selection, _, _, _, conservative_roi = selected_ticket
-        stake = 100
-        returned = payout if selection == actual else 0.0
-        selected.append({"race_id": race_id, "tickets": 1, "selection": selection, "stake": stake,
-                         "payout": returned, "conservativeExpectedRoi": conservative_roi})
+        picked = _select_runtime_like_tickets(probs, deviations, odds, max_std=max_std,
+            min_expected_roi=min_expected_roi, min_conservative_roi=min_conservative_roi,
+            max_picks=max_picks, race_budget=race_budget)
+        returned = sum(math.floor(ticket["stake"] * payout / 100)
+                       for ticket in picked if ticket["selection"] == actual)
+        stake = sum(ticket["stake"] for ticket in picked)
+        selected_ticket_rois.extend(ticket["conservativeRoi"] for ticket in picked)
+        selected.append({"race_id": race_id, "race_date": group[0].get("race_date"), "tickets": len(picked),
+                         "selections": [ticket["selection"] for ticket in picked],
+                         "stake": stake, "payout": returned,
+                         "conservativeExpectedRois": [ticket["conservativeRoi"] for ticket in picked],
+                         "selectionPolicyVersion": REPLAY_SELECTION_POLICY})
     stake = sum(r["stake"] for r in selected)
     payout = sum(r["payout"] for r in selected)
+    roi_race_ci, roi_date_ci = _replay_roi_intervals(selected)
     return {"status": "evaluated" if selected else "insufficient_odds_or_payout_data",
             "races": len(selected), "stake": stake, "payout": payout,
             "roi": payout / stake - 1 if stake else None,
-            "meanSelectedConservativeExpectedRoi": (sum(r["conservativeExpectedRoi"] for r in selected) / len(selected)
-                                         if selected else None),
-            "strategy": "one 100-yen trifecta per race: highest conservative expected ROI; not a cross-bet-type policy validation",
+            "racesWithPicks": sum(1 for row in selected if row["tickets"]),
+            "replayDates": len({str(row.get("race_date")) for row in selected if row["tickets"] and row.get("race_date")}),
+            "roiInterval95": roi_race_ci,
+            "roiDateClusterInterval95": roi_date_ci,
+            "roiIntervalMethod": "nonparametric bootstrap of observed, payout-verified replay races and race-date clusters",
+            "ticketCount": sum(row["tickets"] for row in selected),
+            "meanSelectedConservativeExpectedRoi": (sum(selected_ticket_rois) / len(selected_ticket_rois)
+                                         if selected_ticket_rois else None),
+            "selectionPolicyVersion": REPLAY_SELECTION_POLICY,
+            "selectionPolicy": {"maxPicks": max_picks, "raceBudget": race_budget,
+                                "minExpectedRoi": min_expected_roi, "maxProbStd": max_std,
+                                "minConservativeRoi": min_conservative_roi,
+                                "tieBreak": "selection_ascending"},
+            "strategy": "runtime-like EV-ranked multi-pick exact trifecta replay; not a cross-bet-type policy validation",
             "skippedRaces": dict(skipped),
             "warning": "Retrospective hypothetical replay only; not actual purchases or evidence of profitability."}
 
 
 def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], *,
                    model_id: str, artifact_dir: str | Path = "ml/artifacts",
-                   min_train_races: int = 300) -> dict[str, Any]:
+                   min_train_races: int = 300,
+                   feature_schema_version: str = "boat-base-v1",
+                   replay_max_picks: int = 1, replay_race_budget: int = 100) -> dict[str, Any]:
     """Train and chronologically evaluate an immutable candidate artifact."""
+    if min_train_races < 300:
+        raise ValueError("min_train_races cannot lower the fixed 300-race training floor")
+    _select_runtime_like_tickets({}, {}, {}, max_picks=replay_max_picks,
+                                 race_budget=replay_race_budget)
     safe_rows = [dict(r) for r in rows if r.get("data_origin") == "real"
                  and r.get("race_id") and r.get("race_date")
                  and r.get("predicted_at") and available_by(r, r["predicted_at"])]
     complete = [g for g in _group_races(safe_rows) if _complete_race(g)]
     complete_rows = [r for g in complete for r in g]
+    coverage = audit_trifecta_coverage(store, complete_rows)
     train, valid, test = temporal_split(complete_rows)
     train_groups = [g for g in _group_races(train) if _complete_race(g)]
     valid_groups = [g for g in _group_races(valid) if _complete_race(g)]
@@ -453,8 +633,12 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
     dates = lambda groups: sorted({str(g[0].get("race_date")) for g in groups})
     if len(train_groups) < min_train_races or not valid_groups or not test_groups:
         return {"id": model_id, "status": "untrained", "reason": "insufficient_temporal_data",
-                "nTrainRaces": len(train_groups), "nValidRaces": len(valid_groups), "nTestRaces": len(test_groups)}
-    columns = list(BASE_FEATURE_COLUMNS)
+                "nTrainRaces": len(train_groups), "nValidRaces": len(valid_groups),
+                "nTestRaces": len(test_groups), "coverage": coverage}
+    if feature_schema_version not in {"boat-base-v1", PRERACE_V2_SCHEMA}:
+        raise ValueError("unsupported boat feature schema version")
+    columns = list(PRERACE_V2_FEATURE_COLUMNS if feature_schema_version == PRERACE_V2_SCHEMA
+                   else BASE_FEATURE_COLUMNS)
     model = _fit(train, columns)
     valid_flat = [r for g in valid_groups for r in g]
     temperature = _temperature(valid_flat, model)
@@ -486,23 +670,53 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
     uniform_metrics = _proper_ticket_metrics(test_groups, [uniform_distribution] * len(test_groups))
     lane_metrics = _proper_ticket_metrics(test_groups, [lane_distribution] * len(test_groups))
     candidate_metrics = _proper_ticket_metrics(test_groups, candidate_distributions)
+    comparison = {
+        "candidateVsLaneLogLossRaceBootstrap": _paired_delta_interval(
+            test_groups, candidate_metrics["raceLogLosses"], lane_metrics["raceLogLosses"], cluster="race"),
+        "candidateVsLaneLogLossDateCluster": _paired_delta_interval(
+            test_groups, candidate_metrics["raceLogLosses"], lane_metrics["raceLogLosses"], cluster="date"),
+        "candidateVsLaneBrierRaceBootstrap": _paired_delta_interval(
+            test_groups, candidate_metrics["raceBriers"], lane_metrics["raceBriers"], cluster="race"),
+        "candidateVsLaneBrierDateCluster": _paired_delta_interval(
+            test_groups, candidate_metrics["raceBriers"], lane_metrics["raceBriers"], cluster="date"),
+    }
     top_one = sum(max(probabilities, key=probabilities.get) == _actual_selection(group)
                   for (_, probabilities), group in zip(score_rows, test_groups))
-    replay = _replay(store, test_groups, artifact_for_eval)
+    replay = _replay(store, test_groups, artifact_for_eval,
+                     max_picks=replay_max_picks, race_budget=replay_race_budget)
+    qualification_metrics = {
+        "dataOrigin": "real_only" if all(row.get("data_origin") == "real" for row in complete_rows) else "sample_or_mixed",
+        "boatFeatureSchemaVersion": feature_schema_version,
+        "nTrainRaces": len(train_groups), "nTestRaces": len(test_groups),
+        "nTestDates": len(dates(test_groups)), "topTicketEce": candidate_metrics["topTicketEce"],
+        "completeCombinationCoverage": candidate_metrics["nTicketEventRows"] == 120 * len(test_groups),
+        "payoutReplay": replay, **comparison,
+    }
+    qualification = evaluate_candidate_qualification(qualification_metrics, coverage)
+    promotion_reason = (qualification["reason"] + ": " + ", ".join(qualification["failedChecks"])
+                        if qualification["failedChecks"] else
+                        "offline qualification passed; independent artifact-bound ticket validation is required")
     meta = {"id": model_id, "sport": "boat", "betType": "trifecta", "status": "candidate",
             "algorithm": "five-fit race-bootstrap pairwise logistic ranking + Plackett-Luce exact-order distribution",
             "ticketModelSchemaVersion": TICKET_SCHEMA,
             "ticketPredictionSemantics": PREDICTION_SEMANTICS,
-            "ticketBetType": "trifecta", "featureColumns": columns,
+            "ticketBetType": "trifecta", "boatFeatureSchemaVersion": feature_schema_version,
+            "featureColumns": columns,
             "trainFrom": dates(train_groups)[0], "trainTo": dates(train_groups)[-1],
             "validFrom": dates(valid_groups)[0], "validTo": dates(valid_groups)[-1],
             "testFrom": dates(test_groups)[0], "testTo": dates(test_groups)[-1],
             "nTrainRaces": len(train_groups), "nValidRaces": len(valid_groups), "nTestRaces": len(test_groups),
             "temperature": temperature, "calibration": "validation exact-order log loss",
             "metrics": {"exactOrderLogLoss": sum(losses) / len(losses),
-                        "uniformBaseline": {key: value for key, value in uniform_metrics.items() if key != "raceLogLosses"},
-                        "laneOrderBaseline": {key: value for key, value in lane_metrics.items() if key != "raceLogLosses"},
+                        "uniformBaseline": {key: value for key, value in uniform_metrics.items()
+                                            if key not in {"raceLogLosses", "raceBriers"}},
+                        "laneOrderBaseline": {key: value for key, value in lane_metrics.items()
+                                              if key not in {"raceLogLosses", "raceBriers"}},
                         "laneBaselineSmoothingAlpha": alpha,
+                        "candidateVsLaneLogLossRaceBootstrap": comparison["candidateVsLaneLogLossRaceBootstrap"],
+                        "candidateVsLaneLogLossDateCluster": comparison["candidateVsLaneLogLossDateCluster"],
+                        "candidateVsLaneBrierRaceBootstrap": comparison["candidateVsLaneBrierRaceBootstrap"],
+                        "candidateVsLaneBrierDateCluster": comparison["candidateVsLaneBrierDateCluster"],
                         "candidateVsLaneDateClusterInterval": _date_cluster_interval(
                             test_groups, candidate_metrics["raceLogLosses"], lane_metrics["raceLogLosses"]),
                         "multiclassBrier": candidate_metrics["multiclassBrier"],
@@ -512,21 +726,32 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
                         "topTicketEce": candidate_metrics["topTicketEce"],
                         "topTicketCalibration": candidate_metrics["topTicketCalibration"],
                         "exactTop3HitRate": top_one / len(test_groups),
+                        "nTestRaces": len(test_groups), "nTestDates": len(dates(test_groups)),
+                        "completeCombinationCoverage": candidate_metrics["nTicketEventRows"] == 120 * len(test_groups),
+                        "pointInTimeEvidenceComplete": coverage["promotionEvidenceComplete"],
+                        "qualification": qualification,
+                        "evaluationQualified": qualification["evaluationQualified"],
                         "payoutReplay": replay,
                         "profitabilityProven": False,
                         "promotionEligible": False,
-                        "promotionReason": "candidate-only: B-file point-in-time availability and positive expected value are not proven",
+                        "promotionReason": promotion_reason,
                         "ticketModelSchemaVersion": TICKET_SCHEMA,
                         "ticketPredictionSemantics": PREDICTION_SEMANTICS,
-                        "ticketBetType": "trifecta"},
+                        "ticketBetType": "trifecta",
+                        "boatFeatureSchemaVersion": feature_schema_version},
             "trainedAt": datetime.now(timezone.utc).isoformat(),
             "nBootstrapModels": len(bootstrap_models),
             "notes": "Candidate-only temporal evaluation; prob_std is between-fit SD (null unless five fits); no automatic promotion or prediction sync.",
-            "availableAtAssumption": "Historical B-file available_at is synthesized at local race-day midnight; actual publication timing is not verified."}
+            "coverage": coverage,
+            "availableAtAssumption": "B-file available_at is a race-day-midnight assumption unless source_available_at/source_observed_at plus a matching SHA-256 are present; independent arrival evidence is required for qualification."}
+    from edgelab.artifact_bundle import candidate_artifact_provenance
+    meta["artifactProvenance"] = candidate_artifact_provenance(model_id)
     artifact = {"metadata": meta, "model": model, "bootstrap_models": bootstrap_models,
                 "columns": columns, "temperature": temperature}
     with pkl_path.open("wb") as stream:
         pickle.dump(artifact, stream, protocol=pickle.HIGHEST_PROTOCOL)
     meta["ticketArtifactSha256"] = hashlib.sha256(pkl_path.read_bytes()).hexdigest()
     json_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    from edgelab.artifact_bundle import build_candidate_model_bundle
+    meta["candidateBundle"] = build_candidate_model_bundle(model_id, out)
     return meta
