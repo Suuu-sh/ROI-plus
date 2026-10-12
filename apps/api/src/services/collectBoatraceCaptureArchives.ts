@@ -1,6 +1,7 @@
 import { all, first, type Db, type Statement } from '../repo/db.js';
 import { beforeinfoUrl, parseBeforeinfoCapture, BEFOREINFO_ARCHIVE_PARSER_VERSION } from './boatraceBeforeinfo.js';
 import { parseTrifectaOdds, trifectaOddsUrl } from './boatraceTrifectaOdds.js';
+import { parseRaceListEntries, raceListUrl, RACELIST_ARCHIVE_PARSER_VERSION } from './boatraceRaceList.js';
 import { USER_AGENT } from './boatraceOdds.js';
 import { estimateWorkerWriteUnits, reserveWriteBudget, utcDate } from './writeBudget.js';
 
@@ -11,7 +12,6 @@ const MAX_BODY_BYTES = 512 * 1024;
 const MAX_ARCHIVE_BYTES = 32 * 1024;
 const MAX_RACES_PER_TICK = 4;
 const MAX_CANDIDATES = 180;
-const RECENT_CAPTURE_MS = 4 * 60_000;
 const SHA256 = /^[a-f0-9]{64}$/;
 
 export type SharedCaptureRequestBudget = { used: number; max: number };
@@ -23,6 +23,7 @@ type RaceCandidate = {
   post_time: string;
   entry_count: number;
 };
+type SavedEntry = { number: number; features_json: string | null };
 type Failure = { raceId: string; reason: string };
 type FetchResponse = Pick<Response, 'ok' | 'status' | 'headers' | 'body'>;
 export type CaptureArchiveOptions = {
@@ -53,19 +54,19 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
   const date = jstDate(at);
   if (!Number.isFinite(at) || maxRaces === 0) return { status: 'skipped' as const, reason: 'invalid_schedule_or_zero_capacity', targets: 0, attempted: 0, records: 0, failures: [] as Failure[], deferred: 0 };
 
-  const after = jstIso(at), before = jstIso(at + 15 * 60_000), fresh = jstIso(at - RECENT_CAPTURE_MS);
+  const after = jstIso(at), before = jstIso(at + 15 * 60_000);
   const candidates = await all<RaceCandidate>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date,r.post_time,
       (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real') entry_count
     FROM races r
     WHERE r.data_origin='real' AND r.sport='boat' AND r.status='scheduled' AND r.race_date=?
       AND r.post_time>=? AND r.post_time<=?
       AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-      AND NOT EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives a WHERE a.race_id=r.id AND a.captured_at>=?)
-    ORDER BY r.post_time ASC,r.id ASC LIMIT ?`, date, after, before, fresh, MAX_CANDIDATES);
+      AND NOT EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives a WHERE a.race_id=r.id)
+    ORDER BY r.post_time ASC,r.id ASC LIMIT ?`, date, after, before, MAX_CANDIDATES);
   if (!candidates.length) return { status: 'skipped' as const, reason: 'no_due_races', targets: 0, attempted: 0, records: 0, failures: [] as Failure[], deferred: 0 };
 
   const budget = Math.max(0, Math.floor(requestBudget.max - requestBudget.used));
-  const admittedCount = Math.min(maxRaces, candidates.filter(row => row.entry_count === 6).length, Math.floor(budget / 2));
+  const admittedCount = Math.min(maxRaces, candidates.filter(row => row.entry_count === 6).length, Math.floor(budget / 3));
   if (admittedCount === 0) {
     const reason = candidates.every(row => row.entry_count !== 6) ? 'no_six_lane_races' : 'shared_subrequest_budget_exhausted';
     return { status: 'skipped' as const, reason, targets: 0, attempted: 0, records: 0, failures: [] as Failure[], deferred: candidates.length };
@@ -132,18 +133,46 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
       lastAttemptKey = sortKey(race);
       const identity = { raceDate: race.race_date, venueCode: race.venue_id, raceNo: race.race_no };
       const beforeUrl = beforeinfoUrl(race.race_no, race.venue_id, race.race_date);
+      const raceListPageUrl = raceListUrl(race.race_no, race.venue_id, race.race_date);
       const oddsUrl = trifectaOddsUrl(race.race_no, race.venue_id, race.race_date);
       try {
+        const savedEntries = await all<SavedEntry>(db,
+          'SELECT number,features_json FROM entries WHERE race_id=? AND data_origin=\'real\' ORDER BY number', race.id);
+        const savedRacers = new Map<number, string>();
+        for (const entry of savedEntries) {
+          let racerId = '';
+          try { const value = JSON.parse(entry.features_json ?? '{}').racer_id; if (typeof value === 'string') racerId = value; } catch { /* malformed source identity fails closed */ }
+          if (/^\d{4,5}$/.test(racerId)) savedRacers.set(entry.number, racerId);
+        }
+        if (savedRacers.size !== 6) throw new CaptureFailure('saved_registry_incomplete');
+
+        const raceList = await fetchSource(raceListPageUrl, requestBudget, attempted, fetcher, sleep, clock);
+        attempted++;
+        const raceListEntries = parseRaceListEntries(raceList.text, identity);
+        if (raceListEntries.some(entry => savedRacers.get(entry.lane) !== entry.registrationNumber)) {
+          throw new CaptureFailure('racelist_registry_mismatch');
+        }
+
         const beforeinfo = await fetchSource(beforeUrl, requestBudget, attempted, fetcher, sleep, clock);
         attempted++;
         const parsedBeforeinfo = parseBeforeinfoCapture(beforeinfo.text, identity, beforeinfo.capturedAt);
         const cutoffMs = Date.parse(parsedBeforeinfo.cutoffAt);
-        if (!Number.isFinite(cutoffMs) || cutoffMs <= Date.parse(beforeinfo.capturedAt)) throw new CaptureFailure('beforeinfo_cutoff_elapsed');
+        const t60Ms = cutoffMs - 60_000;
+        const earliestMs = cutoffMs - 10 * 60_000;
+        const sourceTimes = [Date.parse(raceList.capturedAt), Date.parse(beforeinfo.capturedAt)];
+        if (!Number.isFinite(cutoffMs)) throw new CaptureFailure('beforeinfo_cutoff_invalid');
+        if (sourceTimes.some(value => !Number.isFinite(value) || value < earliestMs)) throw new CaptureFailure(sourceTimes[0] < earliestMs ? 'racelist_arrival_too_early' : 'beforeinfo_arrival_too_early');
+        if (sourceTimes.some(value => !Number.isFinite(value) || value > t60Ms)) throw new CaptureFailure('source_arrival_after_t60');
+        if (parsedBeforeinfo.exhibitions.length !== 6
+            || parsedBeforeinfo.exhibitions.some((entry, index) => entry.lane !== index + 1)
+            || !Object.keys(parsedBeforeinfo.weather).length) throw new CaptureFailure('beforeinfo_observations_incomplete');
 
         const odds = await fetchSource(oddsUrl, requestBudget, attempted, fetcher, sleep, clock);
         attempted++;
-        if (cutoffMs <= Date.parse(odds.capturedAt)) throw new CaptureFailure('trifecta_odds_after_cutoff');
+        const oddsAt = Date.parse(odds.capturedAt);
+        if (!Number.isFinite(oddsAt) || oddsAt < earliestMs || oddsAt > t60Ms) throw new CaptureFailure('odds_outside_t60_window');
         const parsedOdds = parseTrifectaOdds(odds.text, identity);
+        if (parsedOdds.final) throw new CaptureFailure('trifecta_market_final');
         if (parsedOdds.odds.length !== 120 || parsedOdds.odds.some(row => !Number.isFinite(row.odds) || row.odds <= 0)) {
           throw new CaptureFailure('trifecta_market_incomplete');
         }
@@ -157,6 +186,10 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
             url: beforeUrl, sha256: beforeinfo.sha256, capturedAt: beforeinfo.capturedAt,
             parserVersion: BEFOREINFO_ARCHIVE_PARSER_VERSION, ...parsedBeforeinfo,
           },
+          raceList: {
+            url: raceListPageUrl, sha256: raceList.sha256, capturedAt: raceList.capturedAt,
+            parserVersion: RACELIST_ARCHIVE_PARSER_VERSION, entries: raceListEntries,
+          },
           trifectaOdds: {
             url: oddsUrl, sha256: odds.sha256, capturedAt: odds.capturedAt,
             parserVersion: TRIFECTA_PARSER_VERSION, qualityStatus: parsedOdds.qualityStatus,
@@ -165,7 +198,7 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
         };
         const archiveJson = JSON.stringify(archive);
         if (new TextEncoder().encode(archiveJson).byteLength > MAX_ARCHIVE_BYTES) throw new CaptureFailure('archive_size_limit');
-        if (!SHA256.test(beforeinfo.sha256) || !SHA256.test(odds.sha256)) throw new CaptureFailure('source_hash_invalid');
+        if (!SHA256.test(raceList.sha256) || !SHA256.test(beforeinfo.sha256) || !SHA256.test(odds.sha256)) throw new CaptureFailure('source_hash_invalid');
         const id = `${race.id}:capture:${String(Math.floor(Date.parse(capturedAt))).padStart(13, '0')}`;
         statements.push(db.prepare(`INSERT INTO boatrace_prerace_capture_archives(id,race_id,race_date,captured_at,archive_json,data_origin)
           VALUES(?,?,?,?,?,'real') ON CONFLICT(race_id,captured_at) DO NOTHING`)

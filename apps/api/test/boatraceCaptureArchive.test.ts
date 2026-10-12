@@ -8,7 +8,7 @@ import { collectBoatraceCaptureArchives } from '../src/services/collectBoatraceC
 import { D1SqliteAdapter } from './d1-adapter.js';
 
 const root=resolve(import.meta.dirname,'../../..');
-const FIXED_NOW=Date.parse('2026-10-11T03:00:00Z'); // 12:00 JST; the official fixture cutoff is 15:19.
+const FIXED_NOW=Date.parse('2026-10-11T06:10:00Z'); // 15:10 JST; nine minutes before the official fixture cutoff.
 const jstIso=(ms:number)=>new Date(ms+9*60*60*1000).toISOString().replace('Z','+09:00');
 let sqlite:Sqlite.Database,DB:D1SqliteAdapter;
 let beforeinfo:string;
@@ -33,8 +33,8 @@ function addRace(raceNo=1,postOffsetMs=10*60_000){
   sqlite.prepare("INSERT OR IGNORE INTO venues(id,sport,name) VALUES('01','boat','Archive fixture')").run();
   sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES(?,'boat','01',?,?,?,'scheduled','real',?)")
     .run(id,date,raceNo,jstIso(FIXED_NOW+postOffsetMs),jstIso(FIXED_NOW));
-  for(let lane=1;lane<=6;lane++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,available_at,data_origin) VALUES(?,?,?,? ,?,'real')")
-    .run(`${id}-entry-${lane}`,id,lane,`Runner ${lane}`,jstIso(FIXED_NOW-60_000));
+  for(let lane=1;lane<=6;lane++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,features_json,available_at,data_origin) VALUES(?,?,?,?,?,?, 'real')")
+    .run(`${id}-entry-${lane}`,id,lane,`Runner ${lane}`,JSON.stringify({racer_id:String(4000+lane)}),jstIso(FIXED_NOW-60_000));
   return id;
 }
 
@@ -42,7 +42,12 @@ function fetchFor(day:string,raceNo:number,replaceOdds?:(html:string)=>string,re
   const odds=replaceOdds?replaceOdds(oddsPage(day,raceNo)):oddsPage(day,raceNo);
   const identityCorrected=raceNo===1?beforeinfo:beforeinfo.replaceAll('rno=1',`rno=${raceNo}`);
   const before=replaceBeforeinfo?replaceBeforeinfo(identityCorrected):identityCorrected;
-  return async(input:string)=>new Response(input.includes('/beforeinfo?')?before:odds,{status:200,headers:{'content-type':'text/html; charset=utf-8'}});
+  return async(input:string)=>new Response(input.includes('/beforeinfo?')?before:input.includes('/racelist?')?raceListPage(day,raceNo):odds,{status:200,headers:{'content-type':'text/html; charset=utf-8'}});
+}
+
+function raceListPage(day:string,raceNo:number){
+  const rows=Array.from({length:6},(_,index)=>`<tr><td>${index+1}</td><td><span class="is-fs12">${4001+index}</span>Runner ${index+1}</td></tr>`).join('');
+  return `<div class="tab3"><a href="/owpc/pc/race/racelist?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">出走表</a><a href="/owpc/pc/race/raceresult?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">結果</a></div><table><thead><tr><th>枠</th><th>ボートレーサー</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 beforeEach(()=>{
@@ -60,12 +65,13 @@ describe('data-only prerace capture archive',()=>{
     const result=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{
       now:()=>FIXED_NOW,requestBudget,sleep:async ms=>{pauses.push(ms)},fetch:fetchFor('2026-10-11',1),
     });
-    expect(result).toMatchObject({status:'success',targets:1,attempted:2,records:1,failures:[]});
-    expect(requestBudget.used).toBe(2);expect(pauses).toEqual([3000]);
+    expect(result).toMatchObject({status:'success',targets:1,attempted:3,records:1,failures:[]});
+    expect(requestBudget.used).toBe(3);expect(pauses).toEqual([3000,3000]);
     const row=sqlite.prepare('SELECT id,race_id,captured_at,archive_json FROM boatrace_prerace_capture_archives').get() as any;
     const archive=JSON.parse(row.archive_json);
     expect(row.race_id).toBe(raceId);
-    expect(archive).toMatchObject({schema:'boat-prerace-capture-v1',race:{id:raceId,lanes:[1,2,3,4,5,6]},beforeinfo:{parserVersion:'boatrace-beforeinfo-v1',cutoffAt:'2026-10-11T15:19:00+09:00'},trifectaOdds:{parserVersion:'boatrace-trifecta-odds-v1',qualityStatus:'verified-complete-v1'}});
+    expect(archive).toMatchObject({schema:'boat-prerace-capture-v1',race:{id:raceId,lanes:[1,2,3,4,5,6]},raceList:{parserVersion:'boatrace-racelist-v1'},beforeinfo:{parserVersion:'boatrace-beforeinfo-v1',cutoffAt:'2026-10-11T15:19:00+09:00'},trifectaOdds:{parserVersion:'boatrace-trifecta-odds-v1',qualityStatus:'verified-complete-v1'}});
+    expect(archive.raceList.entries).toHaveLength(6);
     expect(archive.beforeinfo.exhibitions).toHaveLength(6);
     expect(archive.beforeinfo.exhibitions[0]).toMatchObject({lane:1,exhibitionTime:6.78,tilt:-0.5,weight:53.3,startCourse:1,startTime:0.11,falseStart:false});
     expect(archive.beforeinfo.exhibitions[5].falseStart).toBe(true);
@@ -84,7 +90,7 @@ describe('data-only prerace capture archive',()=>{
   });
 
   it('rejects incomplete markets, records a fixed failure reason, and rotates to the next race',async()=>{
-    const first=addRace(1,10*60_000),second=addRace(2,11*60_000);
+    const first=addRace(1,10*60_000),second=addRace(2,38*60_000);
     const broken=fetchFor('2026-10-11',1,html=>html.replace('3連単オッズ','unrecognized market'));
     const initial=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{
       maxRaces:1,now:()=>FIXED_NOW,fetch:broken,sleep:async()=>{},
@@ -94,8 +100,8 @@ describe('data-only prerace capture archive',()=>{
     const logged=sqlite.prepare("SELECT error,reason FROM collection_runs WHERE source='boatrace-prerace-archive-worker-v1'").get() as any;
     expect(logged.error).toContain(`${first}:trifecta_market_incomplete`);
     const calls:string[]=[];
-    const next=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW+60_000),{
-      maxRaces:1,now:()=>FIXED_NOW+60_000,sleep:async()=>{},fetch:async url=>{calls.push(url);return fetchFor('2026-10-11',2)(url);},
+    const next=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW+28*60_000),{
+      maxRaces:1,now:()=>FIXED_NOW+28*60_000,sleep:async()=>{},fetch:async url=>{calls.push(url);return fetchFor('2026-10-11',2)(url);},
     });
     expect(next).toMatchObject({status:'success',targets:1,records:1});
     expect(calls[0]).toContain('rno=2');
@@ -103,14 +109,14 @@ describe('data-only prerace capture archive',()=>{
   });
 
   it('advances past six-row candidates with an invalid lane set so later races are not starved',async()=>{
-    const invalid=addRace(1,10*60_000),second=addRace(2,11*60_000);
+    const invalid=addRace(1,10*60_000),second=addRace(2,38*60_000);
     sqlite.prepare('UPDATE entries SET number=7 WHERE race_id=? AND number=6').run(invalid);
     const first=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{
       maxRaces:1,now:()=>FIXED_NOW,sleep:async()=>{},fetch:fetchFor('2026-10-11',1),
     });
     expect(first).toMatchObject({status:'skipped',reason:'no_valid_six_lane_races',failures:[{raceId:invalid,reason:'entry_lane_set_not_six'}]});
-    const secondRun=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW+60_000),{
-      maxRaces:1,now:()=>FIXED_NOW+60_000,sleep:async()=>{},fetch:fetchFor('2026-10-11',2),
+    const secondRun=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW+28*60_000),{
+      maxRaces:1,now:()=>FIXED_NOW+28*60_000,sleep:async()=>{},fetch:fetchFor('2026-10-11',2),
     });
     expect(secondRun).toMatchObject({status:'success',records:1});
     expect(sqlite.prepare('SELECT race_id FROM boatrace_prerace_capture_archives').get()).toMatchObject({race_id:second});
@@ -130,12 +136,13 @@ describe('data-only prerace capture archive',()=>{
   });
 
   it('exports a single date through existing bearer auth with a bounded cursor page',async()=>{
-    const first=addRace(),second=addRace(2,11*60_000);
+    const first=addRace(),second=addRace(2,38*60_000);
     const fetch=async(input:string)=>{
       const raceNo=Number(new URL(input).searchParams.get('rno'));
       return fetchFor('2026-10-11',raceNo)(input);
     };
     await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{now:()=>FIXED_NOW,sleep:async()=>{},fetch});
+    await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW+28*60_000),{now:()=>FIXED_NOW+28*60_000,sleep:async()=>{},fetch});
     const path='/api/ingest/prerace-capture-archives?date=2026-10-11&limit=1';
     expect((await app.request(path,{}, {DB,INGEST_TOKEN:'test-token'})).status).toBe(401);
     const response=await app.request(path,{headers:{authorization:'Bearer test-token'}},{DB,INGEST_TOKEN:'test-token'});
