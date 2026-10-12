@@ -24,6 +24,7 @@ function OriginToggle() {
   return (
     <Segmented<OriginFilter>
       size="sm"
+      ariaLabel="表示データ"
       value={origin}
       onChange={setOrigin}
       options={[

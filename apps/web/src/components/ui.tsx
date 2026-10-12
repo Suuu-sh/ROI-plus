@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react'
+import { useLayoutEffect, useRef } from 'react'
+import type { KeyboardEvent, ReactNode } from 'react'
 import type { DataOrigin, EdgeLabel, Sport } from '@edgelab/shared/src/types'
 import { t } from '../i18n'
 
@@ -48,20 +49,20 @@ export function SportIcon({ sport, className = 'h-4 w-4' }: { sport: Sport; clas
 
 export function Kpi({ label, value, sub, valueClass = '' }: { label: string; value: ReactNode; sub?: ReactNode; valueClass?: string }) {
   return (
-    <div className="card p-4">
-      <div className="label">{label}</div>
-      <div className={`num mt-1.5 text-2xl font-semibold tracking-tight ${valueClass}`}>{value}</div>
-      {sub != null && <div className="num mt-1 text-xs text-muted">{sub}</div>}
-    </div>
+    <dl className="card min-w-0 p-4">
+      <dt className="label min-w-0 break-words">{label}</dt>
+      <dd className={`num mt-1.5 min-w-0 break-words text-xl font-semibold tracking-tight sm:text-2xl ${valueClass}`}>{value}</dd>
+      {sub != null && <dd className="num mt-2 min-w-0 break-words border-t border-line pt-2 text-xs text-muted">{sub}</dd>}
+    </dl>
   )
 }
 
 export function Section({ title, right, children, className = '' }: { title: ReactNode; right?: ReactNode; children: ReactNode; className?: string }) {
   return (
     <section className={`card ${className}`}>
-      <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
-        <h2 className="text-sm font-semibold">{title}</h2>
-        {right}
+      <header className="flex min-w-0 flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
+        <h2 className="min-w-0 flex-1 break-words text-sm font-semibold">{title}</h2>
+        {right != null && <div className="min-w-0 max-w-full shrink-0 [overflow-wrap:anywhere]">{right}</div>}
       </header>
       <div>{children}</div>
     </section>
@@ -86,9 +87,9 @@ export function ProbBar({ p, breakEven }: { p: number | null; breakEven: number 
 
 export function Loading({ rows = 3 }: { rows?: number }) {
   return (
-    <div className="space-y-2 p-4">
+    <div className="space-y-2 p-4" role="status" aria-label="読み込み中">
       {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="h-8 animate-pulse rounded-md bg-raised" style={{ opacity: 1 - i * 0.2 }} />
+        <div key={i} aria-hidden="true" className="h-8 animate-pulse rounded-md bg-raised motion-reduce:animate-none" style={{ opacity: Math.max(0.3, 1 - i * 0.2) }} />
       ))}
     </div>
   )
@@ -119,19 +120,68 @@ export function Empty({ children }: { children: ReactNode }) {
   return <div className="px-4 py-10 text-center text-sm text-muted">{children}</div>
 }
 
-export function Segmented<T extends string>({ value, options, onChange, size = 'md' }: {
-  value: T; options: { value: T; label: ReactNode }[]; onChange: (v: T) => void; size?: 'sm' | 'md'
+export function Segmented<T extends string>({ value, options, onChange, size = 'md', ariaLabel = '表示切り替え' }: {
+  value: T; options: { value: T; label: ReactNode }[]; onChange: (v: T) => void; size?: 'sm' | 'md'; ariaLabel?: string
 }) {
+  const groupRef = useRef<HTMLDivElement>(null)
+  const selectedIndex = options.findIndex((option) => option.value === value)
+  const tabStopIndex = selectedIndex >= 0 ? selectedIndex : options.length > 0 ? 0 : -1
+
+  useLayoutEffect(() => {
+    const group = groupRef.current
+    if (!group || tabStopIndex < 0) return
+    const selected = group.querySelectorAll<HTMLButtonElement>('button')[tabStopIndex]
+    if (!selected) return
+
+    const keepSelectedVisible = () => {
+      const groupRect = group.getBoundingClientRect()
+      const selectedRect = selected.getBoundingClientRect()
+      const visibleLeft = groupRect.left + group.clientLeft
+      const visibleRight = visibleLeft + group.clientWidth
+      let adjustment = 0
+      if (selectedRect.width >= group.clientWidth) {
+        // An option wider than the viewport cannot fit; keep its leading edge visible.
+        adjustment = selectedRect.left - visibleLeft
+      } else if (selectedRect.left < visibleLeft) {
+        adjustment = selectedRect.left - visibleLeft
+      } else if (selectedRect.right > visibleRight) {
+        adjustment = selectedRect.right - visibleRight
+      }
+      if (adjustment !== 0) group.scrollLeft += adjustment
+    }
+
+    keepSelectedVisible()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(keepSelectedVisible)
+    observer.observe(group)
+    return () => observer.disconnect()
+  }, [tabStopIndex, value, options])
+
+  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    if (options.length === 0) return
+    let nextIndex: number | null = null
+    if (event.key === 'ArrowRight') nextIndex = (index + 1) % options.length
+    else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + options.length) % options.length
+    else if (event.key === 'Home') nextIndex = 0
+    else if (event.key === 'End') nextIndex = options.length - 1
+    if (nextIndex == null) return
+    event.preventDefault()
+    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('button')[nextIndex]?.focus()
+    onChange(options[nextIndex].value)
+  }
+
   return (
-    <div className="inline-flex rounded-lg border border-line bg-raised p-0.5" role="tablist">
-      {options.map((o) => (
+    <div ref={groupRef} className="segmented-control inline-flex max-w-full overflow-x-auto rounded-lg border border-line bg-raised p-0.5" role="group" aria-label={ariaLabel}>
+      {options.map((o, index) => (
         <button
           key={o.value}
-          role="tab"
-          aria-selected={value === o.value}
+          type="button"
+          aria-pressed={value === o.value}
+          tabIndex={index === tabStopIndex ? 0 : -1}
           onClick={() => onChange(o.value)}
-          className={`focus-ring rounded-md font-medium transition-colors ${size === 'sm' ? 'h-7 px-2.5 text-xs' : 'h-8 px-3 text-sm'} ${
-            value === o.value ? 'bg-surface text-ink shadow-sm' : 'text-muted hover:text-ink'
+          onKeyDown={(event) => handleKeyDown(event, index)}
+          className={`focus-ring shrink-0 whitespace-nowrap rounded-md font-medium transition-colors motion-reduce:transition-none focus-visible:ring-inset ${size === 'sm' ? 'h-7 px-2.5 text-xs' : 'h-8 px-3 text-sm'} ${
+            value === o.value ? 'border border-line bg-surface text-ink shadow-sm' : 'border border-transparent text-muted hover:bg-surface/60 hover:text-ink'
           }`}
         >
           {o.label}
