@@ -119,6 +119,9 @@ function parseList(body: unknown): Record<string, unknown>[] | null {
   return rows && rows.every((x: unknown) => x && typeof x === 'object' && !Array.isArray(x)) ? rows as Record<string, unknown>[] : null;
 }
 const jstRaceDate = (date = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+const isIsoCalendarDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)
+  && Number.isFinite(Date.parse(`${value}T00:00:00Z`))
+  && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 function raceDateWindow() {
   const today = jstRaceDate(), yesterday = new Date(`${today}T00:00:00+09:00`);
   yesterday.setUTCDate(yesterday.getUTCDate() - 1);
@@ -485,6 +488,12 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
     evaluatedRaceCount: 0, purchasedRaceCount: 0, boughtBetCount: 0, abstainedByReason: {}, unrecordedAbstentionCount: 0,
     comparisons: PAPER_COMPARISON_PHASES };
   if (!enabled || (await setting(db, 'auto_bet_paused', 'false')) === 'true' || !Number.isFinite(decisionAt)) {
+    return { bought: 0, report };
+  }
+  // Optional operator guard for a future scheduled start. Missing preserves
+  // legacy behavior; malformed configured dates fail closed.
+  const startDate = await setting(db, 'auto_bet_start_date', '');
+  if (startDate && (!isIsoCalendarDate(startDate) || jstRaceDate(new Date(decisionAt)) < startDate)) {
     return { bought: 0, report };
   }
   const inputAsOfAt = decisionAt;

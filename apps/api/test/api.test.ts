@@ -411,6 +411,18 @@ describe('EdgeLab API',()=>{
   expect(sqlite.prepare("SELECT SUM(stake) stake FROM bets WHERE status='open'").get()).toMatchObject({stake:100});
   expect(sqlite.prepare("SELECT COUNT(*) n FROM paper_decisions WHERE phase='primary_t60' AND outcome='abstained'").get()).toMatchObject({n:2});
  });
+ it('honors the configured JST auto-bet start date and fails closed for malformed dates',async()=>{
+  const {raceId,decisionAt}=addPaperTrifecta('boat-20990101-99-03','boat-trifecta-start-date');
+  const setStart=(value:string)=>sqlite.prepare("INSERT INTO settings(key,value) VALUES('auto_bet_start_date',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(value);
+  const tomorrow=jstDate(new Date(decisionAt+24*60*60_000));
+  setStart(tomorrow);
+  expect(await autoBet(DB,true,decisionAt)).toBe(0);
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM paper_decisions WHERE race_id=? AND phase='primary_t60'").get(raceId)).toMatchObject({n:0});
+  setStart('2026-02-30');
+  expect(await autoBet(DB,true,decisionAt)).toBe(0);
+  setStart(jstDate(new Date(decisionAt)));
+  expect(await autoBet(DB,true,decisionAt)).toBeGreaterThan(0);
+ });
  it('splits a bounded auto race budget across ranked picks and records one complete group',async()=>{
   const {raceId,decisionAt}=addPaperTrifecta('boat-20990101-99-02','boat-trifecta-multi');
   sqlite.prepare("UPDATE settings SET value='2' WHERE key='auto_bet_max_picks'").run();
