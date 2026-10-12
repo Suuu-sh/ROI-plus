@@ -1,11 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { compareMigrationNames, parseWranglerLedgerJson } from "./check-d1-migrations-ready.mjs";
+import { readFile } from "node:fs/promises";
 
 const migration8 = "0008_paper_decision_timing.sql";
 const migration9 = "0009_verified_betting_cutoff.sql";
 const migration10 = "0010_boatrace_prerace_observations.sql";
 const migration11 = "0011_boatrace_capture_archives.sql";
+
+test("main deployment push filter covers release and D1 readiness inputs", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/deploy-workers.yml", import.meta.url), "utf8");
+  const push = workflow.split("  push:\n")[1]?.split("\npermissions:")[0];
+  assert.ok(push, "the deployment workflow must define a push trigger");
+  const pushLines = push.split("\n");
+  assert.ok(pushLines.some((line) => line.trim() === "branches: [main]"), "deployment trigger must target main");
+
+  const pathsHeader = pushLines.findIndex((line) => line.trim() === "paths:");
+  assert.notEqual(pathsHeader, -1, "the main push trigger must declare path filters");
+  const paths = pushLines.slice(pathsHeader + 1)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(2).replaceAll("'", ""));
+  for (const requiredPath of [
+    "apps/api/**",
+    "apps/web/**",
+    "packages/shared/**",
+    "package.json",
+    "package-lock.json",
+    ".github/workflows/deploy-workers.yml",
+    "db/migrations/**",
+    "scripts/check-d1-migrations-ready.mjs",
+    "scripts/check-d1-migrations-ready.test.mjs",
+  ]) {
+    assert.ok(paths.includes(requiredPath), `deployment trigger is missing ${requiredPath}`);
+  }
+});
 
 test("parses the Wrangler D1 JSON result shape", () => {
   const names = parseWranglerLedgerJson(JSON.stringify([{
