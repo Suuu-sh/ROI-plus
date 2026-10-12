@@ -267,6 +267,8 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
         "calibration": "validation race-wise temperature scaling", "metrics": metrics,
         "trainedAt": datetime.now(timezone.utc).isoformat(), "featureColumns": columns,
         "nBootstrapModels": len(bootstrap_models), "notes": "prob_std is standard deviation across race-bootstrap models"}
+    from edgelab.artifact_bundle import candidate_artifact_provenance
+    meta["artifactProvenance"] = candidate_artifact_provenance(model_id)
     if sport == "boat" and boat_venue_schema_version:
         if (not corrected_training_data_sha256 or len(corrected_training_data_sha256) != 64
                 or any(char not in "0123456789abcdef" for char in corrected_training_data_sha256)):
