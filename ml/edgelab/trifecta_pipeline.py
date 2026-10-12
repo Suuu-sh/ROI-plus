@@ -11,7 +11,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 
 from edgelab.importers.boatrace_capture_archive import import_capture_archives
@@ -52,37 +52,31 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
 
     from edgelab.cli import _make_training_rows
     from edgelab.features.boat import PRERACE_V2_SCHEMA
-    from edgelab.models.trifecta_coverage import _entry_coverage, _t60_cutoff, audit_trifecta_coverage
-    training_rows = _make_training_rows(rows, "boat", feature_schema=PRERACE_V2_SCHEMA)
+    from edgelab.models.trifecta_coverage import audit_trifecta_coverage
+    all_training_rows = _make_training_rows(rows, "boat", feature_schema=PRERACE_V2_SCHEMA)
+    training_rows = _make_training_rows(rows, "boat", feature_schema=PRERACE_V2_SCHEMA,
+                                        require_source_arrival=True)
     coverage = audit_trifecta_coverage(rows, training_rows)
     training_race_ids = {str(item.get("race_id")) for item in training_rows if item.get("race_id")}
-    race_by_id = {str(item.get("id")): item for item in rows.get("races", [])}
-    entries_by_race: dict[str, list[dict]] = {}
-    for item in rows.get("entries", []):
-        entries_by_race.setdefault(str(item.get("race_id")), []).append(item)
-    source_proven_races = set()
-    for race_id in training_race_ids:
-        race = race_by_id.get(race_id)
-        cutoff, _ = _t60_cutoff(race or {})
-        if cutoff is None:
-            continue
-        available, source_arrival, _ = _entry_coverage(entries_by_race.get(race_id, []), cutoff)
-        if available and source_arrival:
-            source_proven_races.add(race_id)
-    source_arrival_complete_for_training = bool(training_race_ids) and source_proven_races == training_race_ids
+    all_training_race_ids = {str(item.get("race_id")) for item in all_training_rows if item.get("race_id")}
     report["coverage"] = {key: coverage[key] for key in (
         "status", "finishedRealBoatRaces", "distinctRaceDates", "completeEvidenceRaces",
         "trainingRaceIdsPresentInStore", "promotionEvidenceComplete", "counts", "exclusions")}
     # The trainer owns its hard temporal/holdout qualification checks; do not
     # relax them here. Only attempt once the immutable PIT feature pipeline has
     # built enough eligible races for its documented 300-race floor.
-    report["training"]["eligibleRealRaceCount"] = len(source_proven_races)
-    report["training"]["unprovenRealRaceCount"] = len(training_race_ids - source_proven_races)
-    if train and source_arrival_complete_for_training and len(source_proven_races) >= 300:
-        digest = hashlib.sha256("|".join(sorted(training_race_ids)).encode()).hexdigest()[:8]
-        candidate_id = f"boat-trifecta-lgbm-{datetime.now(timezone.utc):%Y%m%d}-{digest}"
+    report["training"]["eligibleRealRaceCount"] = len(training_race_ids)
+    report["training"]["unprovenRealRaceCount"] = len(all_training_race_ids - training_race_ids)
+    if train and len(training_race_ids) >= 300:
+        cohort_payload = json.dumps(training_rows, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":"), default=str, allow_nan=False)
+        digest = hashlib.sha256(cohort_payload.encode()).hexdigest()[:16]
+        candidate_id = f"boat-trifecta-lgbm-pit-{digest}"
         report["training"]["candidateId"] = candidate_id
-        existing_candidate = any(str(model.get("id")) == candidate_id for model in rows.get("models", []))
+        artifact_dir = Path("ml/artifacts")
+        existing_candidate = (any(str(model.get("id")) == candidate_id for model in rows.get("models", []))
+                              or (artifact_dir / f"{candidate_id}.pkl").exists()
+                              or (artifact_dir / f"{candidate_id}.json").exists())
         if existing_candidate:
             report["training"]["status"] = "candidate_already_exists_for_cohort"
             target = Path(report_path).with_name("trifecta-pipeline-summary.json")

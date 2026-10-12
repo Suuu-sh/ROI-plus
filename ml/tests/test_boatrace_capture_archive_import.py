@@ -182,6 +182,27 @@ def test_imported_archive_features_flow_to_training_at_verified_t60():
     assert len(rows) == 6
     assert {row["predicted_at"] for row in rows} == {"2026-10-11T15:18:00+09:00"}
     assert rows[0]["exhibition_time"] == 6.78
+    assert _make_training_rows(store, "boat", feature_schema="boat-prerace-v2",
+                               require_source_arrival=True) == []
+    # A matching racelist identity alone cannot certify B-file numeric fields.
+    race2_id = "boat-20261011-01-02"
+    race2 = {**store["races"][0], "id": race2_id, "race_no": 2}
+    store["races"].append(race2)
+    store["entries"].extend({**entry, "race_id": race2_id} for entry in store["entries"][:6])
+    store["results"].extend({**result, "race_id": race2_id} for result in store["results"][:6])
+    store["prerace_observations"].extend(
+        {**observation, "id": observation["id"].replace(RACE_ID, race2_id), "race_id": race2_id,
+         "source_url": observation["source_url"].replace("rno=1", "rno=2")}
+        for observation in store["prerace_observations"][:14])
+    # Only the second race's B bytes have independent arrival metadata.
+    for entry in store["entries"][6:]:
+        entry["available_at"] = "2026-10-11T15:17:00+09:00"
+        entry["source_available_at"] = "2026-10-11T15:17:00+09:00"
+        entry["source_sha256"] = "d" * 64
+    verified_rows = _make_training_rows(store, "boat", feature_schema="boat-prerace-v2",
+                                        require_source_arrival=True)
+    assert len(verified_rows) == 6
+    assert {row["race_id"] for row in verified_rows} == {race2_id}
 
 
 class _Response:

@@ -322,7 +322,8 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
 
 
 def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
-                       feature_schema: str = "boat-base-v1") -> list[dict[str, Any]]:
+                       feature_schema: str = "boat-base-v1",
+                       require_source_arrival: bool = False) -> list[dict[str, Any]]:
     outcomes = {(row.get("race_id"), row.get("number")): row.get("finish_order")
                 for row in store.get("results", []) if row.get("data_origin") == "real"}
     races = {row.get("id"): row for row in store.get("races", [])
@@ -354,6 +355,11 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
                         continue
                 except (TypeError, ValueError):
                     continue
+                if require_source_arrival:
+                    from edgelab.models.trifecta_coverage import _entry_coverage
+                    available, source_proven, _ = _entry_coverage(group, target_at)
+                    if not available or not source_proven:
+                        continue
                 features = build_boat_prerace_v2_features(group, race=race, predicted_at=predicted_at,
                     history=history, observations=store.get("prerace_observations", []))
                 from edgelab.features.boat import PRERACE_V2_FEATURE_COLUMNS
@@ -823,7 +829,8 @@ def main(argv: list[str] | None = None) -> int:
         from edgelab.models.trifecta import train_trifecta
         rows = load_rows(args.store)
         from edgelab.features.boat import PRERACE_V2_SCHEMA
-        training_rows = _make_training_rows(rows, "boat", feature_schema=PRERACE_V2_SCHEMA)
+        training_rows = _make_training_rows(rows, "boat", feature_schema=PRERACE_V2_SCHEMA,
+                                            require_source_arrival=True)
         digest = hashlib.sha256("|".join(sorted({str(r.get("race_id")) for r in training_rows})).encode()).hexdigest()[:8]
         model_id = args.model_id or f"boat-trifecta-lgbm-{datetime.now(timezone.utc):%Y%m%d}-{digest}"
         if any(str(model.get("id")) == model_id for model in rows.get("models", [])):
