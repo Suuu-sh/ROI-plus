@@ -9,6 +9,10 @@ on:
       - 'packages/shared/**'
       - 'package.json'
       - 'package-lock.json'
+      - '.github/workflows/deploy-workers.yml'
+      - 'db/migrations/**'
+      - 'scripts/check-d1-migrations-ready.mjs'
+      - 'scripts/check-d1-migrations-ready.test.mjs'
 
 permissions:
   contents: read
