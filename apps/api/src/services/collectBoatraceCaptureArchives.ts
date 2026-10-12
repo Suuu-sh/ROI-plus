@@ -2,6 +2,7 @@ import { all, first, type Db, type Statement } from '../repo/db.js';
 import { beforeinfoUrl, parseBeforeinfoCapture, BEFOREINFO_ARCHIVE_PARSER_VERSION } from './boatraceBeforeinfo.js';
 import { parseTrifectaOdds, trifectaOddsUrl } from './boatraceTrifectaOdds.js';
 import { parseRaceListEntries, raceListUrl, RACELIST_ARCHIVE_PARSER_VERSION } from './boatraceRaceList.js';
+import { parseBoatraceCutoff } from './boatraceCutoff.js';
 import { USER_AGENT } from './boatraceOdds.js';
 import { estimateWorkerWriteUnits, reserveWriteBudget, utcDate } from './writeBudget.js';
 
@@ -149,6 +150,7 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
         const raceList = await fetchSource(raceListPageUrl, requestBudget, attempted, fetcher, sleep, clock);
         attempted++;
         const raceListEntries = parseRaceListEntries(raceList.text, identity);
+        const raceListCutoff = `${race.race_date}T${parseBoatraceCutoff(raceList.text, identity)}:00+09:00`;
         if (raceListEntries.some(entry => savedRacers.get(entry.lane) !== entry.registrationNumber)) {
           throw new CaptureFailure('racelist_registry_mismatch');
         }
@@ -156,6 +158,7 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
         const beforeinfo = await fetchSource(beforeUrl, requestBudget, attempted, fetcher, sleep, clock);
         attempted++;
         const parsedBeforeinfo = parseBeforeinfoCapture(beforeinfo.text, identity, beforeinfo.capturedAt);
+        if (raceListCutoff !== parsedBeforeinfo.cutoffAt) throw new CaptureFailure('racelist_cutoff_mismatch');
         const cutoffMs = Date.parse(parsedBeforeinfo.cutoffAt);
         const t60Ms = cutoffMs - 60_000;
         const earliestMs = cutoffMs - 10 * 60_000;
@@ -188,7 +191,7 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
           },
           raceList: {
             url: raceListPageUrl, sha256: raceList.sha256, capturedAt: raceList.capturedAt,
-            parserVersion: RACELIST_ARCHIVE_PARSER_VERSION, entries: raceListEntries,
+            parserVersion: RACELIST_ARCHIVE_PARSER_VERSION, cutoffAt: raceListCutoff, entries: raceListEntries,
           },
           trifectaOdds: {
             url: oddsUrl, sha256: odds.sha256, capturedAt: odds.capturedAt,

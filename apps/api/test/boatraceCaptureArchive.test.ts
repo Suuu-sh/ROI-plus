@@ -38,16 +38,18 @@ function addRace(raceNo=1,postOffsetMs=10*60_000){
   return id;
 }
 
-function fetchFor(day:string,raceNo:number,replaceOdds?:(html:string)=>string,replaceBeforeinfo?:(html:string)=>string){
+function fetchFor(day:string,raceNo:number,replaceOdds?:(html:string)=>string,replaceBeforeinfo?:(html:string)=>string,replaceRaceList?:(html:string)=>string){
   const odds=replaceOdds?replaceOdds(oddsPage(day,raceNo)):oddsPage(day,raceNo);
   const identityCorrected=raceNo===1?beforeinfo:beforeinfo.replaceAll('rno=1',`rno=${raceNo}`);
   const before=replaceBeforeinfo?replaceBeforeinfo(identityCorrected):identityCorrected;
-  return async(input:string)=>new Response(input.includes('/beforeinfo?')?before:input.includes('/racelist?')?raceListPage(day,raceNo):odds,{status:200,headers:{'content-type':'text/html; charset=utf-8'}});
+  const racelist=replaceRaceList?replaceRaceList(raceListPage(day,raceNo)):raceListPage(day,raceNo);
+  return async(input:string)=>new Response(input.includes('/beforeinfo?')?before:input.includes('/racelist?')?racelist:odds,{status:200,headers:{'content-type':'text/html; charset=utf-8'}});
 }
 
 function raceListPage(day:string,raceNo:number){
+  const cutoff=['15:19','15:47','16:17','16:47','17:17','17:48','18:17','18:48','19:16','19:48','20:17','20:45'][raceNo-1];
   const rows=Array.from({length:6},(_,index)=>`<tbody><tr><td rowspan="4">${index+1}</td><td rowspan="4"><a href="/owpc/pc/data/racersearch/profile?toban=${4001+index}">Runner ${index+1}</a></td></tr><tr><td>detail A</td></tr><tr><td>detail B</td></tr><tr><td>detail C</td></tr></tbody>`).join('');
-  return `<div class="tab3"><a href="/owpc/pc/race/racelist?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">出走表</a><a href="/owpc/pc/race/raceresult?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">結果</a></div><table><thead><tr><th>枠</th><th>ボートレーサー</th><th>登録情報</th></tr></thead>${rows}</table>`;
+  return `<div class="tab3"><a href="/owpc/pc/race/racelist?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">出走表</a><a href="/owpc/pc/race/raceresult?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">結果</a></div><table><thead><tr><th>枠</th><th>ボートレーサー</th><th>登録情報</th></tr></thead><tbody><tr><th>締切予定時刻</th><td>${cutoff}</td></tr></tbody>${rows}</table>`;
 }
 
 beforeEach(()=>{
@@ -70,7 +72,7 @@ describe('data-only prerace capture archive',()=>{
     const row=sqlite.prepare('SELECT id,race_id,captured_at,archive_json FROM boatrace_prerace_capture_archives').get() as any;
     const archive=JSON.parse(row.archive_json);
     expect(row.race_id).toBe(raceId);
-    expect(archive).toMatchObject({schema:'boat-prerace-capture-v1',race:{id:raceId,lanes:[1,2,3,4,5,6]},raceList:{parserVersion:'boatrace-racelist-v1'},beforeinfo:{parserVersion:'boatrace-beforeinfo-v1',cutoffAt:'2026-10-11T15:19:00+09:00'},trifectaOdds:{parserVersion:'boatrace-trifecta-odds-v1',qualityStatus:'verified-complete-v1'}});
+    expect(archive).toMatchObject({schema:'boat-prerace-capture-v1',race:{id:raceId,lanes:[1,2,3,4,5,6]},raceList:{parserVersion:'boatrace-racelist-v1',cutoffAt:'2026-10-11T15:19:00+09:00'},beforeinfo:{parserVersion:'boatrace-beforeinfo-v1',cutoffAt:'2026-10-11T15:19:00+09:00'},trifectaOdds:{parserVersion:'boatrace-trifecta-odds-v1',qualityStatus:'verified-complete-v1'}});
     expect(archive.raceList.entries).toHaveLength(6);
     expect(archive.beforeinfo.exhibitions).toHaveLength(6);
     expect(archive.beforeinfo.exhibitions[0]).toMatchObject({lane:1,exhibitionTime:6.78,tilt:-0.5,weight:53.3,startCourse:1,startTime:0.11,falseStart:false});
@@ -106,6 +108,15 @@ describe('data-only prerace capture archive',()=>{
     expect(next).toMatchObject({status:'success',targets:1,records:1});
     expect(calls[0]).toContain('rno=2');
     expect(sqlite.prepare('SELECT race_id FROM boatrace_prerace_capture_archives').get()).toMatchObject({race_id:second});
+  });
+
+  it('rejects a cutoff that disagrees with the independently observed official racelist',async()=>{
+    addRace();
+    const result=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{
+      now:()=>FIXED_NOW,sleep:async()=>{},fetch:fetchFor('2026-10-11',1,undefined,undefined,html=>html.replace('15:19','15:18')),
+    });
+    expect(result).toMatchObject({status:'failed',records:0,failures:[{reason:'racelist_cutoff_mismatch'}]});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM boatrace_prerace_capture_archives').get()).toMatchObject({n:0});
   });
 
   it('advances past six-row candidates with an invalid lane set so later races are not starved',async()=>{
