@@ -37,9 +37,22 @@ describe('purchased real boat hourly results',()=>{
     expect(requestBudget.used).toBe(49);expect(pauses).toEqual([3000]);
     expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:6});
     const log=sqlite.prepare('SELECT source,reason FROM collection_runs').get() as {source:string;reason:string};
-    expect(log.source).toBe(RESULTS_SOURCE);expect(JSON.parse(log.reason)).toMatchObject({raceId:id(),quality:'verified-normal-v1',sha256:createHash('sha256').update(page()).digest('hex')});
+    expect(log.source).toBe(RESULTS_SOURCE);expect(JSON.parse(log.reason)).toMatchObject({raceId:id(),quality:'verified-official-outcome-v2',sha256:createHash('sha256').update(page()).digest('hex')});
     expect(await settleOpen(DB)).toBe(1);
     expect(sqlite.prepare('SELECT status,profit,odds_at_bet FROM bets').get()).toMatchObject({status:'won',profit:330,odds_at_bet:null});
+  });
+  it('records five ranked finishers plus an official capsize marker and keeps that ticket open without refund proof',async()=>{
+    const raceId=seed();sqlite.prepare("UPDATE bets SET selection='3' WHERE id=?").run(`${raceId}-bet`);
+    sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES(?,?,'boat','win','6',100,'manual','INSUFFICIENT_DATA','2026-10-11T02:01:00Z','open','real')").run(`${raceId}-terminal-bet`,raceId);
+    const fetch=async()=>new Response(boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']}));
+    expect(await collectResults(DB,now,{fetch})).toMatchObject({status:'success',records:8,verified:1});
+    expect(sqlite.prepare('SELECT number,finish_order FROM results ORDER BY finish_order').all()).toHaveLength(5);
+    expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number=6').get(raceId)).toMatchObject({features_json:expect.stringContaining('転覆')});
+    expect(await settleOpen(DB)).toBe(1);
+    expect(sqlite.prepare('SELECT id,status FROM bets ORDER BY id').all()).toEqual([
+      {id:`${raceId}-bet`,status:'lost'}, {id:`${raceId}-terminal-bet`,status:'open'},
+    ]);
+    expect(await selectResultsTargets(DB,new Date(now.getTime()+3600000))).toEqual([]);
   });
   it('targets only elapsed real open purchased races, excludes audit/quarantine and future races',async()=>{
     seed(1);seed(2,'sample');seed(3,'real','won');seed(4,'real','open','2026-10-11T04:30:00Z');seed(5);seed(6);
@@ -53,6 +66,15 @@ describe('purchased real boat hourly results',()=>{
     else sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(state==='invalid'?'bad':JSON.stringify({date:'2026-10-11',reserved:20000,essentialReserved:16000,optionalReserved:4000,oddsReserved:0}));
     const fetcher=vi.fn(fetchPage);expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({status:'skipped',attempted:0});expect(fetcher).not.toHaveBeenCalled();
     expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boat_results_hour'").get()).toMatchObject({n:0});expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:0});
+  });
+  it('fetches before reserving result writes and records a bounded failure when verified writes do not fit',async()=>{
+    seed();sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:'2026-10-11',reserved:15_950,oddsReserved:0,essentialReserved:15_950,optionalReserved:0,collectionReserved:0}));
+    const fetcher=vi.fn(fetchPage);
+    expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({status:'failed',attempted:1,records:0});
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:0});
+    const log=sqlite.prepare('SELECT status,reason FROM collection_runs').get() as {status:string;reason:string};
+    expect(log.status).toBe('failed');expect(JSON.parse(log.reason).reason).toBe('daily-write-budget-exhausted');
   });
   it('fails closed on malformed results without entry changes or settlement',async()=>{
     seed();const before=sqlite.prepare('SELECT features_json FROM entries ORDER BY number').all();

@@ -2,7 +2,7 @@ type ResultPageArgs = {
   raceDate: string;
   venueCode: string;
   raceNo: number;
-  finishOrder?: number[];
+  finishOrder?: Array<number | string>;
   racerIds?: string[];
 };
 
@@ -18,12 +18,16 @@ export function boatraceResultPage({
     const cls = number === raceNo ? '' : ' class="is-thColor2"';
     return `<th${cls}><a href="/owpc/pc/race/raceresult?rno=${number}&amp;jcd=${venueCode}&amp;hd=${date}">${number}R</a></th>`;
   }).join('');
-  const rows = finishOrder.map((number, index) => `<tbody><tr>
-    <td class="is-fs14">${['１', '２', '３', '４', '５', '６'][index]}</td>
-    <td class="is-fs14 is-fBold is-boatColor${number}">${number}</td>
-    <td class="is-p10-0"><span class="is-fs12">${racerIds[number - 1] ?? ''}</span><span> Synthetic ${number}</span></td>
+  const rows = finishOrder.map((number, index) => {
+    const boatNumber=typeof number==='number'?number:index+1;
+    const rank=typeof number==='number'?['１', '２', '３', '４', '５', '６'][index]:number;
+    return `<tbody><tr>
+    <td class="is-fs14">${rank}</td>
+    <td class="is-fs14 is-fBold is-boatColor${boatNumber}">${boatNumber}</td>
+    <td class="is-p10-0"><span class="is-fs12">${racerIds[boatNumber - 1] ?? ''}</span><span> Synthetic ${boatNumber}</span></td>
     <td>1'50"0</td>
-  </tr></tbody>`).join('');
+  </tr></tbody>`;
+  }).join('');
   return `<main>
     <div class="heading2"><img src="/static_extra/pc/images/text_place2_${venueCode}.png" alt="Synthetic Venue" /></div>
     <div class="tab2"><ul><li class="is-active2"><span class="tab2_inner">${month}月${day}日<span>開催日</span></span></li></ul></div>

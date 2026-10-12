@@ -9,6 +9,7 @@ export type BoatraceResultExpected = {
 
 export type BoatraceResults = {
   results: Array<{ number: number; finishOrder: number }>;
+  terminalEntries: Array<{ number: number; finishCode: string }>;
   payouts: Array<{ betType: 'win' | 'trifecta'; selection: string; payout: number }>;
 };
 
@@ -24,7 +25,7 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   // Exclude table headers: the official result template always has a static
   // "返還" heading, including normal races. Only body evidence is meaningful.
   const nonHeaderText = html.replace(/<thead\b[^>]*>[\s\S]*?<\/thead>/gi, '');
-  if (/中止|不成立|返還|同着|欠場|失格|落水|転覆|妨害|エンスト|不完走/.test(text(nonHeaderText))) fail();
+  if (/中止|不成立|同着/.test(text(nonHeaderText))) fail();
   const refundTables = [...html.matchAll(/<table\b[^>]*>[\s\S]*?<\/table>/gi)].map(match => match[0])
     .filter(table => /<th\b[^>]*>\s*返還\s*<\/th>/i.test(table));
   for (const table of refundTables) {
@@ -65,25 +66,32 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
     return labels.includes('着') && labels.includes('枠') && labels.includes('ボートレーサー');
   });
   if (!finishTable) fail();
-  if (/失格|欠場|落水|転覆|妨害|エンスト|不完走|中止|不成立|返還|同着/.test(text(finishTable))) fail();
-  const finishRows: Array<{ number: number; finishOrder: number; racerId: string }> = [];
+  // Individual non-finisher markers are validated row-by-row below. Race-wide
+  // cancellation, refund, and dead-heat cases remain outside this contract.
+  if (/中止|不成立|返還|同着/.test(text(finishTable))) fail();
+  const finishRows: Array<{ number: number; finishOrder: number | null; finishCode: string | null; racerId: string }> = [];
   for (const body of finishTable.matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)) {
     const rows = [...body[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
     for (const row of rows) {
       const cells = [...row[1].matchAll(/<td\b([^>]*)>([\s\S]*?)<\/td>/gi)];
       if (cells.length !== 4) fail();
-      const rank = digit(text(cells[0][2]));
+      const rankText = text(cells[0][2]);
+      const rank = digit(rankText);
+      const finishCode = rank ? null : terminalFinishCode(rankText);
       const number = digit(text(cells[1][2]));
       const racerCells = [...cells[2][2].matchAll(/<span\b([^>]*)>([\s\S]*?)<\/span>/gi)];
       const racerSpan = racerCells.find(cell => /\bis-fs12\b/.test(cell[1]));
       const racerId = racerSpan ? text(racerSpan[2]) : '';
-      if (!rank || !number || !/^\d{4,5}$/.test(racerId)) fail();
-      finishRows.push({ number, finishOrder: rank, racerId });
+      if ((!rank && !finishCode) || !number || !/^\d{4,5}$/.test(racerId)) fail();
+      finishRows.push({ number, finishOrder: rank, finishCode, racerId });
     }
   }
-  if (finishRows.length !== 6 || new Set(finishRows.map(row => row.finishOrder)).size !== 6
-      || new Set(finishRows.map(row => row.number)).size !== 6
-      || ![1, 2, 3, 4, 5, 6].every(rank => finishRows.some(row => row.finishOrder === rank))) fail();
+  const numericRows = finishRows.filter((row): row is typeof row & { finishOrder: number } => row.finishOrder !== null);
+  const terminalRows = finishRows.filter((row): row is typeof row & { finishCode: string } => row.finishCode !== null);
+  if (finishRows.length !== 6 || new Set(finishRows.map(row => row.number)).size !== 6
+      || terminalRows.length > 5 || numericRows.length !== 6 - terminalRows.length
+      || new Set(numericRows.map(row => row.finishOrder)).size !== numericRows.length
+      || !Array.from({length:numericRows.length},(_,i)=>i+1).every(rank=>numericRows.some(row=>row.finishOrder===rank))) fail();
   const expectedByNumber = new Map(expected.entries.map(entry => [entry.number, entry]));
   if (finishRows.some(row => {
     const entry = expectedByNumber.get(row.number);
@@ -91,13 +99,22 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   })) fail();
 
   const payouts = parsePayouts(html);
-  const winner = finishRows.find(row => row.finishOrder === 1)!.number;
+  const winner = numericRows.find(row => row.finishOrder === 1)!.number;
   const win = payouts.find(payout => payout.betType === 'win');
   if (!win || win.selection !== String(winner) || win.payout <= 0) fail();
   const trifecta = payouts.find(payout => payout.betType === 'trifecta');
-  const firstThree = [1, 2, 3].map(rank => finishRows.find(row => row.finishOrder === rank)!.number).join('-');
+  const firstThree = [1, 2, 3].map(rank => numericRows.find(row => row.finishOrder === rank)!.number).join('-');
   if (trifecta && trifecta.selection !== firstThree) fail();
-  return { results: finishRows.map(({ number, finishOrder }) => ({ number, finishOrder })), payouts };
+  return { results: numericRows.map(({ number, finishOrder }) => ({ number, finishOrder: finishOrder! })),
+    terminalEntries: terminalRows.map(({number,finishCode})=>({number,finishCode:finishCode!})), payouts };
+}
+
+// Official result pages use short markers in the finish column. Keep the
+// mapping explicit; these are terminal entrants, not inferred rank positions.
+function terminalFinishCode(value: string): string | null {
+  if (value === '転') return '転覆';
+  if (['F','L','K','欠場','欠','失格','転覆','妨害','落水','エンスト','不完走'].includes(value) || /^K\d$/.test(value)) return value;
+  return null;
 }
 
 function parsePayouts(html: string): BoatraceResults['payouts'] {

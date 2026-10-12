@@ -1,7 +1,7 @@
 import { all, first, type Db, type Statement } from '../repo/db.js';
 import { parseBoatraceResults } from './boatraceResults.js';
 import { USER_AGENT } from './boatraceOdds.js';
-import { reserveWriteBudgets, utcDate } from './writeBudget.js';
+import { estimateWorkerWriteUnits, reserveWriteBudgets, utcDate } from './writeBudget.js';
 
 export const RESULTS_SOURCE = 'boatrace-results-worker-v1';
 // Preserve the existing worst-case request envelope (eight target races, with
@@ -40,8 +40,11 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
         AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=b.id))
       AND NOT (
         (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')=6
-        AND (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=6
-        AND (SELECT COUNT(DISTINCT x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order BETWEEN 1 AND 6)=6
+        AND (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')+
+          (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real' AND json_valid(e.features_json) AND (json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走') OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))=6
+        AND (SELECT COUNT(DISTINCT x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order BETWEEN 1 AND 6)=
+          (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
+        AND NOT EXISTS(SELECT 1 FROM entries e JOIN results x ON x.race_id=e.race_id AND x.number=e.number AND x.data_origin=e.data_origin WHERE e.race_id=r.id AND e.data_origin='real' AND json_valid(e.features_json) AND (json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走') OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))
         AND NOT EXISTS(SELECT 1 FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND NOT EXISTS(SELECT 1 FROM entries e WHERE e.race_id=r.id AND e.data_origin='real' AND e.number=x.number))
         AND NOT EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='win' AND NOT EXISTS(SELECT 1 FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1 AND p.selection=CAST(x.number AS TEXT)))
         AND EXISTS(SELECT 1 FROM results x JOIN payouts p ON p.race_id=x.race_id AND p.data_origin=x.data_origin AND p.bet_type='win' AND p.selection=CAST(x.number AS TEXT) AND p.payout>0 WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)
@@ -129,7 +132,9 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
   const fetchFailures:Array<FetchFailure & {count:number}>=[];
   const hasAttemptCapacity=()=>budget.used-attemptStart<attemptLimit&&budget.used<budget.max;
   const reserveBatch=async (count:number)=>reserveWriteBudgets(db,utcDate(now),[
-    {units:16+count*55,category:'essential'},
+    // The lock is one real settings-row mutation; result rows are reserved
+    // only after the official page has passed validation below.
+    ...(!lockClaimed ? [{units:estimateWorkerWriteUnits(1),category:'essential' as const}] : []),
     {units:count*5,category:'collection'},
   ]);
   const claimLock=async ()=>{
@@ -171,9 +176,10 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       reason='saved-registry-incomplete';
       const entries=savedEntries.map(e=>{
         let racerId:string|undefined;
-        try { const value=JSON.parse(e.features_json ?? '{}').racer_id; if(typeof value==='string'&&/^\d{4,5}$/.test(value))racerId=value; } catch { /* malformed metadata is rejected below */ }
+        let finishCode:string|null=null;
+        try { const value=JSON.parse(e.features_json ?? '{}'); if(typeof value.racer_id==='string'&&/^\d{4,5}$/.test(value.racer_id))racerId=value.racer_id; if(typeof value.finish_code==='string')finishCode=value.finish_code; } catch { /* malformed metadata is rejected below */ }
         if(!racerId)throw new Error('saved complete registry missing');
-        return {number:e.number,racerId};
+        return {number:e.number,racerId,finishCode};
       });
       if(entries.length!==6||entries.some(e=>!e.racerId))throw new Error('saved complete registry missing');
       reason='official-result-unavailable';
@@ -197,6 +203,13 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       sha256=body.sha256;
       reason='official-page-identity-or-outcome-rejected';
       const parsed=parseBoatraceResults(body.html,{url,raceDate:race.race_date,venueCode:race.venue_id,raceNo:race.race_no,entries});
+      // Reserve for the verified result, payout, race status and run-log rows
+      // only once their exact count is known. Failed/unavailable pages need
+      // only the separately reserved collection log, not speculative result
+      // headroom.
+      if (!await reserveWriteBudgets(db,utcDate(now),[
+        {units:estimateWorkerWriteUnits(parsed.results.length+parsed.payouts.length+parsed.terminalEntries.length+2),category:'essential'},
+      ])) { reason='daily-write-budget-exhausted'; throw new Error('daily write budget exhausted'); }
       const [existingResults,existingPayouts]=await Promise.all([
         all<{number:number;finish_order:number}>(db,"SELECT number,finish_order FROM results WHERE race_id=? AND data_origin='real'",race.id),
         all<{bet_type:string;selection:string;payout:number}>(db,"SELECT bet_type,selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type IN ('win','trifecta')",race.id),
@@ -204,7 +217,9 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       reason='stored-evidence-conflict';
       // Don't silently repair/correct prior trusted evidence or settled tickets.
       if(existingResults.some(x=>!parsed.results.some(y=>y.number===x.number&&y.finishOrder===x.finish_order))
-          ||existingPayouts.some(x=>!parsed.payouts.some(y=>y.betType===x.bet_type&&y.selection===x.selection&&y.payout===x.payout))) throw new Error('existing result evidence conflict');
+          ||existingPayouts.some(x=>!parsed.payouts.some(y=>y.betType===x.bet_type&&y.selection===x.selection&&y.payout===x.payout))
+          ||parsed.terminalEntries.some(x=>{const old=entries.find(e=>e.number===x.number)?.finishCode;return old!==null&&old!==x.finishCode&&!(old==='転'&&x.finishCode==='転覆');})
+          ||parsed.results.some(x=>!!entries.find(e=>e.number===x.number)?.finishCode)) throw new Error('existing result evidence conflict');
       const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts});
       const statements:Statement[]=[];
       statements.push(db.prepare(`INSERT INTO results(race_id,number,finish_order,data_origin)
@@ -213,9 +228,11 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       statements.push(db.prepare(`INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin)
         SELECT ?,json_extract(value,'$.betType'),json_extract(value,'$.selection'),json_extract(value,'$.payout'),'real' FROM json_each(?) WHERE ${currentSourceGuard}
         ON CONFLICT(race_id,bet_type,selection) DO NOTHING`).bind(race.id,JSON.stringify(parsed.payouts),guardData));
+      for(const terminal of parsed.terminalEntries) statements.push(db.prepare(`UPDATE entries SET features_json=json_set(CASE WHEN json_valid(features_json) THEN features_json ELSE '{}' END,'$.finish_code',?)
+        WHERE race_id=? AND number=? AND data_origin='real' AND ${currentSourceGuard}`).bind(terminal.finishCode,race.id,terminal.number,guardData));
       statements.push(db.prepare(`UPDATE races SET status='finished',updated_at=? WHERE id=? AND ${currentSourceGuard}`).bind(new Date().toISOString(),race.id,guardData));
-      const count=parsed.results.length+parsed.payouts.length;
-      statements.push(logStatement(db,race,startedAt,'success',count,{raceId:race.id,url,sha256,quality:'verified-normal-v1',fetchedAt:new Date().toISOString()},guardData));
+      const count=parsed.results.length+parsed.payouts.length+parsed.terminalEntries.length;
+      statements.push(logStatement(db,race,startedAt,'success',count,{raceId:race.id,url,sha256,quality:'verified-official-outcome-v2',fetchedAt:new Date().toISOString()},guardData));
       reason='source-state-changed';
       const writes=await db.batch(statements);
       const logged=writes.at(-1) as {meta?:{changes?:number}}|undefined;

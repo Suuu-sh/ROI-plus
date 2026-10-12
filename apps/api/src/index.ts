@@ -30,10 +30,10 @@ const PAPER_COMPARISON_PHASES = {
 // A full field is represented by either an official numeric finish or an
 // explicit non-finisher code parsed from the official K result file.
 const terminalFinishCodeSql = `(json_valid(e.features_json) AND (
-  json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','妨害','落水','エンスト','不完走')
+  json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走')
   OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))`;
 const isTerminalFinishCode = (value: unknown): boolean =>
-  typeof value === 'string' && (['F','L','K','欠場','欠','失格','転覆','妨害','落水','エンスト','不完走'].includes(value)
+  typeof value === 'string' && (['F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走'].includes(value)
     || /^K\d$/.test(value));
 const app = new Hono<Ctx>().basePath('/api');
 app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization'] }));
