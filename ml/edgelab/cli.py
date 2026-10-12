@@ -285,23 +285,38 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
                 or (isinstance(finish_code, str) and finish_code.startswith("K")
                     and finish_code[1:].isdigit()))
 
+    # Prior-day settlement facts refer only to races that already have open
+    # bets. Such bets necessarily have a persisted race row, so re-upserting
+    # yesterday's race (and its mutable metadata) is redundant. Send these
+    # essential result/payout facts before current-day races/entries: otherwise
+    # a budget refusal on a large current-day batch can starve settlement.
+    settlement_payload = {
+        "results": [r for r in rows.get("results", [])
+                    if r.get("race_id") in previous_open_bet_ids],
+        "payouts": [r for r in rows.get("payouts", [])
+                    if r.get("race_id") in previous_open_bet_ids],
+    }
     payload = {
-        "races": [r for r in rows.get("races", []) if r.get("id") in today_ids | previous_open_bet_ids],
+        "races": [r for r in rows.get("races", []) if r.get("id") in today_ids],
         "entries": [r for r in rows.get("entries", [])
                     if r.get("race_id") in today_ids
                     or (r.get("race_id") in previous_open_bet_ids and has_official_nonfinisher_marker(r))],
         "ticket_predictions": ticket_predictions,
         # K files can already contain same-day finished races during midday or
-        # late-night runs; settle those alongside yesterday's outcomes.
-        "results": [r for r in rows.get("results", []) if r.get("race_id") in today_ids | previous_open_bet_ids],
-        "payouts": [r for r in rows.get("payouts", []) if r.get("race_id") in today_ids | previous_open_bet_ids],
+        # late-night runs; prior-day settlement was sent in the priority phase.
+        "results": [r for r in rows.get("results", []) if r.get("race_id") in today_ids],
+        "payouts": [r for r in rows.get("payouts", []) if r.get("race_id") in today_ids],
         "prerace_observations": [r for r in rows.get("prerace_observations", []) if r.get("race_id") in today_ids],
         "collection_runs": [r for r in rows.get("collection_runs", []) if r.get("id") in run_ids],
         "venues": __import__("edgelab.venues", fromlist=["venue_rows"]).venue_rows(),
         "models": rows.get("models", []),
     }
     from edgelab.sync import sync_rows
-    synced = sync_rows(payload)
+    # A 429 is deliberately allowed to fail the run; this only changes which
+    # writes get first claim on the existing budget, not whether failures count.
+    settlement_sync = sync_rows(settlement_payload)
+    daily_sync = sync_rows(payload)
+    synced = {**settlement_sync, **daily_sync}
     from edgelab.learning import score_feedback
     learning_report = score_feedback(rows)
     collection_runs = [run for run in payload["collection_runs"] if run.get("sport") == "boat"]

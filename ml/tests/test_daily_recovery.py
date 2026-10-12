@@ -27,7 +27,7 @@ def _store():
 
 def test_missing_selected_artifact_keeps_collection_success_separate_from_forecast_readiness(monkeypatch):
     store = _store()
-    synced = {}
+    synced, sync_calls = {}, []
     trifecta_daily = hasattr(cli, "_predict_boat_trifecta_date")
     selected = {"id": "registered-active-test", "sport": "boat",
                 "bet_type": "trifecta" if trifecta_daily else "win", "status": "active"}
@@ -40,11 +40,17 @@ def test_missing_selected_artifact_keeps_collection_success_separate_from_foreca
     if hasattr(cli, "_inference_timestamp"):
         monkeypatch.setattr(cli, "_inference_timestamp", lambda: "2026-10-09T07:30:00+00:00")
     monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: [selected])
+    monkeypatch.setattr("edgelab.sync.fetch_open_bet_race_ids", lambda _day: {"prev"})
     monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
     predictor = "_predict_boat_trifecta_date" if trifecta_daily else "_predict_boat_date"
     monkeypatch.setattr(cli, predictor,
                         lambda *args: (_ for _ in ()).throw(FileNotFoundError("approved artifact unavailable")))
-    monkeypatch.setattr("edgelab.sync.sync_rows", lambda payload: synced.update(payload) or {"ok": True})
+    def sync(payload):
+        sync_calls.append(copy.deepcopy(payload))
+        for table, values in payload.items():
+            synced.setdefault(table, []).extend(values)
+        return {table: {"ok": True} for table in payload}
+    monkeypatch.setattr("edgelab.sync.sync_rows", sync)
 
     result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
 
@@ -55,6 +61,8 @@ def test_missing_selected_artifact_keeps_collection_success_separate_from_foreca
     assert result.get("predictions", result.get("ticket_predictions")) == 0
     assert synced.get("predictions", synced.get("ticket_predictions")) == []
     assert {row["race_id"] for row in synced["results"]} == {"prev"}
+    assert sync_calls[0]["results"] == [next(r for r in store["results"] if r["race_id"] == "prev")]
+    assert "prev" not in {r["id"] for r in sync_calls[1]["races"]}
 
 
 def test_daily_workflow_restores_pinned_bundle_and_skips_only_complete_forecasts():

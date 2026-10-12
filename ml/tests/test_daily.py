@@ -36,7 +36,7 @@ def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
     store["results"].append({"race_id": "today", "number": 1, "finish_order": 1, "data_origin": "real"})
     store["payouts"].append({"race_id": "today", "bet_type": "win", "selection": "1",
                              "payout": 150, "data_origin": "real"})
-    synced = {}
+    synced, sync_calls = {}, []
     collection_calls = []
     timing_events = []
     fresh_as_of = "2026-10-08T22:31:02.345+00:00"
@@ -55,7 +55,12 @@ def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
         return [{"race_id": "today", "bet_type": "trifecta"}]
     monkeypatch.setattr(cli, "_predict_boat_trifecta_date", predict)
     monkeypatch.setattr(cli, "_predict_boat_date", lambda *args: (_ for _ in ()).throw(AssertionError("daily must not fall back to win")))
-    monkeypatch.setattr("edgelab.sync.sync_rows", lambda payload: synced.update(payload) or {"ok": True})
+    def sync(payload):
+        sync_calls.append(copy.deepcopy(payload))
+        for table, values in payload.items():
+            synced.setdefault(table, []).extend(values)
+        return {table: {"ok": True} for table in payload}
+    monkeypatch.setattr("edgelab.sync.sync_rows", sync)
 
     result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
 
@@ -65,6 +70,8 @@ def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
     assert {(row["race_id"], row["number"]) for row in synced["entries"]} == {("today", 1)}
     assert {row["race_id"] for row in synced["results"]} == {"today"}
     assert {row["race_id"] for row in synced["payouts"]} == {"today"}
+    assert sync_calls[0] == {"results": [], "payouts": []}
+    assert sync_calls[1]["races"] == [next(r for r in store["races"] if r["id"] == "today")]
     # The fixture omits one prior race, one K-entry, one result, and one payout
     # from D1 (14 units at current Worker factors 5/4/3/2). Local learning history stays.
     assert {row["id"] for row in feedback_rows[0]["races"]} == {"prev", "today", "older"}
@@ -82,7 +89,7 @@ def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
 
 def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monkeypatch):
     store = _store()
-    synced = {}
+    synced, sync_calls = {}, []
     monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(store))
     monkeypatch.setattr(cli, "save_rows", lambda value: None)
     monkeypatch.setattr(cli, "collect_boat", lambda *args, **kwargs: 0)
@@ -91,7 +98,12 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
     monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
     monkeypatch.setattr(cli, "_predict_boat_trifecta_date",
                         lambda *args: (_ for _ in ()).throw(RuntimeError("no active model in authoritative local registry")))
-    monkeypatch.setattr("edgelab.sync.sync_rows", lambda payload: synced.update(payload) or {"ok": True})
+    def sync(payload):
+        sync_calls.append(copy.deepcopy(payload))
+        for table, values in payload.items():
+            synced.setdefault(table, []).extend(values)
+        return {table: {"ok": True} for table in payload}
+    monkeypatch.setattr("edgelab.sync.sync_rows", sync)
 
     result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
 
@@ -100,6 +112,8 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
     assert result["forecast_status"] == "not_ready"
     assert result["forecast_reason"] == "RuntimeError: no active model in authoritative local registry"
     assert {row["race_id"] for row in synced["results"]} == {"prev"}
+    assert sync_calls[0]["results"] == [next(r for r in store["results"] if r["race_id"] == "prev")]
+    assert "prev" not in {r["id"] for r in sync_calls[1]["races"]}
     assert synced["ticket_predictions"] == []
     assert "predictions" not in synced
 
