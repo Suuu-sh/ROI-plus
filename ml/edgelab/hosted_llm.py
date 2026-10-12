@@ -14,15 +14,15 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
-from http.client import HTTPException
 from typing import Any, Callable, Mapping
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 CHATGPT_PLAN_SCOPE = "chatgpt.tokens.use.direct"
 OPENAI_API_BASE = "https://api.openai.com/v1"
 _MAX_ERROR_BODY_BYTES = 16_384
+_MAX_SSE_LINE_BYTES = 65_536
 
 
 class HostedInferenceError(RuntimeError):
@@ -223,9 +223,10 @@ class ChatGPTPlanProvider:
             raise HostedInferenceError("identity_not_verified")
         if session.client_id != config.client_id or session.host_id != config.host_id:
             raise HostedInferenceError("session_binding_mismatch")
-        if (not isinstance(session.access_token, str) or not session.access_token.strip()
-                or session.access_token != session.access_token.strip()):
+        if not isinstance(session.access_token, str) or not session.access_token:
             raise HostedInferenceError("access_token_missing")
+        if not _valid_bearer_token(session.access_token):
+            raise HostedInferenceError("access_token_invalid")
         if (not isinstance(session.granted_scopes, (set, frozenset, tuple, list))
                 or CHATGPT_PLAN_SCOPE not in session.granted_scopes):
             raise HostedInferenceError("chatgpt_plan_usage_not_granted")
@@ -234,21 +235,28 @@ class ChatGPTPlanProvider:
             raise HostedInferenceError("session_expired")
 
     def _open(self, request: Request) -> Any:
+        failed = False
         try:
-            return self._opener(request, timeout=self.config.timeout_seconds)
+            response = self._opener(request, timeout=self.config.timeout_seconds)
         except HTTPError as error:
             # urllib exposes non-2xx responses as HTTPError file objects.
             return error
-        except (HTTPException, TimeoutError, URLError, OSError):
-            # Avoid including arbitrary exception text, URLs, or headers in logs.
+        except Exception:
+            # Do not keep or expose transport exception text; it may contain headers.
+            failed = True
+            response = None
+        if failed or response is None:
             raise HostedInferenceError("transport_error") from None
+        return response
 
     def _consume_stream(self, response: Any, request_id: str | None) -> tuple[str, bool]:
         output: list[str] = []
         output_size = 0
+        bytes_read = 0
         completed = False
         event_name = ""
         data_lines: list[str] = []
+        max_bytes = self.config.max_response_bytes
 
         def consume_data() -> None:
             nonlocal output_size, completed
@@ -296,10 +304,31 @@ class ChatGPTPlanProvider:
             elif kind == "response.completed":
                 completed = True
 
+        transport_failed = False
         try:
-            for raw_line in response:
+            while True:
+                # readline(size) bounds each allocation even if the peer sends
+                # one enormous line without a newline. The +1 detects overflow.
+                read_limit = min(_MAX_SSE_LINE_BYTES, max_bytes - bytes_read + 1)
+                raw_line = response.readline(read_limit)
+                if raw_line in (b"", ""):
+                    break
+                if not isinstance(raw_line, bytes):
+                    raise HostedInferenceError("invalid_stream_event", status=200,
+                                               request_id=request_id,
+                                               response_shape="event_stream")
+                line_bytes = raw_line
+                bytes_read += len(line_bytes)
+                if bytes_read > max_bytes:
+                    raise HostedInferenceError("response_too_large", status=200,
+                                               request_id=request_id,
+                                               response_shape="event_stream")
+                if len(line_bytes) == read_limit and not line_bytes.endswith(b"\n"):
+                    raise HostedInferenceError("response_too_large", status=200,
+                                               request_id=request_id,
+                                               response_shape="event_stream")
                 try:
-                    line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else str(raw_line)
+                    line = line_bytes.decode("utf-8")
                 except UnicodeDecodeError:
                     raise HostedInferenceError("invalid_stream_event", status=200,
                                                request_id=request_id,
@@ -321,11 +350,19 @@ class ChatGPTPlanProvider:
                 consume_data()
         except HostedInferenceError:
             raise
-        except (HTTPException, TimeoutError, URLError, OSError):
+        except Exception:
+            # Keep arbitrary stream transport details out of logs and errors.
+            transport_failed = True
+        if transport_failed:
             raise HostedInferenceError("stream_transport_error", status=200,
                                        request_id=request_id,
                                        response_shape="event_stream") from None
         return "".join(output), completed
+
+
+def _valid_bearer_token(value: str) -> bool:
+    # RFC 6750 b64token characters; rejects CR/LF, spaces, tabs, and controls.
+    return re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,}", value) is not None
 
 
 def _valid_host_id(value: str) -> bool:
@@ -371,9 +408,14 @@ def _request_id(headers: Mapping[str, str]) -> str | None:
 
 
 def _read_bounded(response: Any, max_bytes: int) -> bytes:
+    read_failed = False
     try:
         body = response.read(max_bytes + 1)
-    except (HTTPException, TimeoutError, URLError, OSError):
+    except Exception:
+        # Response wrappers can expose exception messages with request headers.
+        read_failed = True
+        body = b""
+    if read_failed:
         raise HostedInferenceError("response_read_error", status=_status(response),
                                    request_id=_request_id(_headers(response))) from None
     if len(body) > max_bytes:

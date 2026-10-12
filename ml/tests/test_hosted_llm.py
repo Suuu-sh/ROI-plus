@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import traceback
 import unittest
 
 from edgelab.hosted_llm import (
@@ -51,9 +52,19 @@ class FakeResponse:
         self.status = status
         self.headers = headers or {}
         self.closed = False
+        self.readline_sizes = []
+        self.bytes_read = 0
 
     def read(self, size=-1):
-        return self._stream.read(size)
+        body = self._stream.read(size)
+        self.bytes_read += len(body)
+        return body
+
+    def readline(self, size=-1):
+        self.readline_sizes.append(size)
+        line = self._stream.readline(size)
+        self.bytes_read += len(line)
+        return line
 
     def __iter__(self):
         return self._stream
@@ -277,6 +288,65 @@ class HostedLLMTests(unittest.TestCase):
             incomplete_provider.generate(_session(), model="model-a", prompt="hello")
         self.assertEqual(incomplete.exception.code, "stream_incomplete")
         self.assertEqual(len(incomplete_opener.requests), 2)
+
+    def test_stream_rejects_an_oversized_single_line_with_bounded_reads(self):
+        config = _config(max_response_bytes=128)
+        response = FakeResponse(b"data: " + b"x" * 10_000)
+        provider = ChatGPTPlanProvider(config, opener=FakeOpener([]), clock=lambda: 1)
+
+        with self.assertRaises(HostedInferenceError) as error:
+            provider._consume_stream(response, "req-large-line")
+
+        self.assertEqual(error.exception.code, "response_too_large")
+        self.assertLessEqual(response.bytes_read, config.max_response_bytes + 1)
+        self.assertTrue(response.readline_sizes)
+        self.assertTrue(all(size <= config.max_response_bytes + 1
+                            for size in response.readline_sizes))
+
+    def test_stream_applies_response_byte_cap_across_multiple_lines(self):
+        config = _config(max_response_bytes=20)
+        response = FakeResponse(b":heartbeat\n" * 20)
+        provider = ChatGPTPlanProvider(config, opener=FakeOpener([]), clock=lambda: 1)
+
+        with self.assertRaises(HostedInferenceError) as error:
+            provider._consume_stream(response, "req-total-large")
+
+        self.assertEqual(error.exception.code, "response_too_large")
+        self.assertLessEqual(response.bytes_read, config.max_response_bytes + 1)
+
+    def test_access_tokens_with_header_controls_are_rejected_before_transport(self):
+        cases = (
+            TOKEN + "\nInjected: yes",
+            TOKEN + "\r",
+            TOKEN + "\t",
+            TOKEN + "\x00",
+            TOKEN + "\x7f",
+        )
+        for token in cases:
+            with self.subTest(token=repr(token)):
+                opener = FakeOpener([])
+                provider = ChatGPTPlanProvider(_config(), opener=opener, clock=lambda: 1)
+
+                with self.assertRaises(HostedInferenceError) as error:
+                    provider.list_models(_session(access_token=token))
+
+                self.assertEqual(error.exception.code, "access_token_invalid")
+                self.assertNotIn(TOKEN, str(error.exception))
+                self.assertEqual(opener.requests, [])
+
+    def test_transport_value_error_is_sanitized_without_token_in_exception_chain(self):
+        def broken_opener(request, *, timeout):
+            raise ValueError(f"invalid header includes {TOKEN}")
+
+        provider = ChatGPTPlanProvider(_config(), opener=broken_opener, clock=lambda: 1)
+
+        with self.assertRaises(HostedInferenceError) as error:
+            provider.list_models(_session())
+
+        self.assertEqual(error.exception.code, "transport_error")
+        self.assertNotIn(TOKEN, str(error.exception))
+        self.assertNotIn(TOKEN, "".join(traceback.format_exception(error.exception)))
+        self.assertIsNone(error.exception.__context__)
 
 
 if __name__ == "__main__":
