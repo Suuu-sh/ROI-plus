@@ -40,7 +40,7 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab feedback
 
 ## セットアップ
 
-前提：Node.js 20+、Python 3.11+、macOS の場合は `brew install libomp`（LightGBM 用）。
+前提：Node.js 22+、Python 3.11+、macOS の場合は `brew install libomp`（LightGBM 用）。
 
 ```bash
 npm install
