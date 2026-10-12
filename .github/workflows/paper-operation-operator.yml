@@ -1,25 +1,13 @@
 name: Paper operation operator
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: Status-only inspection or fixed 2026-10-14 virtual-operation setup
-        required: true
-        type: choice
-        options: [status, configure]
-      confirmed:
-        description: Explicitly confirm the fixed-date settings change; virtual operation only
-        required: true
-        type: boolean
-        default: false
 permissions:
   contents: read
 concurrency:
-  group: roi-plus-production-paper-operator
+  group: roi-plus-production-deploy
   cancel-in-progress: false
 jobs:
   operate:
-    if: inputs.mode == 'status' || inputs.confirmed == true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -30,11 +18,8 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Inspect or configure the fixed paper-operation allowlist
+      - name: Read-only paper-operation status
         env:
-          OPERATOR_MODE: ${{ inputs.mode }}
-          CONFIRMED: ${{ inputs.confirmed }}
-          TARGET_DATE: '2026-10-14'
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node scripts/paper-operation-operator.mjs
