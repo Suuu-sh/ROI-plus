@@ -1,0 +1,59 @@
+name: Apply approved ROI+ D1 migrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact reviewed migration source commit
+        required: true
+        type: string
+      confirmation:
+        description: Type APPLY ROI+ MIGRATIONS 0010 AND 0011
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: roi-plus-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Apply approved additive D1 migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate explicit approval
+        env:
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          test "$APPROVED_SHA" = "8168453d614df174d6c8bb0a244f7d774edffc67"
+          test "$CONFIRMATION" = "APPLY ROI+ MIGRATIONS 0010 AND 0011"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify exact migration set and remote ledger
+        run: node scripts/apply-approved-d1-migrations.mjs --check
+        env:
+          APPROVED_SOURCE_SHA: ${{ inputs.approved_sha }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Apply only the reviewed pending migrations
+        run: node scripts/apply-approved-d1-migrations.mjs
+        env:
+          APPROVED_SOURCE_SHA: ${{ inputs.approved_sha }}
+          CI: true
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Verify migration ledger readiness
+        run: node scripts/check-d1-migrations-ready.mjs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
