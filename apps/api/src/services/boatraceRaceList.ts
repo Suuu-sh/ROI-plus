@@ -18,21 +18,33 @@ export function parseRaceListEntries(html: string, expected: TrifectaOddsIdentit
   }
   for (const table of html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/gi)) {
     const header = table[1].match(/<thead\b[^>]*>([\s\S]*?)<\/thead>/i)?.[1];
-    const body = table[1].match(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/i)?.[1];
-    if (!header || !body) continue;
+    const bodies = [...table[1].matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)].map(match => match[1]);
+    if (!header || !bodies.length) continue;
     const headers = [...header.matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi)].map(match => visibleText(match[1]));
     const laneIndex = headers.findIndex(value => value === '枠' || value === '艇');
     const racerIndex = headers.findIndex(value => value.includes('ボートレーサー'));
     if (laneIndex < 0 || racerIndex < 0) continue;
     const entries: RaceListEntry[] = [];
-    for (const row of body.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
-      const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map(match => match[1]);
-      if (cells.length <= Math.max(laneIndex, racerIndex)) continue;
-      const laneText = visibleText(cells[laneIndex]).replace(/[０-９]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xfee0));
+    // The official page commonly renders one <tbody> per lane, with several
+    // subrows for its racer/stat blocks. Keep those subrows together rather
+    // than silently inspecting only the first body.
+    for (const body of bodies) {
+      const rows = [...body.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map(match => match[1]);
+      if (!rows.length) continue;
+      const cells = rows.flatMap(row => [...row.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map(match => match[1]));
+      const firstRowCells = [...rows[0].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map(match => match[1]);
+      const laneCell = firstRowCells[laneIndex] ?? firstRowCells.find(cell => /^[1-6]$/.test(visibleText(cell)));
+      if (!laneCell) continue;
+      const laneText = visibleText(laneCell).replace(/[０-９]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xfee0));
       const laneMatch = laneText.match(/(?:^|\D)([1-6])(?:\D|$)/);
-      const registrationNumber = [...cells[racerIndex].matchAll(/<span\b([^>]*)>([\s\S]*?)<\/span>/gi)]
-        .filter(match => /\bis-fs12\b/.test(match[1].match(/\bclass\s*=\s*(["'])(.*?)\1/i)?.[2] ?? ''))
-        .map(match => visibleText(match[2])).find(value => /^\d{4,5}$/.test(value));
+      const racerCells = [firstRowCells[racerIndex], ...cells].filter((cell): cell is string => !!cell);
+      const registrationNumber = racerCells.map(racerCell => {
+        const linked = racerCell.match(/[?&](?:toban|registration(?:Number|_number)?|racerId|racer_id)=(\d{4,5})(?:&|["'#])/i)?.[1];
+        const span = [...racerCell.matchAll(/<span\b[^>]*>([\s\S]*?)<\/span>/gi)]
+          .map(match => visibleText(match[1])).find(value => /^\d{4,5}$/.test(value));
+        const text = visibleText(racerCell).match(/(?:^|\D)(\d{4,5})(?:\D|$)/)?.[1];
+        return linked ?? span ?? text;
+      }).find((value): value is string => !!value);
       if (!laneMatch || !registrationNumber) continue;
       entries.push({ lane: Number(laneMatch[1]), registrationNumber });
     }

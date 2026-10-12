@@ -46,8 +46,8 @@ function fetchFor(day:string,raceNo:number,replaceOdds?:(html:string)=>string,re
 }
 
 function raceListPage(day:string,raceNo:number){
-  const rows=Array.from({length:6},(_,index)=>`<tr><td>${index+1}</td><td><span class="is-fs12">${4001+index}</span>Runner ${index+1}</td></tr>`).join('');
-  return `<div class="tab3"><a href="/owpc/pc/race/racelist?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">出走表</a><a href="/owpc/pc/race/raceresult?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">結果</a></div><table><thead><tr><th>枠</th><th>ボートレーサー</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const rows=Array.from({length:6},(_,index)=>`<tbody><tr><td rowspan="4">${index+1}</td><td rowspan="4"><a href="/owpc/pc/data/racersearch/profile?toban=${4001+index}">Runner ${index+1}</a></td></tr><tr><td>detail A</td></tr><tr><td>detail B</td></tr><tr><td>detail C</td></tr></tbody>`).join('');
+  return `<div class="tab3"><a href="/owpc/pc/race/racelist?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">出走表</a><a href="/owpc/pc/race/raceresult?rno=${raceNo}&amp;jcd=01&amp;hd=${day.replaceAll('-','')}">結果</a></div><table><thead><tr><th>枠</th><th>ボートレーサー</th><th>登録情報</th></tr></thead>${rows}</table>`;
 }
 
 beforeEach(()=>{
