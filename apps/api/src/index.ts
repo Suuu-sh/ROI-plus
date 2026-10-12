@@ -708,6 +708,22 @@ app.post('/ingest/write-budget/allowance', async c=>{
   if (!applied) return c.json({ error:'allowance requires a valid current-day ledger and may be applied only once', code:'d1_write_budget_allowance_conflict', budget:await readWriteBudget(c.env.DB) }, 409);
   return c.json(await readWriteBudget(c.env.DB), 200);
 });
+// Only settlement-relevant previous-day IDs are exported to the daily sync.
+// Learning history stays in the local dataset; this route does not mutate D1.
+app.get('/ingest/open-bet-race-ids', async c=>{
+  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
+  const day=c.req.query('date')??'';
+  const today=jstRaceDate(), previous=new Date(`${today}T00:00:00+09:00`);
+  previous.setUTCDate(previous.getUTCDate()-1);
+  if (!isIsoCalendarDate(day) || ![today,jstRaceDate(previous)].includes(day))
+    return jsonError(c,'current or previous JST race date is required');
+  const rows=await all<{id:string}>(c.env.DB,`SELECT DISTINCT r.id FROM races r JOIN bets b ON b.race_id=r.id
+    WHERE r.race_date=? AND r.sport='boat' AND r.data_origin='real' AND b.data_origin='real' AND b.status='open'
+      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
+    ORDER BY r.id LIMIT 501`,day);
+  if(rows.length>=501)return c.json({code:'open_bet_race_bound_exceeded'},503);
+  return c.json({date:day,raceIds:rows.map(row=>row.id)});
+});
 // Narrow, authenticated read surface for a one-shot same-day forecast. It
 // returns only raw boat inputs available by a recent, caller-supplied cutoff;
 // the Python model remains the sole inference implementation.
@@ -1373,7 +1389,8 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
   }
   if (env.ENABLE_BOATRACE_ODDS_SCRAPE === 'true' || env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE === 'true') {
     // A collection quota/write failure must not block ten-minute settlement.
-    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true', env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true',requestBudget).catch(() => undefined);
+    // Capture one compact immutable evidence bundle before bulk 120-row odds
+    // snapshots consume the shared optional write/fetch capacity.
     if (env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE === 'true') {
       try {
         const archive=await collectBoatraceCaptureArchives(env.DB,new Date(),{requestBudget});
@@ -1382,6 +1399,7 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
         console.info(JSON.stringify({event:'boatrace-prerace-capture-archive',status:'failed',reason:'collector_failed'}));
       }
     }
+    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true', env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true',requestBudget).catch(() => undefined);
   }
   return;
 } };

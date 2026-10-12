@@ -1096,3 +1096,21 @@ describe('collection status quality compatibility',()=>{
   expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE id LIKE 'batch-%'").get()).toMatchObject({n:2});
  });
 });
+
+
+it('exports only bounded previous-day open real boat race IDs without writes',async()=>{
+ const yesterday=new Date();yesterday.setUTCDate(yesterday.getUTCDate()-1);const day=jstDate(yesterday);
+ const raceId=`boat-${day.replaceAll('-','')}-99-01`;
+ addValidatedTrifectaFixture(raceId,'tri-open-id-fixture');
+ sqlite.prepare('UPDATE races SET race_date=? WHERE id=?').run(day,raceId);
+ sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,placed_at,status,data_origin,edge_label) VALUES('open-id-bet',?,'boat','trifecta','1-2-3',100,'manual',?,'open','real','POSITIVE_EDGE')").run(raceId,jstIso());
+ const budgetBefore=sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get();
+ expect((await app.request(`/api/ingest/open-bet-race-ids?date=${day}`,{},env())).status).toBe(401);
+ const response=await app.request(`/api/ingest/open-bet-race-ids?date=${day}`,{headers:{Authorization:'Bearer test-token'}},env());
+ expect(response.status).toBe(200);expect(await response.json()).toEqual({date:day,raceIds:[raceId]});
+ sqlite.prepare("UPDATE bets SET status='lost' WHERE id='open-id-bet'").run();
+ const cleared=await app.request(`/api/ingest/open-bet-race-ids?date=${day}`,{headers:{Authorization:'Bearer test-token'}},env());
+ expect(await cleared.json()).toEqual({date:day,raceIds:[]});
+ expect((await app.request('/api/ingest/open-bet-race-ids?date=2001-01-01',{headers:{Authorization:'Bearer test-token'}},env())).status).toBe(400);
+ expect(sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get()).toEqual(budgetBefore);
+});
