@@ -3,12 +3,14 @@ from __future__ import annotations
 import copy
 import json
 import sys
+from io import BytesIO
 from itertools import permutations
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
-from edgelab import cli
+from edgelab import cli, sync
 
 
 def _store():
@@ -102,6 +104,69 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
     assert {row["race_id"] for row in synced["results"]} == {"prev"}
     assert synced["ticket_predictions"] == []
     assert "predictions" not in synced
+
+
+def test_observation_budget_refusal_keeps_core_daily_sync_and_marks_success(monkeypatch):
+    store = _store()
+    store["results"].append({"race_id": "today", "number": 1, "finish_order": 1, "data_origin": "real"})
+    store["payouts"].append({"race_id": "today", "bet_type": "win", "selection": "1",
+                             "payout": 150, "data_origin": "real"})
+    store["prerace_observations"] = [
+        {"id": f"today-observation-{index}", "race_id": "today"}
+        for index in range(56)
+    ]
+    sent = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def post(req, **_kwargs):
+        table = req.full_url.rsplit("/", 1)[-1]
+        sent.append(table)
+        if table == "prerace-observations":
+            raise HTTPError(req.full_url, 429, "Too Many Requests", {},
+                            BytesIO(b'{"code":"d1_write_budget_exhausted"}'))
+        count = len(json.loads(req.data))
+        return Response({"upserted": count, "changed": count})
+
+    monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(store))
+    monkeypatch.setattr(cli, "save_rows", lambda _value: None)
+    monkeypatch.setattr(cli, "collect_boat", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(cli, "collect_beforeinfo", lambda *_args, **_kwargs:
+                        {"status": "success", "observations": 56})
+    monkeypatch.setattr(sync, "fetch_open_bet_race_ids", lambda _date: set())
+    monkeypatch.setattr(sync, "fetch_model_registry", lambda: [])
+    monkeypatch.setattr(sync.os, "environ", {
+        **sync.os.environ, "EDGELAB_API_URL": "https://example.test", "INGEST_TOKEN": "test-token",
+    })
+    monkeypatch.setattr(sync, "urlopen", post)
+    monkeypatch.setattr(cli, "_inference_timestamp", lambda: "2026-10-08T22:31:02.345+00:00")
+    monkeypatch.setattr(cli, "_predict_boat_trifecta_date", lambda *_args: [{"race_id": "today"}])
+    monkeypatch.setattr("edgelab.learning.score_feedback", lambda _rows: {"models": {}})
+
+    result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
+
+    assert sent[-1] == "prerace-observations"
+    assert sent.count("prerace-observations") == 1
+    assert {"races", "results", "payouts", "entries", "ticket-predictions", "collection-runs"} <= set(sent[:-1])
+    assert result["daily_collection_success"] is True
+    assert result["forecast_ready"] is True
+    assert result["prerace_observation_sync_status"] == "budget_refused"
+    assert result["sync"]["prerace_observations"] == {
+        "status": "budget_refused", "http_status": 429, "chunk": 1, "total_chunks": 2,
+    }
 
 
 def test_daily_fails_closed_when_open_bet_lookup_is_unavailable(monkeypatch):
