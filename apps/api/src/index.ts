@@ -1399,7 +1399,12 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
         console.info(JSON.stringify({event:'boatrace-prerace-capture-archive',status:'failed',reason:'collector_failed'}));
       }
     }
-    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true', env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true',requestBudget).catch(() => undefined);
+    // Without an approved active trifecta model, the immutable archive is the
+    // training source. Avoid spending 120 indexed odds rows per capture for an
+    // unavailable live purchase path; win odds retain their existing behavior.
+    const liveTrifecta=env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true'
+      && !!await first<{id:string}>(env.DB,"SELECT id FROM models WHERE sport='boat' AND bet_type='trifecta' AND status='active' LIMIT 1");
+    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true',liveTrifecta,requestBudget).catch(() => undefined);
   }
   return;
 } };
