@@ -395,4 +395,6 @@ def build_boat_features(entries: Iterable[Mapping[str, Any]], *, race_date: Any,
             value = row.get(key)
             row[f"{key}_race_z"] = ((value - mean) / std if std else 0.0) if value is not None else None
             if key == "exhibition_time":
-                row["exhibiti
+                row["exhibition_rank"] = (1 + sum(other < value for other in values)) if value is not None else None
+                row["exhibition_mean_diff"] = value - mean if value is not None and mean is not None else None
+    return result

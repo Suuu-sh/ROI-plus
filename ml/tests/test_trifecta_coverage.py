@@ -118,4 +118,7 @@ def test_candidate_gate_keeps_synthetic_or_incomplete_coverage_ineligible():
     result = evaluate_candidate_qualification(
         metrics, {"dataOrigin": "sample", "promotionEvidenceComplete": False})
     assert result["evaluationQualified"] is False
-    assert result["promotionEligible"] is
+    assert result["promotionEligible"] is False
+    assert "coverage_source_is_real" in result["failedChecks"]
+    assert "complete_real_point_in_time_coverage" in result["failedChecks"]
+    assert result["promotionBlockers"] == ["independent_artifact_bound_ticket_review_required"]

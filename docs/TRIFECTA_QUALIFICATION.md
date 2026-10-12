@@ -31,4 +31,4 @@ PYTHONPATH=ml python3 -m edgelab.models.trifecta_coverage \
 
 ローカル学習はモデル行を `candidate` のまま保存し、`promotionEligible=false` を維持します。offline評価が通っても自動昇格せず、APIが要求する新しいartifact SHAに結び付いた独立チケット検証証跡が別途必要です。稼働後のrollbackも人手操作で、退役先モデルの独立検証証跡が現行ゲートを通る場合だけ可能です。確率品質やcounterfactual replayは、将来の利益や実購入成績を証明しません。
 
-合成テストデータは `data_origin=sample` として扱います。テスト用に `real` を偽装して適格性・ROIを通すことは�
+合成テストデータは `data_origin=sample` として扱います。テスト用に `real` を偽装して適格性・ROIを通すことはしません。現在のcheckoutに実データストアやprivate fixtureはありません。そのため、この作業では実学習・昇格・rollback操作を行っていません。
