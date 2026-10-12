@@ -95,6 +95,26 @@ def test_bundle_verifier_rejects_member_tampering_even_when_outer_hash_is_recomp
         verify_candidate_model_bundle(bundle_path, expected_model_id=model_id)
 
 
+@pytest.mark.parametrize("member", ["pkl", "json"])
+def test_bundle_verifier_binds_loose_restore_files_to_hashed_members(tmp_path, member):
+    model_id, _ = _candidate_pair(tmp_path)
+    info = build_candidate_model_bundle(model_id, tmp_path)
+    bundle_path = tmp_path / info["bundleFile"]
+    pickle_path = tmp_path / f"{model_id}.pkl"
+    metadata_path = tmp_path / f"{model_id}.json"
+
+    verify_candidate_model_bundle(
+        bundle_path, expected_model_id=model_id,
+        loose_pickle_path=pickle_path, loose_metadata_path=metadata_path)
+
+    changed_path = pickle_path if member == "pkl" else metadata_path
+    changed_path.write_bytes(changed_path.read_bytes() + b"tampered")
+    with pytest.raises(ValueError, match="loose candidate artifact does not match verified bundle member"):
+        verify_candidate_model_bundle(
+            bundle_path, expected_model_id=model_id,
+            loose_pickle_path=pickle_path, loose_metadata_path=metadata_path)
+
+
 def test_bundle_provenance_preserves_runtime_json_pickle_identity(tmp_path):
     model_id = "boat-win-runtime-fixture-20261012-a1b2c3d4"
     metrics = {"logLoss": 1.0, "brier": 0.5, "ece": 0.1}
@@ -138,3 +158,5 @@ def test_weekly_retrain_archives_verified_candidate_files_for_future_restore():
     assert "ml/artifacts/${{ steps.candidate-bundle.outputs.model_id }}.pkl" in workflow
     assert "ml/artifacts/${{ steps.candidate-bundle.outputs.model_id }}.json" in workflow
     assert "ml/artifacts/${{ steps.candidate-bundle.outputs.manifest_file }}" in workflow
+    assert "loose_pickle_path=loose_pickle_path" in workflow
+    assert "loose_metadata_path=loose_metadata_path" in workflow

@@ -50,6 +50,8 @@ PRERACE_V2_FEATURE_COLUMNS = (
 )
 _BEFOREINFO_URL = "https://www.boatrace.jp/owpc/pc/race/beforeinfo"
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_WIND_DIRECTION_DEGREES = {"北": 0.0, "北東": 45.0, "東": 90.0, "南東": 135.0,
+                           "南": 180.0, "南西": 225.0, "西": 270.0, "北西": 315.0}
 
 
 def completed_racer_history(store: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -169,6 +171,8 @@ def classify_prerace_observation(observation: Mapping[str, Any], race: Mapping[s
         return None, "observation_timestamp_or_values_invalid"
     if not isinstance(value, dict):
         return None, "observation_values_invalid"
+    if not observation_has_usable_prerace_features(observation.get("kind"), value):
+        return None, "observation_features_unusable"
     return value, None
 
 
@@ -267,8 +271,7 @@ def build_boat_prerace_v2_features(entries: Iterable[Mapping[str, Any]], *, race
                 if lane not in exhibition or key > (exhibition[lane][0], exhibition[lane][1], exhibition[lane][2]):
                     exhibition[lane] = (*key, values)
     weather_values = weather[3] if weather else {}
-    direction = {"北": 0.0, "北東": 45.0, "東": 90.0, "南東": 135.0,
-                 "南": 180.0, "南西": 225.0, "西": 270.0, "北西": 315.0}.get(weather_values.get("wind_direction"))
+    direction = _WIND_DIRECTION_DEGREES.get(weather_values.get("wind_direction"))
     wind_speed = _safe_number(weather_values.get("wind_speed"))
     wave_height = _safe_number(weather_values.get("wave_height"))
     wind_x = wind_speed * math.sin(math.radians(direction)) if wind_speed is not None and direction is not None else None
@@ -309,8 +312,26 @@ def _safe_number(value: Any) -> float | None:
     try:
         number = float(value)
         return number if math.isfinite(number) else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
+
+
+def observation_has_usable_prerace_features(kind: Any, values: Mapping[str, Any]) -> bool:
+    """Match the source fields that the V2 feature builder can turn into values."""
+    if not isinstance(values, Mapping) or not values:
+        return False
+    if kind == "exhibition":
+        numeric_fields = ("exhibition_time", "tilt", "weight", "start_exhibition",
+                          "start_exhibition_course")
+        return (any(_safe_number(values.get(field)) is not None for field in numeric_fields)
+                or isinstance(values.get("start_exhibition_false_start"), bool))
+    if kind == "weather":
+        if _safe_number(values.get("wave_height")) is not None:
+            return True
+        direction = values.get("wind_direction")
+        return (_safe_number(values.get("wind_speed")) is not None
+                and isinstance(direction, str) and direction in _WIND_DIRECTION_DEGREES)
+    return False
 
 
 def build_boat_features(entries: Iterable[Mapping[str, Any]], *, race_date: Any,

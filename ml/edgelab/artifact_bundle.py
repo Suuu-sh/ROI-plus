@@ -165,8 +165,10 @@ def build_candidate_model_bundle(model_id: str, artifact_dir: str | Path = "ml/a
 
 
 def verify_candidate_model_bundle(bundle_path: str | Path, *, expected_model_id: str | None = None,
-                                  manifest_path: str | Path | None = None) -> dict[str, Any]:
-    """Verify bundle and member hashes without deserializing the pickle."""
+                                  manifest_path: str | Path | None = None,
+                                  loose_pickle_path: str | Path | None = None,
+                                  loose_metadata_path: str | Path | None = None) -> dict[str, Any]:
+    """Verify bundle/member hashes and optional restore files without unpickling."""
     bundle_path = Path(bundle_path)
     sidecar = Path(manifest_path) if manifest_path is not None else bundle_path.with_suffix(".manifest.json")
     try:
@@ -210,6 +212,21 @@ def verify_candidate_model_bundle(bundle_path: str | Path, *, expected_model_id:
             metadata = json.loads(archive.read(f"{model_id}.json"))
     except (OSError, KeyError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
         raise ValueError("candidate bundle is corrupt or incomplete") from exc
+    if (loose_pickle_path is None) != (loose_metadata_path is None):
+        raise ValueError("both loose restore files must be supplied together")
+    if loose_pickle_path is not None and loose_metadata_path is not None:
+        for name, path in ((f"{model_id}.pkl", Path(loose_pickle_path)),
+                           (f"{model_id}.json", Path(loose_metadata_path))):
+            if path.name != name:
+                raise ValueError(f"loose candidate artifact filename does not match bundle member: {name}")
+            try:
+                payload = path.read_bytes()
+            except OSError as exc:
+                raise ValueError(f"loose candidate artifact is missing or unreadable: {name}") from exc
+            record = outer.get("files", {}).get(name)
+            if (not isinstance(record, dict) or record.get("sha256") != _sha256(payload)
+                    or record.get("sizeBytes") != len(payload)):
+                raise ValueError(f"loose candidate artifact does not match verified bundle member: {name}")
     provenance = metadata.get("artifactProvenance") if isinstance(metadata, dict) else None
     outer_provenance = outer.get("provenance")
     if (not isinstance(metadata, dict) or metadata.get("id") != model_id

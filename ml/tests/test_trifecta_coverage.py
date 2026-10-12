@@ -1,5 +1,6 @@
 """Synthetic-only tests for trifecta evidence guards and probability integrity."""
 from datetime import datetime, timezone
+import json
 
 import pytest
 
@@ -7,7 +8,8 @@ from edgelab.features.boat import (_observation_freshness_reason,
                                    _observation_selection_key,
                                    _source_observation_time_reason,
                                    _weather_source_time_reason,
-                                   classify_prerace_observation)
+                                   classify_prerace_observation,
+                                   observation_has_usable_prerace_features)
 from edgelab.models.trifecta_coverage import (
     EXPECTED_TRIFECTA_SELECTIONS,
     _t60_cutoff,
@@ -91,6 +93,47 @@ def test_feature_validator_rejects_synthetic_observation_rows():
     }
     assert classify_prerace_observation(observation, race, "2026-10-12T12:00:00+00:00") == (
         None, "synthetic_fixture_or_non_real_origin")
+
+
+def test_feature_coverage_requires_payloads_that_map_to_v2_features():
+    # Each payload below is an explicitly synthetic unit-test fixture. The
+    # coverage audit shares this mapper through classify_prerace_observation.
+    fixtures = [
+        {"fixture": "synthetic", "kind": "exhibition", "values": {}},
+        {"fixture": "synthetic", "kind": "exhibition", "values": {"other": 6.7}},
+        {"fixture": "synthetic", "kind": "exhibition", "values": {"exhibition_time": "NaN"}},
+        {"fixture": "synthetic", "kind": "weather", "values": {}},
+        {"fixture": "synthetic", "kind": "weather", "values": {"wind_speed": 2}},
+        {"fixture": "synthetic", "kind": "weather", "values": {"other": 2}},
+    ]
+    assert not any(observation_has_usable_prerace_features(row["kind"], row["values"])
+                   for row in fixtures)
+    assert observation_has_usable_prerace_features("exhibition", {"exhibition_time": "6.7"})
+    assert observation_has_usable_prerace_features("exhibition", {"start_exhibition_false_start": False})
+    assert observation_has_usable_prerace_features("weather", {"wave_height": 3})
+    assert observation_has_usable_prerace_features(
+        "weather", {"wind_speed": 2, "wind_direction": "北"})
+
+    # Exercise the shared classifier path coverage uses. `data_origin=real`
+    # only gets these synthetic unit inputs past its provenance gate; they are
+    # marked as test fixtures and are never fed to a trainer.
+    race = {"test_fixture": "synthetic", "data_origin": "real",
+            "id": "boat-20261012-24-01", "race_date": "2026-10-12",
+            "venue_id": "24", "race_no": 1}
+    for row in fixtures:
+        kind = row["kind"]
+        entry_number = 0 if kind == "weather" else 1
+        observation = {
+            "test_fixture": "synthetic", "data_origin": "real", "race_id": race["id"],
+            "kind": kind, "entry_number": entry_number,
+            "source_url": "https://www.boatrace.jp/owpc/pc/race/beforeinfo?hd=20261012&jcd=24&rno=1",
+            "source_sha256": "a" * 64,
+            "fetched_at": "2026-10-12T11:58:00+00:00",
+            "available_at": "2026-10-12T11:58:00+00:00",
+            "values_json": json.dumps(row["values"]),
+        }
+        assert classify_prerace_observation(
+            observation, race, "2026-10-12T12:00:00+00:00") == (None, "observation_features_unusable")
 
 
 def test_coverage_audit_never_counts_sample_races_as_real_evidence():

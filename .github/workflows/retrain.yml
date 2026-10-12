@@ -88,7 +88,11 @@ jobs:
           model_id = manifest.get("modelId")
           artifact_name = f"candidate-model-artifact-{model_id}"
           bundle_path = Path("ml/artifacts") / str(manifest.get("bundleFile") or "")
-          verified = verify_candidate_model_bundle(bundle_path, expected_model_id=model_id, manifest_path=sidecar)
+          loose_pickle_path = Path("ml/artifacts") / f"{model_id}.pkl"
+          loose_metadata_path = Path("ml/artifacts") / f"{model_id}.json"
+          verified = verify_candidate_model_bundle(
+              bundle_path, expected_model_id=model_id, manifest_path=sidecar,
+              loose_pickle_path=loose_pickle_path, loose_metadata_path=loose_metadata_path)
           provenance = verified.get("provenance") or {}
           if (verified.get("artifactName") != artifact_name
                   or provenance.get("artifactRunId") != os.environ["GITHUB_RUN_ID"]
