@@ -41,6 +41,13 @@ def _archive(captured_at, exhibit_time, odds_price=20.0):
             "weatherObservedAt": (before_dt - timedelta(minutes=1)).isoformat(),
             "weatherObservationLabel": (before_dt - timedelta(minutes=1)).strftime("%H:%M現在"),
         },
+        "raceList": {
+            "url": "https://www.boatrace.jp/owpc/pc/race/racelist?hd=20261011&jcd=01&rno=1",
+            "sha256": "c" * 64, "capturedAt": before_at,
+            "parserVersion": "boatrace-racelist-v1",
+            "entries": [{"lane": lane, "registrationNumber": f"{1000 + lane:04d}"}
+                        for lane in range(1, 7)],
+        },
         "trifectaOdds": {
             "url": "https://www.boatrace.jp/owpc/pc/race/odds3t?rno=1&jcd=01&hd=20261011",
             "sha256": "b" * 64, "capturedAt": captured_at,
@@ -64,7 +71,8 @@ def _store():
                         "race_no": 1, "data_origin": "real", "post_time": "2026-10-11T15:20:00+09:00"}],
             "entries": [{"race_id": RACE_ID, "number": lane, "data_origin": "real",
                          "available_at": "2026-10-11T00:00:00+09:00", "national_win_rate": 0.2,
-                         "local_win_rate": 0.2, "motor_2rate": 30, "boat_2rate": 30}
+                         "local_win_rate": 0.2, "motor_2rate": 30, "boat_2rate": 30,
+                         "features_json": json.dumps({"racer_id": f"{1000 + lane:04d}"})}
                         for lane in range(1, 7)],
             "prerace_observations": [], "prerace_capture_archive_manifest": [],
             "prerace_capture_odds": [], "odds_snapshots": [], "results": [], "payouts": []}
@@ -102,7 +110,7 @@ def test_bad_checksum_and_wrong_day_are_explicitly_excluded_without_mutation():
     assert not store["races"][0].get("betting_cutoff_at")
 
 
-def test_partial_exhibition_capture_does_not_discard_verified_complete_odds():
+def test_partial_exhibition_capture_is_rejected_as_not_training_evidence():
     wrapper = _archive("2026-10-11T15:17:03+09:00", 6.78)
     archive = json.loads(wrapper["archiveJson"])
     archive["beforeinfo"]["exhibitions"] = archive["beforeinfo"]["exhibitions"][:2]
@@ -110,8 +118,8 @@ def test_partial_exhibition_capture_does_not_discard_verified_complete_odds():
     wrapper["archiveSha256"] = hashlib.sha256(wrapper["archiveJson"].encode()).hexdigest()
     store = _store()
     result = import_capture_archives(store, [_page(wrapper)], DAY)
-    assert result["importedArchives"] == 1 and result["excludedArchives"] == 0
-    assert result["oddsRowsAdded"] == 120 and result["observationsAdded"] == 3
+    assert result["importedArchives"] == 0 and result["excludedArchives"] == 1
+    assert not store["prerace_capture_odds"] and not store["prerace_observations"]
 
 
 def test_existing_earlier_cutoff_observation_survives_later_archive_import():

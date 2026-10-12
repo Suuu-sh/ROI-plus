@@ -9,7 +9,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Mapping, Sequence
 
 
@@ -18,6 +18,7 @@ ARCHIVE_SCHEMA = "boat-prerace-capture-v1"
 TRUSTED_CUTOFF_SOURCE = "boatrace-racelist-cutoff-v1"
 BEFOREINFO_PARSER = "boatrace-beforeinfo-v1"
 ODDS_PARSER = "boatrace-trifecta-odds-v1"
+RACELIST_PARSER = "boatrace-racelist-v1"
 ODDS_SOURCE = "boatrace-trifecta-official-v1"
 ODDS_QUALITY = "verified-complete-v1"
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -53,6 +54,9 @@ def _source_url(kind: str, race: Mapping[str, Any]) -> str:
     race_no = int(race["raceNo"])
     if kind == "beforeinfo":
         return ("https://www.boatrace.jp/owpc/pc/race/beforeinfo?"
+                f"hd={day}&jcd={venue}&rno={race_no}")
+    if kind == "racelist":
+        return ("https://www.boatrace.jp/owpc/pc/race/racelist?"
                 f"hd={day}&jcd={venue}&rno={race_no}")
     return ("https://www.boatrace.jp/owpc/pc/race/odds3t?"
             f"rno={race_no}&jcd={venue}&hd={day}")
@@ -120,14 +124,18 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
 
     before = archive.get("beforeinfo")
     odds = archive.get("trifectaOdds")
-    if not isinstance(before, dict) or not isinstance(odds, dict):
+    race_list = archive.get("raceList")
+    if not isinstance(before, dict) or not isinstance(odds, dict) or not isinstance(race_list, dict):
         raise ValueError("archive_sources_missing")
-    if before.get("parserVersion") != BEFOREINFO_PARSER or odds.get("parserVersion") != ODDS_PARSER:
+    if (before.get("parserVersion") != BEFOREINFO_PARSER or odds.get("parserVersion") != ODDS_PARSER
+            or race_list.get("parserVersion") != RACELIST_PARSER):
         raise ValueError("archive_parser_version_unsupported")
     if (before.get("url") != _source_url("beforeinfo", race_payload)
-            or odds.get("url") != _source_url("odds", race_payload)):
+            or odds.get("url") != _source_url("odds", race_payload)
+            or race_list.get("url") != _source_url("racelist", race_payload)):
         raise ValueError("archive_source_identity_mismatch")
     if (not _SHA256.fullmatch(str(before.get("sha256", "")))
+            or not _SHA256.fullmatch(str(race_list.get("sha256", "")))
             or not _SHA256.fullmatch(str(odds.get("sha256", "")))):
         raise ValueError("source_checksum_invalid")
     before_at = _timestamp(before.get("capturedAt"))
@@ -135,8 +143,11 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
     archived_at = _timestamp(wrapper.get("capturedAt"))
     archive_root_at = _timestamp(archive.get("capturedAt"))
     cutoff_at = _timestamp(before.get("cutoffAt"))
+    race_list_at = _timestamp(race_list.get("capturedAt"))
     if (odds_at != archived_at or archive_root_at != archived_at
             or before_at > cutoff_at or odds_at > cutoff_at
+            or race_list_at < cutoff_at - timedelta(minutes=10)
+            or race_list_at > cutoff_at - timedelta(seconds=60)
             or cutoff_at.date().isoformat() != requested_date):
         raise ValueError("archive_capture_or_cutoff_order_invalid")
     if odds.get("qualityStatus") != ODDS_QUALITY or odds.get("final") is not False:
@@ -157,10 +168,14 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
             elif value is not None and (isinstance(value, bool) or not _finite(value)):
                 raise ValueError("exhibition_value_invalid")
         exhibits_by_lane[row["lane"]] = row
+    if set(exhibits_by_lane) != set(range(1, 7)):
+        raise ValueError("exhibition_lanes_incomplete")
     weather_at = before.get("weatherObservedAt")
     if weather_at is not None:
         if _timestamp(weather_at) > before_at:
             raise ValueError("weather_observation_after_capture")
+    else:
+        raise ValueError("weather_observation_missing")
     weather_label = before.get("weatherObservationLabel")
     if weather_label is not None and not isinstance(weather_label, str):
         raise ValueError("weather_label_invalid")
@@ -174,6 +189,34 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
         if value is not None and not (isinstance(value, str) or _finite(value)):
             raise ValueError("weather_value_invalid")
         mapped_weather[_WEATHER_FIELDS[source]] = value
+
+    list_entries = race_list.get("entries")
+    if not isinstance(list_entries, list) or len(list_entries) != 6:
+        raise ValueError("racelist_entries_incomplete")
+    cached_entries = {int(row["number"]): row for row in store.get("entries", [])
+                      if row.get("race_id") == race_id and row.get("data_origin") == "real"
+                      and str(row.get("number", "")).isdigit()}
+    if set(cached_entries) != set(range(1, 7)):
+        raise ValueError("racelist_cached_entries_incomplete")
+    source_lanes: dict[int, str] = {}
+    for item in list_entries:
+        if not isinstance(item, dict) or type(item.get("lane")) is not int or item["lane"] not in range(1, 7):
+            raise ValueError("racelist_entry_invalid")
+        registration = item.get("registrationNumber")
+        if not isinstance(registration, str) or not re.fullmatch(r"\d{4,5}", registration):
+            raise ValueError("racelist_entry_invalid")
+        if item["lane"] in source_lanes:
+            raise ValueError("racelist_entry_duplicate")
+        try:
+            cached_features = json.loads(cached_entries[item["lane"]].get("features_json") or "{}")
+        except (TypeError, ValueError):
+            cached_features = {}
+        cached_registration = cached_entries[item["lane"]].get("racer_id") or cached_features.get("racer_id")
+        if str(cached_registration or "") != registration:
+            raise ValueError("racelist_entry_identity_mismatch")
+        source_lanes[item["lane"]] = registration
+    if set(source_lanes) != set(range(1, 7)):
+        raise ValueError("racelist_entries_incomplete")
 
     odds_rows = odds.get("odds")
     if not isinstance(odds_rows, list) or len(odds_rows) != 120:
@@ -224,6 +267,9 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
                 "schema": ARCHIVE_SCHEMA, "beforeinfo_captured_at": str(before["capturedAt"])}
     manifest["_cutoff_at"] = str(before["cutoffAt"])
     manifest["_cutoff_observed_at"] = str(before["capturedAt"])
+    manifest["_entry_source_evidence"] = [{"lane": lane, "captured_at": race_list_at.isoformat(),
+                                             "source_sha256": race_list["sha256"]}
+                                            for lane in sorted(source_lanes)]
     return manifest, observations, market
 
 
@@ -286,6 +332,7 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
 
             race = next(row for row in store["races"] if row.get("id") == manifest["race_id"])
             cutoff_text, observed_text = manifest.pop("_cutoff_at"), manifest.pop("_cutoff_observed_at")
+            entry_source_evidence = manifest.pop("_entry_source_evidence")
             existing_cutoff = race.get("betting_cutoff_at")
             existing_source = race.get("betting_cutoff_source")
             existing_observed = race.get("betting_cutoff_observed_at")
@@ -338,6 +385,23 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
                 cutoff_evidence_updated += 1
             elif cutoff_preserved:
                 cutoff_evidence_preserved += 1
+            entries_by_lane = {int(row["number"]): row for row in store.get("entries", [])
+                               if row.get("race_id") == manifest["race_id"]
+                               and row.get("data_origin") == "real" and str(row.get("number", "")).isdigit()}
+            for evidence in entry_source_evidence:
+                entry = entries_by_lane[evidence["lane"]]
+                previous_at = entry.get("source_observed_at") or entry.get("source_available_at")
+                if previous_at:
+                    try:
+                        previous_dt = _timestamp(previous_at)
+                    except ValueError:
+                        # Keep malformed pre-existing evidence untouched; do not
+                        # overwrite it with a later archive's claim.
+                        continue
+                    if previous_dt <= _timestamp(evidence["captured_at"]):
+                        continue
+                entry["source_observed_at"] = evidence["captured_at"]
+                entry["source_sha256"] = evidence["source_sha256"]
             for row in new_observations:
                 key = tuple(row.get(k) for k in ("race_id", "kind", "entry_number", "fetched_at"))
                 if key not in observations:
