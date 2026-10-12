@@ -46,7 +46,7 @@ export function PerformancePage() {
           </>}
       </Section>
 
-      {origin === 'real' && bd.bySport.length === 0 && (
+      {origin === 'real' && bets.length === 0 && (
         <div className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-muted">
           実データの仮想購入履歴がまだありません。オッズや予測が未取得の場合、期待収益率や購入候補は算出できません。収益性は、確定した実データの履歴とモデル管理の評価を分けて確認してください。
         </div>
@@ -60,7 +60,7 @@ export function PerformancePage() {
               <div className={`flex items-center gap-2 text-sm font-semibold ${s === 'horse' ? 'text-horse' : 'text-boat'}`}><SportIcon sport={s} />{t().sport[s]}の回収率</div>
               <div className={`num mt-2 text-3xl font-semibold ${r?.roi == null ? '' : r.roi >= 1 ? 'text-pos' : 'text-neg'}`}>{pct(r?.roi)}</div>
               <div className="num mt-1 flex gap-4 text-xs text-muted">
-                <span>購入 {r?.bets ?? 0}</span><span>的中率 {pct(r?.hitRate)}</span>
+                <span>確定購入 {r?.bets ?? 0}</span><span>的中率 {pct(r?.hitRate)}</span>
                 <span className={tone(r?.profit)}>損益 {signedYen(r?.profit ?? 0)}</span>
               </div>
             </div>
@@ -69,7 +69,7 @@ export function PerformancePage() {
       </div>
 
       <div className="grid gap-5 xl:grid-cols-2">
-        <Section title="月別損益">
+        <Section title="月別確定損益">
           <MonthlyChart data={bd.byMonth} />
         </Section>
         <Section title="予測確率の校正" right={<span className="text-xs text-muted">対角線に近いほど良い</span>}>
@@ -78,15 +78,15 @@ export function PerformancePage() {
       </div>
 
       <div className="grid gap-5 xl:grid-cols-2">
-        <Section title="期待値帯別の成績">
+        <Section title="期待値帯別の確定成績">
           <SimpleTable
-            head={['期待収益率', '購入', '購入額', '回収率']}
+            head={['期待収益率', '確定購入', '確定購入額', '回収率']}
             rows={bd.byEdge.map((r) => [r.bucket, r.bets, yen(r.stake), <RoiCell roi={r.roi} />])}
           />
         </Section>
-        <Section title="モデル別の成績">
+        <Section title="モデル別の確定成績">
           <SimpleTable
-            head={['モデル', '購入', '購入額', '回収率']}
+            head={['モデル', '確定購入', '確定購入額', '回収率']}
             rows={bd.byModel.map((r) => [<span className="font-mono text-xs">{r.modelId}</span>, r.bets, yen(r.stake), <RoiCell roi={r.roi} />])}
           />
         </Section>

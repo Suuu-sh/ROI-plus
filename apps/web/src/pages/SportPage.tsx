@@ -74,7 +74,7 @@ function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeo
     </header>
     <div className="grid grid-cols-2 divide-x divide-y divide-line md:grid-cols-4 md:divide-y-0">
       <PerformanceMetric label="累計損益" value={signedYen(ov.totalProfit)} valueClass={tone(ov.totalProfit)} />
-      <PerformanceMetric label="回収率" value={pct(ov.roi)} sub="確定払戻 ÷ 購入額" />
+      <PerformanceMetric label="回収率" value={pct(ov.roi)} sub="確定払戻 ÷ 確定購入額（返還除外）" />
       <PerformanceMetric label="仮想購入回数" value={ov.betCount.toLocaleString()} sub={`確定 ${ov.settledCount}`} />
       <PerformanceMetric label="的中率" value={pct(ov.hitRate)} />
     </div>

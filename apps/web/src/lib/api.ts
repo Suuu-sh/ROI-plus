@@ -53,7 +53,7 @@ export const api = {
   race: (id: string) => req<RaceDetail>(`/races/${encodeURIComponent(id)}`),
   rankings: (sport: Sport, date: string, origin: OriginFilter) =>
     req<RankingCandidate[]>(`/rankings${qs({ sport, date, origin })}`),
-  placeBet: (b: { raceId: string; betType: BetType; selection: string; stake: number }) =>
+  placeBet: (b: { raceId: string; betType: BetType; selection: string; stake: number; requestId: string }) =>
     req<Bet>('/bets', { method: 'POST', body: JSON.stringify(b) }),
   placeBetBatch: (b: { raceId: string; betType: 'win'; requestId: string; selections: { selection: string; stake: number }[] }) =>
     req<{ groupId: string; bets: Bet[] }>('/bets', { method: 'POST', body: JSON.stringify(b) }),
