@@ -49,7 +49,9 @@ def test_missing_selected_artifact_keeps_collection_success_separate_from_foreca
         sync_calls.append(copy.deepcopy(payload))
         for table, values in payload.items():
             synced.setdefault(table, []).extend(values)
-        return {table: {"ok": True} for table in payload}
+        return {table: {"status": 200, "upserted": len(values), "changed": len(values),
+                        "noop": not values}
+                for table, values in payload.items() if values}
     monkeypatch.setattr("edgelab.sync.sync_rows", sync)
 
     result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
@@ -61,8 +63,9 @@ def test_missing_selected_artifact_keeps_collection_success_separate_from_foreca
     assert result.get("predictions", result.get("ticket_predictions")) == 0
     assert synced.get("predictions", synced.get("ticket_predictions")) == []
     assert {row["race_id"] for row in synced["results"]} == {"prev"}
-    assert sync_calls[0]["results"] == [next(r for r in store["results"] if r["race_id"] == "prev")]
-    assert "prev" not in {r["id"] for r in sync_calls[1]["races"]}
+    assert sync_calls[1]["results"] == [next(r for r in store["results"] if r["race_id"] == "prev")]
+    assert "prev" not in {r["id"] for r in sync_calls[2]["races"]}
+    assert result["sync"]["results"] == {"status": 200, "upserted": 1, "changed": 1, "noop": False}
 
 
 def test_daily_workflow_restores_pinned_bundle_and_skips_only_complete_forecasts():

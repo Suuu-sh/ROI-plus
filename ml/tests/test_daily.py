@@ -59,7 +59,9 @@ def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
         sync_calls.append(copy.deepcopy(payload))
         for table, values in payload.items():
             synced.setdefault(table, []).extend(values)
-        return {table: {"ok": True} for table in payload}
+        return {table: {"status": 200, "upserted": len(values), "changed": len(values),
+                        "noop": not values}
+                for table, values in payload.items() if values}
     monkeypatch.setattr("edgelab.sync.sync_rows", sync)
 
     result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
@@ -70,8 +72,10 @@ def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
     assert {(row["race_id"], row["number"]) for row in synced["entries"]} == {("today", 1)}
     assert {row["race_id"] for row in synced["results"]} == {"today"}
     assert {row["race_id"] for row in synced["payouts"]} == {"today"}
-    assert sync_calls[0] == {"results": [], "payouts": []}
-    assert sync_calls[1]["races"] == [next(r for r in store["races"] if r["id"] == "today")]
+    assert sync_calls[0] == {"entries": []}
+    assert sync_calls[1] == {"results": [], "payouts": []}
+    assert sync_calls[2]["races"] == [next(r for r in store["races"] if r["id"] == "today")]
+    assert result["sync"]["results"] == {"status": 200, "upserted": 1, "changed": 1, "noop": False}
     # The fixture omits one prior race, one K-entry, one result, and one payout
     # from D1 (14 units at current Worker factors 5/4/3/2). Local learning history stays.
     assert {row["id"] for row in feedback_rows[0]["races"]} == {"prev", "today", "older"}
@@ -89,6 +93,10 @@ def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
 
 def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monkeypatch):
     store = _store()
+    store["entries"][0]["features_json"] = json.dumps({"finish_code": "F"})
+    store["results"].append({"race_id": "today", "number": 1, "finish_order": 1, "data_origin": "real"})
+    store["payouts"].append({"race_id": "today", "bet_type": "win", "selection": "1",
+                             "payout": 150, "data_origin": "real"})
     synced, sync_calls = {}, []
     monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(store))
     monkeypatch.setattr(cli, "save_rows", lambda value: None)
@@ -102,7 +110,9 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
         sync_calls.append(copy.deepcopy(payload))
         for table, values in payload.items():
             synced.setdefault(table, []).extend(values)
-        return {table: {"ok": True} for table in payload}
+        return {table: {"status": 200, "upserted": len(values), "changed": len(values),
+                        "noop": not values}
+                for table, values in payload.items() if values}
     monkeypatch.setattr("edgelab.sync.sync_rows", sync)
 
     result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
@@ -111,9 +121,11 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
     assert result["forecast_ready"] is False
     assert result["forecast_status"] == "not_ready"
     assert result["forecast_reason"] == "RuntimeError: no active model in authoritative local registry"
-    assert {row["race_id"] for row in synced["results"]} == {"prev"}
-    assert sync_calls[0]["results"] == [next(r for r in store["results"] if r["race_id"] == "prev")]
-    assert "prev" not in {r["id"] for r in sync_calls[1]["races"]}
+    assert {row["race_id"] for row in synced["results"]} == {"prev", "today"}
+    assert sync_calls[0]["entries"] == [store["entries"][0]]
+    assert sync_calls[1]["results"] == [next(r for r in store["results"] if r["race_id"] == "prev")]
+    assert "prev" not in {r["id"] for r in sync_calls[2]["races"]}
+    assert result["sync"]["results"] == {"status": 200, "upserted": 2, "changed": 2, "noop": False}
     assert synced["ticket_predictions"] == []
     assert "predictions" not in synced
 

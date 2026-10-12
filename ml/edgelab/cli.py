@@ -37,6 +37,31 @@ def _primary_prediction_as_of(betting_cutoff_at: str) -> str:
     return (parsed - timedelta(seconds=60)).isoformat(timespec="seconds")
 
 
+def _merge_sync_responses(*responses: dict[str, Any]) -> dict[str, Any]:
+    """Merge per-table ingest counts from sequential priority phases."""
+    merged: dict[str, Any] = {}
+    for response in responses:
+        for table, value in response.items():
+            if table not in merged:
+                merged[table] = value
+                continue
+            chunks = merged[table] if isinstance(merged[table], list) else [merged[table]]
+            incoming = value if isinstance(value, list) else [value]
+            all_chunks = [*chunks, *incoming]
+            upserted = [item.get("upserted") for item in all_chunks if isinstance(item, dict)]
+            changed = [item.get("changed") for item in all_chunks if isinstance(item, dict)]
+            statuses = [item.get("status") for item in all_chunks if isinstance(item, dict)]
+            if (len(upserted) != len(all_chunks) or len(changed) != len(all_chunks)
+                    or any(not isinstance(count, int) or isinstance(count, bool) for count in (*upserted, *changed))):
+                # sync_rows validates this contract; retain all evidence if a
+                # future response shape is added rather than dropping a phase.
+                merged[table] = all_chunks
+                continue
+            merged[table] = {"status": statuses[-1], "upserted": sum(upserted),
+                             "changed": sum(changed), "noop": sum(changed) == 0}
+    return merged
+
+
 def _apply_model_registry(rows: dict[str, Any], registry: list[dict[str, Any]]) -> set[str]:
     """Replace cached lifecycle claims with the authenticated registry snapshot."""
     remote = {str(model.get("id")): model for model in registry if model.get("id")}
@@ -296,11 +321,12 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         "payouts": [r for r in rows.get("payouts", [])
                     if r.get("race_id") in previous_open_bet_ids],
     }
+    prior_nonfinisher_entries = [r for r in rows.get("entries", [])
+                                 if r.get("race_id") in previous_open_bet_ids
+                                 and has_official_nonfinisher_marker(r)]
     payload = {
         "races": [r for r in rows.get("races", []) if r.get("id") in today_ids],
-        "entries": [r for r in rows.get("entries", [])
-                    if r.get("race_id") in today_ids
-                    or (r.get("race_id") in previous_open_bet_ids and has_official_nonfinisher_marker(r))],
+        "entries": [r for r in rows.get("entries", []) if r.get("race_id") in today_ids],
         "ticket_predictions": ticket_predictions,
         # K files can already contain same-day finished races during midday or
         # late-night runs; prior-day settlement was sent in the priority phase.
@@ -312,11 +338,13 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         "models": rows.get("models", []),
     }
     from edgelab.sync import sync_rows
-    # A 429 is deliberately allowed to fail the run; this only changes which
-    # writes get first claim on the existing budget, not whether failures count.
+    # Before outcome rows can mark a race finished, persist official K-file
+    # non-finisher markers for open-bet races. A 429 in any phase still fails
+    # the run; the ordering only determines which essential facts go first.
+    prior_entry_sync = sync_rows({"entries": prior_nonfinisher_entries})
     settlement_sync = sync_rows(settlement_payload)
     daily_sync = sync_rows(payload)
-    synced = {**settlement_sync, **daily_sync}
+    synced = _merge_sync_responses(prior_entry_sync, settlement_sync, daily_sync)
     from edgelab.learning import score_feedback
     learning_report = score_feedback(rows)
     collection_runs = [run for run in payload["collection_runs"] if run.get("sport") == "boat"]
