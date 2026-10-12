@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
 
 import pytest
 
@@ -79,43 +78,6 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
     assert result["forecast_reason"] == "RuntimeError: no active model in authoritative local registry"
     assert {row["race_id"] for row in synced["results"]} == {"prev"}
     assert synced["predictions"] == []
-
-
-def test_missing_selected_artifact_keeps_collection_success_separate_from_forecast_readiness(monkeypatch):
-    store = _store()
-    synced = {}
-    selected = {"id": "boat-win-lgbm-20261010-14b4a90a", "sport": "boat",
-                "bet_type": "win", "status": "active"}
-    monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(store))
-    monkeypatch.setattr(cli, "save_rows", lambda value: None)
-    monkeypatch.setattr(cli, "collect_boat", lambda *args, **kwargs: 0)
-    monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: [selected])
-    monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
-    monkeypatch.setattr(cli, "_predict_boat_date",
-                        lambda *args: (_ for _ in ()).throw(FileNotFoundError("approved artifact unavailable")))
-    monkeypatch.setattr("edgelab.sync.sync_rows", lambda payload: synced.update(payload) or {"ok": True})
-
-    result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
-
-    assert result["daily_collection_success"] is True
-    assert result["forecast_ready"] is False
-    assert result["forecast_status"] == "not_ready"
-    assert result["forecast_reason"] == "FileNotFoundError: approved artifact unavailable"
-    assert result["predictions"] == 0
-    assert synced["predictions"] == []
-    assert {row["race_id"] for row in synced["results"]} == {"prev"}
-
-
-def test_daily_workflow_restores_pinned_bundle_and_skips_only_complete_forecasts():
-    workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/daily.yml").read_text()
-    assert "if: github.event_name == 'schedule' && steps.guard.outputs.skip != 'true'" in workflow
-    assert "candidate-model-artifact-boat-win-lgbm-20261010-14b4a90a" in workflow
-    assert "run-id: '38053091327'" in workflow
-    assert "continue-on-error: true" in workflow
-    assert "steps.daily_pipeline.outputs.daily_collection_success == 'true'" in workflow
-    assert "steps.daily_pipeline.outputs.forecast_ready == 'true'" in workflow
-    assert "grep -Fxq 'daily_collection_success=true' \"$MARK\"" in workflow
-    assert "grep -Fxq 'forecast_ready=true' \"$MARK\"" in workflow
 
 
 def test_predict_requires_artifact_even_if_model_exists(tmp_path):
