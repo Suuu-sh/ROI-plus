@@ -42,7 +42,7 @@ export type WriteBudgetStatus = {
   state: 'known' | 'exhausted' | 'missing' | 'invalid';
 };
 export type WriteCategory = 'odds' | 'optional' | 'essential' | 'collection' | 'ingest' | 'worker';
-export type IngestTable = 'venues' | 'races' | 'entries' | 'odds_snapshots' | 'results' | 'payouts' | 'predictions' | 'ticket_predictions' | 'models' | 'collection_runs';
+export type IngestTable = 'venues' | 'races' | 'entries' | 'odds_snapshots' | 'results' | 'payouts' | 'predictions' | 'ticket_predictions' | 'models' | 'collection_runs' | 'boatrace_prerace_observations';
 
 const validDate = (value: unknown): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
 function parse(value: string): WriteBudget | null {
@@ -192,6 +192,7 @@ export async function seedUnknownWriteBudget(db: Db, date: string): Promise<bool
 const INGEST_WRITE_FACTOR: Record<IngestTable, number> = {
   venues: 3, races: 5, entries: 4, odds_snapshots: 5, results: 3,
   payouts: 2, predictions: 4, ticket_predictions: 5, models: 3, 'collection_runs': 5,
+  boatrace_prerace_observations: 5,
 };
 export const estimateIngestWriteUnits = (changedByTable: Partial<Record<IngestTable, number>>, sideEffectRows = 0) =>
   Math.max(1, Object.entries(changedByTable).reduce((sum, [table, count]) => sum + (count ?? 0) * INGEST_WRITE_FACTOR[table as IngestTable], sideEffectRows * 4) + 8);
