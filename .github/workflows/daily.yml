@@ -91,9 +91,28 @@ jobs:
           MARK="ml/data/daily_ok_$(TZ=Asia/Tokyo date +%F)"
           HOUR=$(TZ=Asia/Tokyo date +%H)
           if [ "${{ github.event_name }}" = "schedule" ] && [ "$HOUR" -lt 20 ] && [ -f "$MARK" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+            if grep -Fxq 'daily_collection_success=true' "$MARK" && grep -Fxq 'forecast_ready=true' "$MARK"; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            else
+              echo 'Previous daily marker is incomplete or predates readiness tracking; retrying.'
+              rm -f "$MARK"
+            fi
           fi
+      # Source: Actions run 38053091327 / artifact 11669982332. This original
+      # validated bundle is only a recovery source. The daily
+      # pipeline still selects its active model from the authenticated registry
+      # and verifies the artifact SHA256 plus venue/training provenance before inference.
+      - name: Restore pinned model artifact for scheduled recovery
+        if: github.event_name == 'schedule' && steps.guard.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: candidate-model-artifact-boat-win-lgbm-20261010-14b4a90a
+          run-id: '38053091327'
+          github-token: ${{ github.token }}
+          path: ml/artifacts
       - name: Run daily pipeline
+        id: daily_pipeline
         if: steps.guard.outputs.skip != 'true'
         env:
           PYTHONPATH: ml
@@ -101,10 +120,27 @@ jobs:
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: python -m edgelab daily
+        run: |
+          set -euo pipefail
+          REPORT="$RUNNER_TEMP/daily-report.json"
+          python -m edgelab daily | tee "$REPORT"
+          COLLECTION_SUCCESS="$(jq -r '.daily_collection_success | if type == "boolean" then tostring else empty end' "$REPORT")"
+          FORECAST_READY="$(jq -r '.forecast_ready | if type == "boolean" then tostring else empty end' "$REPORT")"
+          [[ "$COLLECTION_SUCCESS" == 'true' || "$COLLECTION_SUCCESS" == 'false' ]]
+          [[ "$FORECAST_READY" == 'true' || "$FORECAST_READY" == 'false' ]]
+          echo "daily_collection_success=$COLLECTION_SUCCESS" >> "$GITHUB_OUTPUT"
+          echo "forecast_ready=$FORECAST_READY" >> "$GITHUB_OUTPUT"
       - name: Mark success
-        if: success() && steps.guard.outputs.skip != 'true'
-        run: touch "ml/data/daily_ok_$(TZ=Asia/Tokyo date +%F)"
+        if: >-
+          success() && steps.guard.outputs.skip != 'true' &&
+          (github.event_name != 'schedule' ||
+          (steps.daily_pipeline.outputs.daily_collection_success == 'true' &&
+          steps.daily_pipeline.outputs.forecast_ready == 'true'))
+        run: |
+          MARK="ml/data/daily_ok_$(TZ=Asia/Tokyo date +%F)"
+          printf 'daily_collection_success=%s\nforecast_ready=%s\n' \
+            '${{ steps.daily_pipeline.outputs.daily_collection_success }}' \
+            '${{ steps.daily_pipeline.outputs.forecast_ready }}' > "$MARK"
       - name: Archive learning feedback report
         if: always() && hashFiles('ml/data/learning/report.json') != ''
         uses: actions/upload-artifact@v4
