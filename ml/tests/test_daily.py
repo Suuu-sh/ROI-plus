@@ -48,7 +48,8 @@ def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
     monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: timing_events.append("registry") or [])
     monkeypatch.setattr("edgelab.sync.fetch_open_bet_race_ids", lambda target_date: set())
     monkeypatch.setattr(cli, "_inference_timestamp", lambda: timing_events.append("timestamp") or fresh_as_of)
-    monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
+    feedback_rows = []
+    monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: feedback_rows.append(rows) or {"models": {}})
     def predict(rows, day, as_of):
         timing_events.append(("prediction", as_of))
         return [{"race_id": "today", "bet_type": "trifecta"}]
@@ -64,6 +65,10 @@ def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
     assert {(row["race_id"], row["number"]) for row in synced["entries"]} == {("today", 1)}
     assert {row["race_id"] for row in synced["results"]} == {"today"}
     assert {row["race_id"] for row in synced["payouts"]} == {"today"}
+    # The fixture omits one prior race, one K-entry, one result, and one payout
+    # from D1 (14 units at current Worker factors 5/4/3/2). Local learning history stays.
+    assert {row["id"] for row in feedback_rows[0]["races"]} == {"prev", "today", "older"}
+    assert {row["id"] for row in feedback_rows[0]["races"]} == {"prev", "today", "older"}
     assert synced["ticket_predictions"] == [{"race_id": "today", "bet_type": "trifecta"}]
     assert "predictions" not in synced
     assert result["ticket_predictions"] == 1
