@@ -248,10 +248,12 @@ describe('minute odds collection controls', () => {
     minute += (5 - minute % 60 + 60) % 60;
     await worker.scheduled({ cron: '* * * * *', scheduledTime: minute * 60_000 } as ScheduledController,
       { DB, ENABLE_AUTO_BET: 'true', ENABLE_BOATRACE_RESULTS_SCRAPE: 'true', ENABLE_BOATRACE_ODDS_SCRAPE: 'false' } as never);
-    expect(sqlite.prepare("SELECT outcome,cutoff_source FROM paper_decisions WHERE race_id='scheduled-t60' AND phase='primary_t60'").get())
-      .toMatchObject({ outcome: 'placed', cutoff_source: 'boatrace-racelist-cutoff-v1' });
+    // This fixture provides only a win model. Primary T-60 is trifecta-only,
+    // so the timing path must persist an explicit abstention rather than buy.
+    expect(sqlite.prepare("SELECT outcome,reason,cutoff_source FROM paper_decisions WHERE race_id='scheduled-t60' AND phase='primary_t60'").get())
+      .toMatchObject({ outcome: 'abstained', reason: 'active_model_prediction_unavailable', cutoff_source: 'boatrace-racelist-cutoff-v1' });
     expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE race_id='scheduled-t60' AND mode='auto' AND decision_phase='primary_t60'").get())
-      .toMatchObject({ n: 1 });
+      .toMatchObject({ n: 0 });
   });
 
   it('runs ten-minute maintenance after a fail-closed odds reservation error', async () => {

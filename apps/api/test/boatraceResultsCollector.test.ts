@@ -10,16 +10,17 @@ import worker,{app,settleOpen} from '../src/index.js';
 const root=resolve(import.meta.dirname,'../../..');
 const now=new Date('2026-10-11T04:00:00Z'),raceDate='2026-10-11';
 let sqlite:Sqlite.Database,DB:D1SqliteAdapter;
-const id=(raceNo=1)=>`boat-20261011-09-${String(raceNo).padStart(2,'0')}`;
-function seed(raceNo=1,origin='real',status='open',postTime='2026-10-11T03:00:00Z') {
-  const raceId=origin==='sample'?`sample-${id(raceNo)}`:id(raceNo);
-  sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES(?,'boat','09',?,?,?,'scheduled',?,?)").run(raceId,raceDate,raceNo,postTime,origin,now.toISOString());
+const id=(raceNo=1,venueCode='09')=>`boat-20261011-${venueCode}-${String(raceNo).padStart(2,'0')}`;
+function seed(raceNo=1,origin='real',status='open',postTime='2026-10-11T03:00:00Z',venueCode='09') {
+  const raceId=origin==='sample'?`sample-${id(raceNo,venueCode)}`:id(raceNo,venueCode);
+  sqlite.prepare("INSERT OR IGNORE INTO venues(id,sport,name) VALUES(?,'boat',?)").run(venueCode,`Synthetic ${venueCode}`);
+  sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES(?,'boat',?,?,?,?,'scheduled',?,?)").run(raceId,venueCode,raceDate,raceNo,postTime,origin,now.toISOString());
   for(let number=1;number<=6;number++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,features_json,available_at,data_origin) VALUES(?,?,?,?,?,?,?)").run(`${raceId}-${number}`,raceId,number,`Synthetic ${number}`,JSON.stringify({racer_id:String(4000+number)}),'2026-10-10T23:00:00Z',origin);
   sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES(?,?,'boat','win','1',100,'manual','INSUFFICIENT_DATA','2026-10-11T02:00:00Z',?,?)").run(`${raceId}-bet`,raceId,status,origin);
   return raceId;
 }
-const page=(raceNo=1)=>boatraceResultPage({raceDate,venueCode:'09',raceNo});
-const fetchPage=async(input:string)=>new Response(page(Number(new URL(input).searchParams.get('rno'))),{headers:{'content-type':'text/html; charset=utf-8'}});
+const page=(raceNo=1,venueCode='09')=>boatraceResultPage({raceDate,venueCode,raceNo});
+const fetchPage=async(input:string)=>{const url=new URL(input);return new Response(page(Number(url.searchParams.get('rno')),url.searchParams.get('jcd')??'09'),{headers:{'content-type':'text/html; charset=utf-8'}})};
 beforeEach(()=>{
   sqlite=new Sqlite(':memory:');DB=new D1SqliteAdapter(sqlite);
   for(const file of readdirSync(resolve(root,'db/migrations')).filter(x=>x.endsWith('.sql')).sort())sqlite.exec(readFileSync(resolve(root,'db/migrations',file),'utf8'));
@@ -102,9 +103,9 @@ describe('purchased real boat hourly results',()=>{
     const log=sqlite.prepare('SELECT status,reason FROM collection_runs').get() as {status:string;reason:string};expect(log.status).toBe('failed');expect(JSON.parse(log.reason).reason).toBe('source-state-changed');
   });
   it('continues through attempt-budgeted batches and rotates a persistently unsupported oldest race',async()=>{
-    for(let raceNo=1;raceNo<=20;raceNo++)seed(raceNo);
-    const fetcher=vi.fn(async(input:string)=>Number(new URL(input).searchParams.get('rno'))===1
-      ?new Response('unavailable',{status:403}):fetchPage(input));
+    for(let index=0;index<20;index++)seed(index%12+1,'real','open',undefined,index<12?'01':'02');
+    const fetcher=vi.fn(async(input:string)=>{const url=new URL(input);return url.searchParams.get('jcd')==='01'&&url.searchParams.get('rno')==='1'
+      ?new Response('unavailable',{status:403}):fetchPage(input)});
     const budget={used:0,max:49};
     const first=await collectResults(DB,now,{requestBudget:budget,fetch:fetcher,sleep:async()=>{}});
     expect(first).toMatchObject({targets:15,verified:14,attempted:16,batches:4});
@@ -113,9 +114,9 @@ describe('purchased real boat hourly results',()=>{
 
     const next=await collectResults(DB,new Date(now.getTime()+3600000),{fetch:fetcher,sleep:async()=>{}});
     expect(next).toMatchObject({targets:6,verified:5,failed:1,attempted:7});
-    expect(fetcher.mock.calls.filter(([url])=>url.includes('rno=1'))).toHaveLength(4);
+    expect(fetcher.mock.calls.filter(([url])=>{const parsed=new URL(url);return parsed.searchParams.get('jcd')==='01'&&parsed.searchParams.get('rno')==='1'})).toHaveLength(4);
     expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE data_origin=\'real\'').get()).toMatchObject({n:19*6});
-    expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(id(1))).toMatchObject({n:0});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(id(1,'01'))).toMatchObject({n:0});
     expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:20});
   });
   it.each([

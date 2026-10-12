@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev --port 8787",
     "db:reset": "rm -rf .wrangler/state && wrangler d1 migrations apply roi-plus --local && wrangler d1 execute roi-plus --local --file=../../db/seed/sample.sql",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1",
     "deploy": "wrangler deploy"
   },
   "dependencies": {
