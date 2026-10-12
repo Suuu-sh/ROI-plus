@@ -10,13 +10,17 @@ const migration11 = "0011_boatrace_capture_archives.sql";
 
 test("main deployment push filter covers release and D1 readiness inputs", async () => {
   const workflow = await readFile(new URL("../.github/workflows/deploy-workers.yml", import.meta.url), "utf8");
-  const push = workflow.match(/^  push:\n([\\s\\S]*?)(?=^permissions:)/m)?.[1];
+  const push = workflow.split("  push:\n")[1]?.split("\npermissions:")[0];
   assert.ok(push, "the deployment workflow must define a push trigger");
-  assert.match(push, /^    branches: \\[main\\]$/m);
+  const pushLines = push.split("\n");
+  assert.ok(pushLines.some((line) => line.trim() === "branches: [main]"), "deployment trigger must target main");
 
-  const pathsBlock = push.match(/^    paths:\n((?:^      - '[^']+'\\n?)+)/m)?.[1];
-  assert.ok(pathsBlock, "the main push trigger must declare path filters");
-  const paths = [...pathsBlock.matchAll(/^      - '([^']+)'/gm)].map(([, path]) => path);
+  const pathsHeader = pushLines.findIndex((line) => line.trim() === "paths:");
+  assert.notEqual(pathsHeader, -1, "the main push trigger must declare path filters");
+  const paths = pushLines.slice(pathsHeader + 1)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(2).replaceAll("'", ""));
   for (const requiredPath of [
     "apps/api/**",
     "apps/web/**",
