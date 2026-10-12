@@ -1,0 +1,55 @@
+import { spawnSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const wrangler = path.join(root, 'node_modules/wrangler/bin/wrangler.js');
+export const TARGET_DATE = '2026-10-14';
+export const SETTING_KEYS = Object.freeze(['auto_bet_enabled','auto_bet_paused','min_expected_roi','max_prob_std','unit_stake','auto_bet_max_picks','auto_bet_race_budget','auto_bet_start_date','auto_promote_enabled']);
+export const SETTINGS_QUERY = `SELECT key,value FROM settings WHERE key IN (${SETTING_KEYS.map(k=>`'${k}'`).join(',')}) ORDER BY key LIMIT 9;`;
+export const CONFIGURE_SQL = ["INSERT INTO settings(key,value) VALUES('auto_bet_enabled','true') ON CONFLICT(key) DO UPDATE SET value='true';", "INSERT INTO settings(key,value) VALUES('auto_bet_paused','false') ON CONFLICT(key) DO UPDATE SET value='false';", `INSERT INTO settings(key,value) VALUES('auto_bet_start_date','${TARGET_DATE}') ON CONFLICT(key) DO UPDATE SET value='${TARGET_DATE}';`].join(' ');
+export function parseQuery(stdout, maxRows=100) {
+  let data; try { data=JSON.parse(stdout); } catch { throw new Error('D1 returned an invalid query response.'); }
+  if (!Array.isArray(data)||data.length!==1||data[0]?.success!==true||!Array.isArray(data[0].results)||data[0].results.length>maxRows) throw new Error('D1 query did not return the expected bounded result.');
+  return data[0].results;
+}
+function query(sql, mutation=false) {
+  const r=spawnSync(process.execPath,[wrangler,'d1','execute','roi-plus','--remote','--json','--command',sql],{cwd:path.join(root,'apps/api'),encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
+  if(r.error||r.status!==0) throw new Error(mutation?'Allowlisted settings update failed.':'Read-only production D1 query failed.');
+  return mutation?undefined:parseQuery(r.stdout);
+}
+function onlySettings(rows) { const out={}; for(const row of rows){if(!row||!SETTING_KEYS.includes(row.key)||typeof row.value!=='string')throw new Error('D1 returned a non-allowlisted setting.');out[row.key]=row.value;} return out; }
+function int(v){const n=Number(v);return Number.isSafeInteger(n)&&n>=0?n:0;}
+export function compatibleActiveTrifecta(row, now=Date.now()){
+ if(row?.status!=='active'||row?.sport!=='boat'||row?.bet_type!=='trifecta')return false;
+ let m;try{m=JSON.parse(row.metrics_json??'{}')}catch{return false;}
+ const v=m.ticketValidation,at=typeof v?.validatedAt==='string'?Date.parse(v.validatedAt):NaN;
+ return m.ticketModelSchemaVersion==='ticket-selection-v1'&&m.ticketPredictionSemantics==='exact-selection-probability-v1'&&m.ticketBetType==='trifecta'&&/^[a-f0-9]{64}$/.test(m.ticketArtifactSha256??'')&&m.promotionEligible===true&&v?.status==='independently_validated'&&v?.policyVersion==='ticket-selection-v1'&&v?.betType==='trifecta'&&v?.artifactSha256===m.ticketArtifactSha256&&/^[a-f0-9]{64}$/.test(v?.reportSha256??'')&&typeof v?.independentReviewId==='string'&&v.independentReviewId.length>0&&v?.dataOrigin==='real'&&v?.completeCombinationCoverage===true&&v?.probabilitiesNormalized===true&&v?.outOfSampleValidated===true&&v?.pointInTimeSafe===true&&Number.isFinite(at)&&at<=now&&now-at<=30*86400000;
+}
+async function main(){
+ const mode=process.env.OPERATOR_MODE;
+ if(!['status','configure'].includes(mode))throw new Error('Unsupported operator mode.');
+ for(const name of ['CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID'])if(!process.env[name])throw new Error(`Required credential is unavailable: ${name}.`);
+ if(mode==='configure'&&(process.env.CONFIRMED!=='true'||process.env.TARGET_DATE!==TARGET_DATE))throw new Error('Configuration requires explicit confirmation for the fixed target date.');
+ let settings=onlySettings(query(SETTINGS_QUERY));
+ const models=query("SELECT id,status,algorithm,metrics_json FROM models WHERE sport='boat' AND bet_type='trifecta' AND status IN ('candidate','active') ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,id LIMIT 12;");
+ const artifacts=query("SELECT tp.model_id,COUNT(DISTINCT tp.artifact_sha256) AS artifact_count,MIN(tp.artifact_sha256) AS artifact_sha256,MIN(tp.feature_schema_version) AS feature_schema_version,COUNT(*) AS prediction_rows FROM ticket_predictions tp JOIN models m ON m.id=tp.model_id WHERE m.sport='boat' AND m.bet_type='trifecta' AND m.status IN ('candidate','active') AND tp.data_origin='real' GROUP BY tp.model_id LIMIT 12;");
+ const captureStats=query("SELECT COUNT(*) AS archive_rows,COUNT(DISTINCT race_id) AS archive_races,COUNT(DISTINCT race_date) AS archive_dates FROM boatrace_prerace_capture_archives WHERE data_origin='real' LIMIT 1;")[0]??{};
+ const observationStats=query("SELECT COUNT(*) AS observation_rows,COUNT(DISTINCT race_id) AS observation_races,COUNT(DISTINCT date(fetched_at)) AS observation_dates FROM boatrace_prerace_observations WHERE data_origin='real' LIMIT 1;")[0]??{};
+ const tomorrow=query(`SELECT r.sport,p.model_id,COUNT(DISTINCT r.id) AS race_count,COUNT(p.id) AS prediction_rows,COUNT(DISTINCT o.race_id) AS odds_races FROM races r LEFT JOIN predictions p ON p.race_id=r.id AND p.data_origin='real' LEFT JOIN odds_snapshots o ON o.race_id=r.id AND o.data_origin='real' AND o.bet_type='win' WHERE r.data_origin='real' AND r.race_date='${TARGET_DATE}' AND r.status='scheduled' GROUP BY r.sport,p.model_id LIMIT 30;`);
+ const ticketTomorrow=query(`SELECT r.sport,tp.bet_type,tp.model_id,COUNT(DISTINCT r.id) AS race_count,COUNT(tp.id) AS prediction_rows FROM races r LEFT JOIN ticket_predictions tp ON tp.race_id=r.id AND tp.data_origin='real' WHERE r.data_origin='real' AND r.race_date='${TARGET_DATE}' AND r.status='scheduled' GROUP BY r.sport,tp.bet_type,tp.model_id LIMIT 40;`);
+ const cfg=await readFile(path.join(root,'apps/api/wrangler.toml'),'utf8');
+ const flags={}; for(const k of ['ENABLE_AUTO_BET','ENABLE_BOATRACE_ODDS_SCRAPE','ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE','ENABLE_BOATRACE_RESULTS_SCRAPE']){const m=cfg.match(new RegExp('^'+k+'\\s*=\\s*"(true|false)"\\s*$', 'm'));flags[k]=m?.[1]??'unset';}
+ let budget=null; try { const res=await fetch('https://roi-plus-api.suuu-sh.workers.dev/api/health',{signal:AbortSignal.timeout(12000)});if(res.ok){const j=await res.json();const b=j?.d1WriteBudget;if(b&&typeof b==='object'){budget={};for(const k of ['date','limit','essentialLimit','optionalLimit','oddsLimit','reserved','essentialReserved','optionalReserved','oddsReserved','remaining','essentialRemaining','optionalRemaining','state','allowance'])if(['string','number','boolean'].includes(typeof b[k])||(k==='allowance'&&b[k]&&typeof b[k]==='object'))budget[k]=b[k];}} }catch{}
+ if(mode==='configure'){
+   const utcToday=new Date().toISOString().slice(0,10);
+   if(!budget||budget.state!=='known'||budget.date!==utcToday)throw new Error('Configuration requires a known current-UTC-day write budget.');
+   if(!models.some(m=>compatibleActiveTrifecta(m)))throw new Error('Configuration requires a compatible, recently independently validated active trifecta model.');
+   const picks=Number(settings.auto_bet_max_picks),raceBudget=Number(settings.auto_bet_race_budget);
+   if(!Number.isSafeInteger(picks)||picks<1||picks>6||!Number.isSafeInteger(raceBudget)||raceBudget<1)throw new Error('Configuration requires valid existing auto-bet caps; caps will not be changed.');
+   query(CONFIGURE_SQL,true);settings=onlySettings(query(SETTINGS_QUERY));
+ }
+ const safe={mode,targetDate:TARGET_DATE,settings,trifectaModels:models.map(m=>{let meta={};try{meta=JSON.parse(m.metrics_json??'{}')}catch{};const metrics=meta.metrics&&typeof meta.metrics==='object'?meta.metrics:{};const allow=['exactOrderLogLoss','nTrainRaces','nValidRaces','nTestRaces','nTestDates','topTicketEce','completeCombinationCoverage','boatFeatureSchemaVersion','ticketModelSchemaVersion','ticketPredictionSemantics','ticketBetType','dataOrigin'];const sanitized=Object.fromEntries(allow.filter(k=>['string','number','boolean'].includes(typeof meta[k])||['string','number','boolean'].includes(typeof metrics[k])).map(k=>[k,meta[k]??metrics[k]]));const v=meta.ticketValidation&&typeof meta.ticketValidation==='object'?meta.ticketValidation:{};const validation=Object.fromEntries(['status','policyVersion','betType','validatedAt','dataOrigin','completeCombinationCoverage','probabilitiesNormalized','outOfSampleValidated','pointInTimeSafe','reportSha256','independentReviewId'].filter(k=>['string','boolean'].includes(typeof v[k])).map(k=>[k,v[k]]));const artifact=artifacts.find(a=>a.model_id===m.id);return{id:/^[a-z0-9][a-z0-9._-]{0,79}$/.test(m.id)?m.id:null,status:m.status,algorithm:typeof m.algorithm==='string'?m.algorithm.slice(0,120):null,metadata:sanitized,validation,artifactSha256:artifact&&int(artifact.artifact_count)===1&&/^[a-f0-9]{64}$/.test(artifact.artifact_sha256??'')?artifact.artifact_sha256:null,realPredictionRows:int(artifact?.prediction_rows),predictionFeatureSchema:artifact?.feature_schema_version??null};}),captureEvidence:{archiveRows:int(captureStats.archive_rows),archiveRaces:int(captureStats.archive_races),archiveDates:int(captureStats.archive_dates),observationRows:int(observationStats.observation_rows),observationRaces:int(observationStats.observation_races),observationDates:int(observationStats.observation_dates)},tomorrow:tomorrow.map(r=>({sport:r.sport,betType:'win',modelId:/^[a-z0-9][a-z0-9._-]{0,79}$/.test(r.model_id??'')?r.model_id:null,races:int(r.race_count),predictionRows:int(r.prediction_rows),racesWithWinOdds:int(r.odds_races)})),ticketPredictions:ticketTomorrow.map(r=>({sport:r.sport,betType:r.bet_type==='trifecta'?'trifecta':null,modelId:/^[a-z0-9][a-z0-9._-]{0,79}$/.test(r.model_id??'')?r.model_id:null,races:int(r.race_count),rows:int(r.prediction_rows)})),workerFlags:flags,writeBudget:budget};
+ const output=JSON.stringify(safe,null,2);console.log(output);if(process.env.GITHUB_STEP_SUMMARY)await (await import('node:fs/promises')).appendFile(process.env.GITHUB_STEP_SUMMARY,`## Paper operation ${mode}\n\n\`\`\`json\n${output}\n\`\`\`\n`);
+}
+if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(e=>{console.error(`Paper operator failed closed: ${e.message}`);process.exitCode=1;});
