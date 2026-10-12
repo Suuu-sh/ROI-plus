@@ -420,7 +420,7 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
 
 def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                  refresh_k_dates: set[str] | None = None) -> int:
-    from edgelab.collectors.boatrace import fetch_boatrace_file, read_lzh
+    from edgelab.collectors.boatrace import fetch_boatrace_file, read_lzh, read_source_file_metadata
     from edgelab.parsers.boatrace_b import parse_b
     from edgelab.parsers.boatrace_k import parse_k
 
@@ -463,6 +463,20 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                             continue
                 content = read_lzh(path)
                 parsed = parser(content, race_date=day.isoformat())
+                if kind == "B":
+                    source = read_source_file_metadata(path, "B", day)
+                    parsed_races = parsed.get("races", [])
+                    race_ids = {str(row.get("id")) for row in parsed_races if row.get("id")}
+                    # Bind parser-generated entry values to the exact verified
+                    # bytes fetched at this timestamp. Cache-only historical B
+                    # files without a matching sidecar remain explicitly unproven.
+                    if (source and parsed_races and race_ids
+                            and all(row.get("race_date") == day.isoformat() for row in parsed_races)):
+                        for entry in parsed.get("entries", []):
+                            if entry.get("race_id") in race_ids and entry.get("data_origin") == "real":
+                                entry["available_at"] = source["fetchedAt"]
+                                entry["source_available_at"] = source["fetchedAt"]
+                                entry["source_sha256"] = source["sourceSha256"]
                 if kind == "K":
                     observed_at = _now()
                     for result in parsed.get("results", []):
@@ -697,6 +711,7 @@ def _parser() -> argparse.ArgumentParser:
     trifecta = sub.add_parser("train-trifecta", help="train/evaluate an offline T-60, pre-race-v2 candidate exact-order trifecta model")
     trifecta.add_argument("--model-id", help="immutable candidate model ID")
     trifecta.add_argument("--artifact-dir", default="ml/artifacts")
+    trifecta.add_argument("--store", default=str(DEFAULT_STORE), help="local normalized JSON row store")
     trifecta.add_argument("--min-train-races", type=int, default=300)
     trifecta.add_argument("--replay-max-picks", type=int, choices=range(1, 7), default=1,
                           help="runtime-like cap for the offline replay (default matches the runtime default)")
@@ -806,7 +821,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "train-trifecta":
         from edgelab.models.trifecta import train_trifecta
-        rows = load_rows()
+        rows = load_rows(args.store)
         from edgelab.features.boat import PRERACE_V2_SCHEMA
         training_rows = _make_training_rows(rows, "boat", feature_schema=PRERACE_V2_SCHEMA)
         digest = hashlib.sha256("|".join(sorted({str(r.get("race_id")) for r in training_rows})).encode()).hexdigest()[:8]
@@ -835,7 +850,7 @@ def main(argv: list[str] | None = None) -> int:
                 "trained_at": result.get("trainedAt"),
                 "notes": "Offline temporal candidate; promotion disabled pending explicit validation/review."}
             merge_rows(rows, {"models": [model_row]})
-            save_rows(rows)
+            save_rows(rows, args.store)
             result["localCandidateRegistered"] = True
             result["remoteSyncPerformed"] = False
         output = Path(args.output)

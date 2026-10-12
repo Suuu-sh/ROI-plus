@@ -144,6 +144,9 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
     archive_root_at = _timestamp(archive.get("capturedAt"))
     cutoff_at = _timestamp(before.get("cutoffAt"))
     race_list_at = _timestamp(race_list.get("capturedAt"))
+    race_list_cutoff = _timestamp(race_list.get("cutoffAt"))
+    if race_list_cutoff != cutoff_at:
+        raise ValueError("racelist_beforeinfo_cutoff_mismatch")
     if (odds_at != archived_at or archive_root_at != archived_at
             or before_at > cutoff_at or odds_at > cutoff_at
             or race_list_at < cutoff_at - timedelta(minutes=10)
@@ -266,10 +269,7 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
                 "race_date": requested_date, "captured_at": captured_at,
                 "schema": ARCHIVE_SCHEMA, "beforeinfo_captured_at": str(before["capturedAt"])}
     manifest["_cutoff_at"] = str(before["cutoffAt"])
-    manifest["_cutoff_observed_at"] = str(before["capturedAt"])
-    manifest["_entry_source_evidence"] = [{"lane": lane, "captured_at": race_list_at.isoformat(),
-                                             "source_sha256": race_list["sha256"]}
-                                            for lane in sorted(source_lanes)]
+    manifest["_cutoff_observed_at"] = str(race_list["capturedAt"])
     return manifest, observations, market
 
 
@@ -332,7 +332,6 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
 
             race = next(row for row in store["races"] if row.get("id") == manifest["race_id"])
             cutoff_text, observed_text = manifest.pop("_cutoff_at"), manifest.pop("_cutoff_observed_at")
-            entry_source_evidence = manifest.pop("_entry_source_evidence")
             existing_cutoff = race.get("betting_cutoff_at")
             existing_source = race.get("betting_cutoff_source")
             existing_observed = race.get("betting_cutoff_observed_at")
@@ -385,23 +384,6 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
                 cutoff_evidence_updated += 1
             elif cutoff_preserved:
                 cutoff_evidence_preserved += 1
-            entries_by_lane = {int(row["number"]): row for row in store.get("entries", [])
-                               if row.get("race_id") == manifest["race_id"]
-                               and row.get("data_origin") == "real" and str(row.get("number", "")).isdigit()}
-            for evidence in entry_source_evidence:
-                entry = entries_by_lane[evidence["lane"]]
-                previous_at = entry.get("source_observed_at") or entry.get("source_available_at")
-                if previous_at:
-                    try:
-                        previous_dt = _timestamp(previous_at)
-                    except ValueError:
-                        # Keep malformed pre-existing evidence untouched; do not
-                        # overwrite it with a later archive's claim.
-                        continue
-                    if previous_dt <= _timestamp(evidence["captured_at"]):
-                        continue
-                entry["source_observed_at"] = evidence["captured_at"]
-                entry["source_sha256"] = evidence["source_sha256"]
             for row in new_observations:
                 key = tuple(row.get(k) for k in ("race_id", "kind", "entry_number", "fetched_at"))
                 if key not in observations:

@@ -40,7 +40,7 @@ _SAFE_INGEST_ERROR_CODES = {
     "d1_write_budget_unavailable", "d1_write_budget_exhausted", "historical_ingest_disabled",
 }
 _MAX_CAPTURE_EXPORT_PAGE_BYTES = 2 * 1024 * 1024
-_MAX_CAPTURE_EXPORT_PAGES = 1000
+_MAX_CAPTURE_EXPORT_PAGES = 250
 
 
 def _safe_ingest_error_code(exc: HTTPError) -> str | None:

@@ -54,8 +54,21 @@ jobs:
             since="$(TZ=Asia/Tokyo date -d yesterday +%F)"
             until="$(TZ=Asia/Tokyo date +%F)"
           fi
-          echo "since=$since" >> "$GITHUB_OUTPUT"
-          echo "until=$until" >> "$GITHUB_OUTPUT"
+          python - "$since" "$until" "$GITHUB_OUTPUT" <<'PY'
+          import datetime, re, sys
+          start, end, output = sys.argv[1:]
+          for value in (start, end):
+              if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) or datetime.date.fromisoformat(value).isoformat() != value:
+                  raise SystemExit("archive dates must be valid YYYY-MM-DD values")
+          if datetime.date.fromisoformat(end) < datetime.date.fromisoformat(start):
+              raise SystemExit("archive date range is reversed")
+          if (datetime.date.fromisoformat(end) - datetime.date.fromisoformat(start)).days > 31:
+              raise SystemExit("archive date range exceeds 32 days")
+          with open(output, "a", encoding="utf-8") as stream:
+              stream.write(f"since={start}\nuntil={end}\n")
+          PY
+      - name: Clear prior-run trifecta reports
+        run: rm -f ml/data/learning/trifecta-report.json ml/data/learning/trifecta-pipeline-summary.json
       - name: Import verified archives and train only if PIT data qualifies
         env:
           PYTHONPATH: ml

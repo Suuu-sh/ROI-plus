@@ -7,11 +7,13 @@ cached, so repeated runs are idempotent and do not hit the source again.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import tempfile
 import threading
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Any
 from urllib.error import HTTPError, URLError
@@ -21,6 +23,7 @@ BASE_URL = "https://www1.mbrace.or.jp/od2"
 USER_AGENT = "EdgeLab/0.1 (official Boatrace downloadable data collector)"
 MIN_INTERVAL_SECONDS = 3.0
 DEFAULT_RETRIES = 3
+SOURCE_META_SCHEMA = "boatrace-source-file-v1"
 
 _rate_lock = threading.Lock()
 _last_request_at = 0.0
@@ -82,6 +85,7 @@ def fetch_boatrace_file(kind: str, target_date: str | date,
         try:
             with urlopen(request, timeout=timeout) as response:
                 payload = response.read()
+            fetched_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
             if not payload:
                 raise OSError(f"empty response from {url}")
             fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
@@ -99,6 +103,24 @@ def fetch_boatrace_file(kind: str, target_date: str | date,
                 if validator is not None:
                     validator(decoded)
                 os.replace(temp_name, target)
+                # Emit provenance only for bytes fetched in this invocation.
+                # Older cached files without a matching sidecar stay unproven.
+                sidecar = target.with_suffix(target.suffix + ".meta.json")
+                metadata = {"schema": SOURCE_META_SCHEMA, "kind": prefix.upper(),
+                            "targetDate": day.isoformat(), "sourceUrl": url,
+                            "sourceSha256": hashlib.sha256(payload).hexdigest(),
+                            "sourceBytes": len(payload), "fetchedAt": fetched_at}
+                fd_meta, temp_meta = tempfile.mkstemp(prefix=f".{sidecar.name}.", dir=sidecar.parent)
+                try:
+                    with os.fdopen(fd_meta, "w", encoding="utf-8") as meta_file:
+                        json.dump(metadata, meta_file, ensure_ascii=False, sort_keys=True)
+                        meta_file.write("\n")
+                        meta_file.flush()
+                        os.fsync(meta_file.fileno())
+                    os.replace(temp_meta, sidecar)
+                finally:
+                    if os.path.exists(temp_meta):
+                        os.unlink(temp_meta)
             finally:
                 if os.path.exists(temp_name):
                     os.unlink(temp_name)
@@ -115,6 +137,29 @@ def fetch_boatrace_file(kind: str, target_date: str | date,
             time.sleep(min(2 ** attempt, 30))
     assert last_error is not None
     raise RuntimeError(f"failed to download {url} after {retries + 1} attempts") from last_error
+
+
+def read_source_file_metadata(path: str | os.PathLike[str], kind: str,
+                              target_date: str | date) -> dict[str, Any] | None:
+    """Return only sidecar evidence that still binds to the exact cached bytes."""
+    source = Path(path)
+    try:
+        day = _date(target_date)
+        value = json.loads(source.with_suffix(source.suffix + ".meta.json").read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return None
+        payload = source.read_bytes()
+        fetched = datetime.fromisoformat(str(value.get("fetchedAt", "")).replace("Z", "+00:00"))
+        if (value.get("schema") != SOURCE_META_SCHEMA
+                or value.get("kind") != kind.upper() or value.get("targetDate") != day.isoformat()
+                or value.get("sourceUrl") != boatrace_url(kind, day)
+                or value.get("sourceBytes") != len(payload)
+                or value.get("sourceSha256") != hashlib.sha256(payload).hexdigest()
+                or fetched.tzinfo is None or fetched.utcoffset() is None):
+            return None
+        return value
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def read_lzh(path: str | os.PathLike[str]) -> str:

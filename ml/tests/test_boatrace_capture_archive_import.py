@@ -44,6 +44,7 @@ def _archive(captured_at, exhibit_time, odds_price=20.0):
         "raceList": {
             "url": "https://www.boatrace.jp/owpc/pc/race/racelist?hd=20261011&jcd=01&rno=1",
             "sha256": "c" * 64, "capturedAt": before_at,
+            "cutoffAt": "2026-10-11T15:19:00+09:00",
             "parserVersion": "boatrace-racelist-v1",
             "entries": [{"lane": lane, "registrationNumber": f"{1000 + lane:04d}"}
                         for lane in range(1, 7)],
@@ -94,6 +95,8 @@ def test_archive_import_is_checksum_verified_local_only_and_idempotent():
     assert len(store["prerace_capture_archive_manifest"]) == 2
     assert len(store["prerace_observations"]) == 14
     assert len(store["prerace_capture_odds"]) == 240
+    assert all("source_observed_at" not in entry and "source_sha256" not in entry
+               for entry in store["entries"])
 
 
 def test_bad_checksum_and_wrong_day_are_explicitly_excluded_without_mutation():
@@ -130,6 +133,19 @@ def test_existing_earlier_cutoff_observation_survives_later_archive_import():
     result = import_capture_archives(store, [_page(_archive("2026-10-11T15:18:03+09:00", 6.90))], DAY)
     assert result["cutoffEvidencePreserved"] == 1
     assert store["races"][0]["betting_cutoff_observed_at"] == "2026-10-11T03:30:00+09:00"
+
+
+def test_racelist_cutoff_must_match_beforeinfo_cutoff():
+    wrapper = _archive("2026-10-11T15:17:03+09:00", 6.78)
+    archive = json.loads(wrapper["archiveJson"])
+    archive["raceList"]["cutoffAt"] = "2026-10-11T15:18:00+09:00"
+    wrapper["archiveJson"] = json.dumps(archive, ensure_ascii=False, separators=(",", ":"))
+    wrapper["archiveSha256"] = hashlib.sha256(wrapper["archiveJson"].encode()).hexdigest()
+    store = _store()
+    result = import_capture_archives(store, [_page(wrapper)], DAY)
+    assert result["exclusionCounts"] == {"racelist_beforeinfo_cutoff_mismatch": 1}
+    assert not store["prerace_capture_archive_manifest"]
+    assert not store["races"][0].get("betting_cutoff_at")
 
 
 def test_features_choose_latest_eligible_archive_observation_by_timestamp_not_row_order():
@@ -191,3 +207,21 @@ def test_archive_fetch_uses_existing_bearer_auth_and_follows_bounded_cursor_page
     assert len(result) == 2
     assert calls[0][0].get_header("Authorization") == "Bearer local-test-token"
     assert calls[0][1] == 30
+
+
+def test_archive_fetch_fails_closed_at_page_safety_limit(monkeypatch):
+    from edgelab import sync
+    monkeypatch.setattr(sync, "_MAX_CAPTURE_EXPORT_PAGES", 1)
+    page = _page()
+    page["nextCursor"] = "cursor-1"
+    calls = []
+    def opener(request: Request, timeout=30):
+        calls.append(request)
+        return _Response(page)
+    try:
+        fetch_prerace_capture_archives(DAY, base_url="https://example.invalid", token="local-test-token", opener=opener)
+    except RuntimeError as exc:
+        assert "safety limit" in str(exc)
+    else:
+        raise AssertionError("archive export must fail on bounded pagination exhaustion")
+    assert len(calls) == 1
