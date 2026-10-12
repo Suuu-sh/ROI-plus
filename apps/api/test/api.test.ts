@@ -25,7 +25,7 @@ beforeEach(()=>{
  sqlite.prepare("UPDATE models SET metrics_json=json_set(CASE WHEN json_valid(metrics_json) THEN metrics_json ELSE '{}' END,'$.boatVenueSchemaVersion','boat-venue-v2','$.correctedTrainingDataSha256',?,'$.boatArtifactSha256',?) WHERE id='boat-active'").run('f'.repeat(64),'a'.repeat(64));
  sqlite.prepare("UPDATE races SET post_time=? WHERE data_origin='sample' AND status='scheduled'").run(jstIso(Date.now()+60*60_000));
 });
-afterEach(()=>{vi.unstubAllGlobals();sqlite.close();});
+afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();sqlite.close();});
 const addBetInputs=(raceId:string,prefix:string)=>{
  const entry=sqlite.prepare('SELECT number FROM entries WHERE race_id=? ORDER BY number LIMIT 1').get(raceId) as {number:number};
  sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES(?,?,'win',?,10,?,'test','sample')").run(`${prefix}-odds`,raceId,String(entry.number),jstIso(Date.now()-5000));
@@ -378,6 +378,23 @@ describe('EdgeLab API',()=>{
   expect(settleValues(100,290,true)).toMatchObject({payout:290,profit:190,finalOdds:2.9});
   expect(payoutYen(1,150)).toBe(1);
  });
+ it('handles rapid same-pick purchases and concurrent exact retries',async()=>{
+  const race=sqlite.prepare("SELECT id FROM races WHERE data_origin='sample' AND status='scheduled' AND sport='boat' LIMIT 1").get() as any;
+  const selection=addBetInputs(race.id,'rapid-same-pick');
+  sqlite.prepare("UPDATE settings SET value='100000' WHERE key='initial_bankroll'").run();
+  const frozenAt=Date.now();
+  vi.spyOn(Date,'now').mockReturnValue(frozenAt);
+  const post=(requestId:string)=>app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId:race.id,betType:'win',selection,stake:10,requestId})},env());
+  const first=await post('rapid-first');expect(first.status).toBe(201);
+  const second=await post('rapid-second');expect(second.status).toBe(201);
+  const firstBody=await first.json() as any,secondBody=await second.json() as any;
+  expect(firstBody.id).not.toBe(secondBody.id);
+  expect(firstBody.placedAt).not.toBe(secondBody.placedAt);
+  const concurrent=await Promise.all([post('rapid-concurrent'),post('rapid-concurrent')]);
+  expect(concurrent.map(x=>x.status).sort()).toEqual([200,201]);
+  const concurrentBodies=await Promise.all(concurrent.map(x=>x.json() as Promise<any>));
+  expect(concurrentBodies[0].id).toBe(concurrentBodies[1].id);
+ });
  it('keeps high-edge win forecasts out of future auto paper purchases',async()=>{
   sqlite.exec('DELETE FROM bets');
   sqlite.prepare("UPDATE settings SET value='200' WHERE key='initial_bankroll'").run();
@@ -664,6 +681,7 @@ describe('EdgeLab API',()=>{
   const oddsCapturedAt=(sqlite.prepare("SELECT captured_at FROM odds_snapshots WHERE race_id=? AND bet_type='trifecta' LIMIT 1").get(raceId) as any).captured_at;
   const missingRequestId=await app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId,betType:'trifecta',selection:selections[0],stake:100})},env());
   expect(missingRequestId.status).toBe(400);
+  vi.spyOn(Date,'now').mockReturnValue(Date.now());
   const requestId='manual-trifecta-retry';
   const post=(stake=100)=>app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId,betType:'trifecta',selection:selections[0],stake,requestId})},env());
   const placed=await post();
@@ -674,6 +692,12 @@ describe('EdgeLab API',()=>{
   expect(crossType.status).toBe(409);
   expect(sqlite.prepare('SELECT COUNT(*) n FROM bets WHERE bet_group_id=?').get(requestId)).toMatchObject({n:1});
   expect(sqlite.prepare('SELECT odds_captured_at FROM bets WHERE id=?').get(bet.id)).toMatchObject({odds_captured_at:oddsCapturedAt});
+  const concurrentId='manual-trifecta-concurrent';
+  const concurrentPost=()=>app.request('/api/bets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({raceId,betType:'trifecta',selection:selections[0],stake:100,requestId:concurrentId})},env());
+  const concurrent=await Promise.all([concurrentPost(),concurrentPost()]);
+  expect(concurrent.map(x=>x.status).sort()).toEqual([200,201]);
+  const concurrentBets=await Promise.all(concurrent.map(x=>x.json() as Promise<any>));
+  expect(concurrentBets[0].id).toBe(concurrentBets[1].id);
   const listed=await app.request('/api/bets?origin=real',{},env());
   expect((await listed.json() as any[]).find(x=>x.id===bet.id)).toMatchObject({oddsCapturedAt});
   sqlite.prepare("DELETE FROM odds_snapshots WHERE race_id=? AND selection='6-5-4'").run(raceId);
