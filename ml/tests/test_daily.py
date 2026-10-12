@@ -26,7 +26,7 @@ def _store():
     }
 
 
-def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_backfill(monkeypatch):
+def test_daily_sync_keeps_previous_day_out_of_d1_without_open_bets(monkeypatch):
     store = _store()
     store["entries"][0]["features_json"] = json.dumps({"finish_code": "F"})
     store["entries"].append({"race_id": "prev", "number": 2, "features_json": "{}"})
@@ -46,6 +46,7 @@ def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_back
     monkeypatch.setattr(cli, "collect_beforeinfo", lambda day, **kwargs: timing_events.append("collection") or
                         {"status": "success", "observations": 0})
     monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: timing_events.append("registry") or [])
+    monkeypatch.setattr("edgelab.sync.fetch_open_bet_race_ids", lambda target_date: set())
     monkeypatch.setattr(cli, "_inference_timestamp", lambda: timing_events.append("timestamp") or fresh_as_of)
     monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
     def predict(rows, day, as_of):
@@ -59,10 +60,10 @@ def test_daily_sync_is_limited_to_today_and_previous_day_without_historical_back
 
     assert collection_calls == [("2026-10-08", "2026-10-09",
                                  {"refresh_k_dates": {"2026-10-08", "2026-10-09"}})]
-    assert {row["id"] for row in synced["races"]} == {"prev", "today"}
-    assert {(row["race_id"], row["number"]) for row in synced["entries"]} == {("today", 1), ("prev", 1)}
-    assert {row["race_id"] for row in synced["results"]} == {"prev", "today"}
-    assert {row["race_id"] for row in synced["payouts"]} == {"prev", "today"}
+    assert {row["id"] for row in synced["races"]} == {"today"}
+    assert {(row["race_id"], row["number"]) for row in synced["entries"]} == {("today", 1)}
+    assert {row["race_id"] for row in synced["results"]} == {"today"}
+    assert {row["race_id"] for row in synced["payouts"]} == {"today"}
     assert synced["ticket_predictions"] == [{"race_id": "today", "bet_type": "trifecta"}]
     assert "predictions" not in synced
     assert result["ticket_predictions"] == 1
@@ -81,6 +82,7 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
     monkeypatch.setattr(cli, "save_rows", lambda value: None)
     monkeypatch.setattr(cli, "collect_boat", lambda *args, **kwargs: 0)
     monkeypatch.setattr("edgelab.sync.fetch_model_registry", lambda: [])
+    monkeypatch.setattr("edgelab.sync.fetch_open_bet_race_ids", lambda target_date: {"prev"})
     monkeypatch.setattr("edgelab.learning.score_feedback", lambda rows: {"models": {}})
     monkeypatch.setattr(cli, "_predict_boat_trifecta_date",
                         lambda *args: (_ for _ in ()).throw(RuntimeError("no active model in authoritative local registry")))
@@ -95,6 +97,16 @@ def test_model_unavailable_marks_forecast_not_ready_but_still_syncs_results(monk
     assert {row["race_id"] for row in synced["results"]} == {"prev"}
     assert synced["ticket_predictions"] == []
     assert "predictions" not in synced
+
+
+def test_daily_fails_closed_when_open_bet_lookup_is_unavailable(monkeypatch):
+    collected = []
+    monkeypatch.setattr("edgelab.sync.fetch_open_bet_race_ids",
+                        lambda _date: (_ for _ in ()).throw(RuntimeError("lookup unavailable")))
+    monkeypatch.setattr(cli, "collect_boat", lambda *args, **kwargs: collected.append(args))
+    with pytest.raises(RuntimeError, match="lookup unavailable"):
+        cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
+    assert collected == []
 
 
 def test_primary_prediction_asof_is_t60_not_the_betting_deadline():

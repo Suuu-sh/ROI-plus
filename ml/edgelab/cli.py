@@ -223,6 +223,11 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     """Collect and synchronize the current/previous-day delta; never backfill D1 history."""
     target = date.fromisoformat(day)
     previous = (target - timedelta(days=1)).isoformat()
+    # Previous-day D1 sync is limited to facts needed to settle already-open
+    # real bets. Fail closed if the authoritative list cannot be read; never
+    # retry the old all-yesterday sync path and consume today's budget.
+    from edgelab.sync import fetch_open_bet_race_ids
+    previous_open_bet_ids = fetch_open_bet_race_ids(previous)
     # K files can be published or amended while a meeting is in progress. Force
     # a fresh K fetch for today and the prior day; B files keep their stable cache.
     collect_boat(previous, day, refresh_k_dates={previous, day})
@@ -258,7 +263,6 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         ticket_predictions = []
         prediction_error = f"{type(exc).__name__}: {exc}"
     save_rows(rows)
-    prev_ids = {r.get("id") for r in rows.get("races", []) if r.get("race_date") == previous}
     today_ids = {r.get("id") for r in rows.get("races", []) if r.get("race_date") == day}
     latest_runs = {}
     for run in rows.get("collection_runs", []):
@@ -282,15 +286,15 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
                     and finish_code[1:].isdigit()))
 
     payload = {
-        "races": [r for r in rows.get("races", []) if r.get("id") in prev_ids | today_ids],
+        "races": [r for r in rows.get("races", []) if r.get("id") in today_ids | previous_open_bet_ids],
         "entries": [r for r in rows.get("entries", [])
                     if r.get("race_id") in today_ids
-                    or (r.get("race_id") in prev_ids and has_official_nonfinisher_marker(r))],
+                    or (r.get("race_id") in previous_open_bet_ids and has_official_nonfinisher_marker(r))],
         "ticket_predictions": ticket_predictions,
         # K files can already contain same-day finished races during midday or
         # late-night runs; settle those alongside yesterday's outcomes.
-        "results": [r for r in rows.get("results", []) if r.get("race_id") in prev_ids | today_ids],
-        "payouts": [r for r in rows.get("payouts", []) if r.get("race_id") in prev_ids | today_ids],
+        "results": [r for r in rows.get("results", []) if r.get("race_id") in today_ids | previous_open_bet_ids],
+        "payouts": [r for r in rows.get("payouts", []) if r.get("race_id") in today_ids | previous_open_bet_ids],
         "prerace_observations": [r for r in rows.get("prerace_observations", []) if r.get("race_id") in today_ids],
         "collection_runs": [r for r in rows.get("collection_runs", []) if r.get("id") in run_ids],
         "venues": __import__("edgelab.venues", fromlist=["venue_rows"]).venue_rows(),

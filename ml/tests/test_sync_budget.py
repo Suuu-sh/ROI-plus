@@ -44,6 +44,35 @@ def test_fetch_write_budget_validates_authoritative_contract(monkeypatch):
             sync.fetch_write_budget(base_url="https://example.test", token="t")
 
 
+def test_fetch_open_bet_race_ids_validates_narrow_contract_and_fails_closed(monkeypatch):
+    requests = []
+    def accept(req, **_kwargs):
+        requests.append(req)
+        return _Response({"date": "2026-10-11", "raceIds": ["boat-20261011-01-01"]})
+    monkeypatch.setattr(sync, "urlopen", accept)
+    assert sync.fetch_open_bet_race_ids("2026-10-11", base_url="https://example.test", token="t") == {"boat-20261011-01-01"}
+    assert requests[0].full_url == "https://example.test/api/ingest/open-bet-race-ids?date=2026-10-11"
+    assert requests[0].get_header("Authorization") == "Bearer t"
+
+    for bad in (
+        {"date": "2026-10-10", "raceIds": []},
+        {"date": "2026-10-11", "raceIds": ["boat-20261011-01-01", "boat-20261011-01-01"]},
+        {"date": "2026-10-11", "raceIds": ["not-a-boat-race"]},
+        {"date": "2026-10-11", "raceIds": ["boat-" + "x" * 70]},
+        {"date": "2026-10-11", "raceIds": ["boat-20261011-01-01"] * 501},
+    ):
+        monkeypatch.setattr(sync, "urlopen", lambda *_args, _payload=bad, **_kwargs: _Response(_payload))
+        with pytest.raises(RuntimeError, match="response is invalid"):
+            sync.fetch_open_bet_race_ids("2026-10-11", base_url="https://example.test", token="t")
+
+    def refused(req, **_kwargs):
+        raise HTTPError(req.full_url, 503, "unavailable", {}, BytesIO(b"private body"))
+    monkeypatch.setattr(sync, "urlopen", refused)
+    with pytest.raises(RuntimeError, match="HTTP 503") as exc:
+        sync.fetch_open_bet_race_ids("2026-10-11", base_url="https://example.test", token="t")
+    assert "private body" not in str(exc.value)
+
+
 def test_ingest_noop_is_explicit_not_reported_as_changed(monkeypatch):
     monkeypatch.setattr(sync, "urlopen", lambda *_args, **_kwargs: _Response({"upserted": 3, "changed": 0}))
     result = sync.sync_rows({"races": [{"id": "r1"}]}, base_url="https://example.test", token="t")

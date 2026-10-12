@@ -97,6 +97,44 @@ def fetch_write_budget(*, base_url: str | None = None, token: str | None = None)
     return payload
 
 
+def fetch_open_bet_race_ids(target_date: str, *, base_url: str | None = None,
+                            token: str | None = None) -> set[str]:
+    """Fetch the authoritative set of prior-day real races still needed for settlement.
+
+    This endpoint is intentionally fail-closed: daily sync must not fall back to
+    syncing every previous-day race when the API cannot identify open bets.
+    """
+    try:
+        if date.fromisoformat(target_date).isoformat() != target_date:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("open-bet race lookup date is invalid") from exc
+    base_url = (base_url or os.environ.get("EDGELAB_API_URL", "")).rstrip("/")
+    token = token or os.environ.get("INGEST_TOKEN", "")
+    if not base_url or not token:
+        raise RuntimeError("EDGELAB_API_URL and INGEST_TOKEN are required")
+    query = urlencode({"date": target_date})
+    req = Request(f"{base_url}/api/ingest/open-bet-race-ids?{query}", headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/json",
+        "User-Agent": "EdgeLab-ML/0.1"}, method="GET")
+    try:
+        with urlopen(req, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        # Do not expose response bodies, which may contain private details.
+        raise RuntimeError(f"open-bet race lookup failed: HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"open-bet race lookup failed: {type(exc).__name__}") from exc
+    if (not isinstance(payload, dict) or payload.get("date") != target_date
+            or not isinstance(payload.get("raceIds"), list)
+            or len(payload["raceIds"]) > 500
+            or any(not isinstance(race_id, str) or not race_id.startswith("boat-")
+                   or len(race_id) > 64 for race_id in payload["raceIds"])
+            or len(set(payload["raceIds"])) != len(payload["raceIds"])):
+        raise RuntimeError("open-bet race lookup response is invalid")
+    return set(payload["raceIds"])
+
+
 def fetch_model_registry(*, base_url: str | None = None, token: str | None = None) -> list[dict[str, Any]]:
     """Read authoritative model lifecycle state; this never writes remote data."""
     base_url = (base_url or os.environ.get("EDGELAB_API_URL", "")).rstrip("/")
