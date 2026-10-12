@@ -744,10 +744,14 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
             "notes": "Candidate-only temporal evaluation; prob_std is between-fit SD (null unless five fits); no automatic promotion or prediction sync.",
             "coverage": coverage,
             "availableAtAssumption": "B-file available_at is a race-day-midnight assumption unless source_available_at/source_observed_at plus a matching SHA-256 are present; independent arrival evidence is required for qualification."}
+    from edgelab.artifact_bundle import candidate_artifact_provenance
+    meta["artifactProvenance"] = candidate_artifact_provenance(model_id)
     artifact = {"metadata": meta, "model": model, "bootstrap_models": bootstrap_models,
                 "columns": columns, "temperature": temperature}
     with pkl_path.open("wb") as stream:
         pickle.dump(artifact, stream, protocol=pickle.HIGHEST_PROTOCOL)
     meta["ticketArtifactSha256"] = hashlib.sha256(pkl_path.read_bytes()).hexdigest()
     json_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    from edgelab.artifact_bundle import build_candidate_model_bundle
+    meta["candidateBundle"] = build_candidate_model_bundle(model_id, out)
     return meta

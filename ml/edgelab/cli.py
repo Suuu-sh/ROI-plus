@@ -817,6 +817,9 @@ def main(argv: list[str] | None = None) -> int:
         if result.get("status") == "candidate":
             metrics = dict(result.get("metrics") or {})
             metrics["ticketArtifactSha256"] = result["ticketArtifactSha256"]
+            bundle = result.get("candidateBundle")
+            if isinstance(bundle, dict):
+                metrics.update(bundle.get("registryMetrics") or {})
             model_row = {"id": model_id, "sport": "boat", "bet_type": "trifecta",
                 "version": f"candidate-{result['ticketArtifactSha256'][:16]}",
                 "algorithm": result["algorithm"], "status": "candidate",
@@ -978,12 +981,17 @@ def main(argv: list[str] | None = None) -> int:
                 metadata["metrics"]["promotionReason"] = "candidate artifact pair failed safe boat schema identity check"
             (Path("ml/artifacts") / f"{model_id}.json").write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+            from edgelab.artifact_bundle import build_candidate_model_bundle
+            candidate_bundle = build_candidate_model_bundle(model_id)
+            result["candidateBundle"] = candidate_bundle
+            registry_metrics = dict(metadata.get("metrics") or {})
+            registry_metrics.update(candidate_bundle["registryMetrics"])
             model_row = {"id": model_id, "sport": "boat", "bet_type": "win", "version": metadata.get("version", "v1"),
                          "algorithm": metadata.get("algorithm", "LightGBM"), "status": "candidate",
                          "train_from": metadata.get("trainFrom"), "train_to": metadata.get("trainTo"),
                          "valid_from": metadata.get("validFrom"), "valid_to": metadata.get("validTo"),
                          "test_from": metadata.get("testFrom"), "test_to": metadata.get("testTo"),
-                         "n_train": metadata.get("nTrain", 0), "metrics_json": json.dumps(metadata.get("metrics", {})),
+                         "n_train": metadata.get("nTrain", 0), "metrics_json": json.dumps(registry_metrics),
                          "trained_at": metadata.get("trainedAt"), "notes": "guarded unattended candidate; manual promotion only"}
             merge_rows(rows, {"models": [model_row]})
             save_rows(rows)
@@ -1023,7 +1031,13 @@ def main(argv: list[str] | None = None) -> int:
         model_id = f"{args.sport}-win-lgbm-{datetime.now(timezone.utc):%Y%m%d}-{fingerprint}"
         result = train_model(training_rows, sport=args.sport,
                              model_id=model_id, version=candidate_version(model_id))
+        candidate_bundle = None
+        if result.get("status") == "candidate":
+            from edgelab.artifact_bundle import build_candidate_model_bundle
+            candidate_bundle = build_candidate_model_bundle(model_id)
         model_metrics = dict(result.get("metrics", {}))
+        if candidate_bundle:
+            model_metrics.update(candidate_bundle["registryMetrics"])
         if args.sport == "boat":
             schema_version = _safe_boat_schema_version(model_id)
             if schema_version:
