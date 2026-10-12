@@ -116,6 +116,7 @@ def test_observation_budget_refusal_keeps_core_daily_sync_and_marks_success(monk
         for index in range(56)
     ]
     sent = []
+    refusal_body = {"value": b'{"code":"d1_write_budget_exhausted"}'}
 
     class Response:
         status = 200
@@ -137,7 +138,7 @@ def test_observation_budget_refusal_keeps_core_daily_sync_and_marks_success(monk
         sent.append(table)
         if table == "prerace-observations":
             raise HTTPError(req.full_url, 429, "Too Many Requests", {},
-                            BytesIO(b'{"code":"d1_write_budget_exhausted"}'))
+                            BytesIO(refusal_body["value"]))
         count = len(json.loads(req.data))
         return Response({"upserted": count, "changed": count})
 
@@ -167,6 +168,16 @@ def test_observation_budget_refusal_keeps_core_daily_sync_and_marks_success(monk
     assert result["sync"]["prerace_observations"] == {
         "status": "budget_refused", "http_status": 429, "chunk": 1, "total_chunks": 2,
     }
+
+    # Only the known Worker budget codes are optional skips. A generic upstream
+    # 429 must still fail the daily run and cannot produce a success report.
+    sent.clear()
+    refusal_body["value"] = b"upstream rate limit"
+    with pytest.raises(RuntimeError, match="HTTP 429"):
+        cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
+    assert sent[-1] == "prerace-observations"
+    assert sent.count("prerace-observations") == 1
+    assert {"races", "results", "payouts", "entries", "ticket-predictions", "collection-runs"} <= set(sent[:-1])
 
 
 def test_daily_fails_closed_when_open_bet_lookup_is_unavailable(monkeypatch):

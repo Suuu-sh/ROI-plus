@@ -275,6 +275,8 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
                 except HTTPError as exc:
                     safe_code = _safe_ingest_error_code(exc)
                     if exc.code == 429:
+                        if safe_code not in {"d1_write_budget_unavailable", "d1_write_budget_exhausted"}:
+                            raise RuntimeError(f"ingest {table} failed: HTTP 429") from exc
                         # Never retry blindly: the reservation status may have
                         # changed and a partial prior sync must remain visible.
                         raise WriteBudgetRefused(
