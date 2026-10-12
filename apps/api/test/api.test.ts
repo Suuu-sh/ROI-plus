@@ -167,16 +167,17 @@ describe('EdgeLab API',()=>{
   expect(rollover).toMatchObject({limit:20_000,essentialLimit:16_000,optionalLimit:4_000,reserved:0,allowance:null});
  });
  it('serves only authenticated, current-JST, point-in-time-safe boat forecast inputs',async()=>{
-  const today=jstDate(), cutoff=new Date().toISOString(), raceId=`boat-${today.replaceAll('-','')}-98-01`;
+  const nowMs=Date.now(), today=jstDate(new Date(nowMs)), cutoff=new Date(nowMs).toISOString(), raceId=`boat-${today.replaceAll('-','')}-98-01`;
+  const availableAt=jstIso(nowMs-60_000),lateAvailableAt=jstIso(nowMs+60_000);
   sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('98','boat','Forecast fixture')").run();
   sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES(?,'boat','98',?,1,?,'scheduled','real',?)")
-   .run(raceId,today,jstIso(Date.now()+60*60_000),jstIso());
+   .run(raceId,today,jstIso(nowMs+60*60_000),jstIso(nowMs));
   sqlite.prepare("INSERT INTO entries(id,race_id,number,name,available_at,data_origin) VALUES(?,?,1,'Available',?,'real'),(?,?,2,'Late',?,'real')")
-   .run(`${raceId}-1`,raceId,jstIso(Date.now()-60_000),`${raceId}-2`,raceId,jstIso(Date.now()+60_000));
+   .run(`${raceId}-1`,raceId,availableAt,`${raceId}-2`,raceId,lateAvailableAt);
   expect((await app.request(`/api/ingest/today-boat-forecast-inputs?date=${today}&cutoff=${encodeURIComponent(cutoff)}`,{},env())).status).toBe(401);
   const response=await app.request(`/api/ingest/today-boat-forecast-inputs?date=${today}&cutoff=${encodeURIComponent(cutoff)}`,{headers:{authorization:'Bearer test-token'}},env());
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({date:today,races:[{id:raceId}],entries:[{id:`${raceId}-1`,available_at:jstIso(Date.now()-60_000),data_origin:'real'}]});
+  expect(await response.json()).toMatchObject({date:today,races:[{id:raceId}],entries:[{id:`${raceId}-1`,available_at:availableAt,data_origin:'real'}]});
   expect((await app.request(`/api/ingest/today-boat-forecast-inputs?date=2099-01-01&cutoff=${encodeURIComponent(cutoff)}`,{headers:{authorization:'Bearer test-token'}},env())).status).toBe(400);
   expect((await app.request(`/api/ingest/today-boat-forecast-inputs?date=${today}&cutoff=${encodeURIComponent(new Date(Date.now()-10*60_000).toISOString())}`,{headers:{authorization:'Bearer test-token'}},env())).status).toBe(400);
  });
@@ -1076,7 +1077,9 @@ describe('collection status quality compatibility',()=>{
  });
  it('limits each cleanup run to ten quality-only rows',async()=>{
   const insert=sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,records,error) VALUES(?,'boatrace-odds-worker','boat','2026-10-11',?,'failed',0,'race: odds pool not stable (overround out of range)')");
-  for(let i=0;i<12;i++)insert.run(`batch-${i}`,new Date(Date.now()-(2*60*60_000+i)).toISOString());
+  const oldEnoughAt=Date.now()-2*60*60_000;
+  // Minute spacing keeps the natural-key timestamps distinct under a frozen clock.
+  for(let i=0;i<12;i++)insert.run(`batch-${i}`,new Date(oldEnoughAt-i*60_000).toISOString());
   await cron(DB,false);
   expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE id LIKE 'batch-%'").get()).toMatchObject({n:2});
  });
