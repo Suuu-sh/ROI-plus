@@ -12,7 +12,7 @@ const root=resolve(import.meta.dirname,'../../..');
 let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
 const env=(extra:Record<string,unknown>={})=>({DB,INGEST_TOKEN:'test-token',ENABLE_AUTO_BET:'true',...extra});
 const jstIso=(ms=Date.now())=>new Date(ms+9*60*60*1000).toISOString().replace('Z','+09:00');
-const jstDate=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const jstDate=(date:Date=new Date())=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(date);
 const setPaperCutoff=(raceId:string,decisionAt:number)=>sqlite.prepare('UPDATE races SET race_date=?,post_time=?,betting_cutoff_at=?,betting_cutoff_source=?,betting_cutoff_observed_at=? WHERE id=?').run(jstDate(),jstIso(decisionAt+240_000),jstIso(decisionAt+60_000),'boatrace-racelist-cutoff-v1',jstIso(decisionAt-30_000),raceId);
 const canonicalJson=(value:any):string=>Array.isArray(value)?`[${value.map(canonicalJson).join(',')}]`:value&&typeof value==='object'?`{${Object.keys(value).sort().map(k=>`${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`:JSON.stringify(value)??'null';
 const sha256Json=(value:unknown)=>createHash('sha256').update(canonicalJson(value),'utf8').digest('hex');
@@ -33,8 +33,8 @@ const addBetInputs=(raceId:string,prefix:string)=>{
  return String(entry.number);
 };
 const addValidatedTrifectaFixture=(raceId='boat-20990101-99-01',modelId='boat-trifecta-validated')=>{
- const raceNo=Number(raceId.match(/-(\d{2})$/)?.[1]??1);
- const modelVersion=modelId==='boat-trifecta-validated'?'v1':modelId;
+ const raceNo=Number(/-(\d{2})$/.exec(raceId)?.[1]??'01');
+ const version=modelId==='boat-trifecta-validated'?'v1':modelId;
  const artifactSha256='b'.repeat(64);
  const metrics={ticketModelSchemaVersion:'ticket-selection-v1',ticketPredictionSemantics:'exact-selection-probability-v1',ticketBetType:'trifecta',ticketArtifactSha256:artifactSha256,promotionEligible:true,
   ticketValidation:{status:'independently_validated',independentReviewId:'offline-ticket-audit-1',policyVersion:'ticket-selection-v1',betType:'trifecta',artifactSha256,reportSha256:'c'.repeat(64),dataOrigin:'real',completeCombinationCoverage:true,probabilitiesNormalized:true,outOfSampleValidated:true,pointInTimeSafe:true,validatedAt:jstIso()}};
@@ -42,14 +42,14 @@ const addValidatedTrifectaFixture=(raceId='boat-20990101-99-01',modelId='boat-tr
  sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES(?,'boat','99','2099-01-01',?,?,'scheduled','real',?)").run(raceId,raceNo,jstIso(Date.now()+60*60_000),jstIso());
  const numbers=[1,2,3,4,5,6];
  for(const number of numbers)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,available_at,data_origin) VALUES(?,?,?,? ,?,'real')").run(`${raceId}-${number}`,raceId,number,`Runner ${number}`,jstIso(Date.now()-60_000));
- sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status,metrics_json,trained_at) VALUES(?,'boat','trifecta',?,'fixture','active',?,?)").run(modelId,modelVersion,JSON.stringify(metrics),jstIso(Date.now()-60_000));
+ sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status,metrics_json,trained_at) VALUES(?,'boat','trifecta',?,'fixture','active',?,?)").run(modelId,version,JSON.stringify(metrics),jstIso(Date.now()-60_000));
  const oddsUrl=`https://www.boatrace.jp/owpc/pc/race/odds3t?hd=20990101&jcd=99&rno=${raceNo}`,capturedAt=jstIso(Date.now()-5000),predictedAt=jstIso(Date.now()-10_000),sha='d'.repeat(64);
  const selections:string[]=[];
  for(const a of numbers)for(const b of numbers)for(const c of numbers)if(a!==b&&a!==c&&b!==c)selections.push(`${a}-${b}-${c}`);
  for(let i=0;i<selections.length;i++){
   const selection=selections[i];
-  sqlite.prepare("INSERT INTO ticket_predictions(id,race_id,model_id,bet_type,selection,probability,prob_std,predicted_at,data_origin,feature_schema_version,artifact_sha256) VALUES(?,?,?,'trifecta',?,?,0.001,?,'real','ticket-selection-v1',?)").run(`tp-${modelId}-${raceId}-${i}`,raceId,modelId,selection,1/120,predictedAt,artifactSha256);
-  sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin,source_url,source_sha256,quality_status) VALUES(?,?,'trifecta',?,200,?,'boatrace-trifecta-official-v1','real',?,?,'verified-complete-v1')").run(`to-${modelId}-${raceId}-${i}`,raceId,selection,capturedAt,oddsUrl,sha);
+  sqlite.prepare("INSERT INTO ticket_predictions(id,race_id,model_id,bet_type,selection,probability,prob_std,predicted_at,data_origin,feature_schema_version,artifact_sha256) VALUES(?,?,?,'trifecta',?,?,0.001,?,'real','ticket-selection-v1',?)").run(`${modelId}-${raceId}-tp-${i}`,raceId,modelId,selection,1/120,predictedAt,artifactSha256);
+  sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin,source_url,source_sha256,quality_status) VALUES(?,?,'trifecta',?,200,?,'boatrace-trifecta-official-v1','real',?,?,'verified-complete-v1')").run(`${modelId}-${raceId}-to-${i}`,raceId,selection,capturedAt,oddsUrl,sha);
  }
  return {raceId,modelId,selections};
 };

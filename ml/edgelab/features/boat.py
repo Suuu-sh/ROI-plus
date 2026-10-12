@@ -6,9 +6,10 @@ import math
 import json
 import re
 from urllib.parse import parse_qs, urlparse
+from datetime import datetime
 from typing import Any
 
-from edgelab.normalization.availability import available_by, assert_available, filter_historical, parse_datetime
+from edgelab.normalization.availability import assert_available, filter_historical, parse_datetime
 
 
 # Only these values may cross the feature-builder/model boundary.  Keep this
@@ -49,6 +50,8 @@ PRERACE_V2_FEATURE_COLUMNS = (
 )
 _BEFOREINFO_URL = "https://www.boatrace.jp/owpc/pc/race/beforeinfo"
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_WIND_DIRECTION_DEGREES = {"北": 0.0, "北東": 45.0, "東": 90.0, "南東": 135.0,
+                           "南": 180.0, "南西": 225.0, "西": 270.0, "北西": 315.0}
 
 
 def completed_racer_history(store: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -103,39 +106,128 @@ def completed_racer_history(store: Mapping[str, Any]) -> list[dict[str, Any]]:
     return history
 
 
-def _observation_values(observation: Mapping[str, Any], race: Mapping[str, Any], cutoff: Any) -> dict[str, Any] | None:
-    if observation.get("race_id") != race.get("id") or observation.get("data_origin") != "real":
-        return None
-    if observation.get("kind") not in {"exhibition", "weather"} or not _SHA256.fullmatch(str(observation.get("source_sha256", ""))):
-        return None
+def classify_prerace_observation(observation: Mapping[str, Any], race: Mapping[str, Any],
+                                 cutoff: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate one archived observation and explain any fail-closed exclusion.
+
+    Capture/availability timestamps must be timezone-aware, tied to the exact
+    official race URL, and no more than 30 minutes old at the feature cutoff.
+    This is shared by feature selection and the all-race coverage report.
+    """
+    if (observation.get("fixture") or observation.get("data_origin") != "real"
+            or race.get("data_origin") != "real"):
+        return None, "synthetic_fixture_or_non_real_origin"
+    if observation.get("race_id") != race.get("id"):
+        return None, "race_or_origin_mismatch"
+    if observation.get("kind") not in {"exhibition", "weather"}:
+        return None, "observation_kind_invalid"
+    if not _SHA256.fullmatch(str(observation.get("source_sha256", ""))):
+        return None, "observation_sha256_invalid"
     try:
         url = urlparse(str(observation.get("source_url", "")))
         query = parse_qs(url.query)
-        expected = (str(race.get("race_date", "")).replace("-", ""), str(race.get("venue_id", "")), str(race.get("race_no", "")))
+        expected = (str(race.get("race_date", "")).replace("-", ""),
+                    str(race.get("venue_id", "")), str(race.get("race_no", "")))
         actual = (query.get("hd", [""])[0], query.get("jcd", [""])[0], query.get("rno", [""])[0])
-        if (url.scheme != "https" or url.netloc != "www.boatrace.jp" or url.path != "/owpc/pc/race/beforeinfo"
-                or actual != expected):
-            return None
+        if (url.scheme != "https" or url.netloc != "www.boatrace.jp"
+                or url.path != "/owpc/pc/race/beforeinfo" or actual != expected):
+            return None, "official_race_url_mismatch"
         fetched = parse_datetime(observation.get("fetched_at"))
         available = parse_datetime(observation.get("available_at"))
-        if fetched != available or not available_by(observation, cutoff):
-            return None
+        target = parse_datetime(cutoff)
+        # Do not interpret naive source timestamps as UTC evidence.
+        for raw in (observation.get("fetched_at"), observation.get("available_at"), cutoff):
+            if isinstance(raw, str):
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            elif isinstance(raw, datetime):
+                parsed = raw
+            else:
+                continue
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                return None, "observation_timezone_missing"
+        if target.tzinfo is None or target.utcoffset() is None:
+            return None, "cutoff_timezone_missing"
+        if fetched != available:
+            return None, "capture_availability_mismatch"
+        if fetched > target:
+            return None, "observation_after_cutoff"
         source_observed = observation.get("source_observed_at")
-        # Some BOAT RACE pages label the displayed weather only as, for
-        # example, "11R時点". Keep that label for audit, but do not let an
-        # unknown source time enter a point-in-time feature vector.
-        if (observation.get("kind") == "weather"
-                and observation.get("source_observation_label")
-                and source_observed is None):
-            return None
-        if source_observed is not None and parse_datetime(source_observed) > parse_datetime(cutoff):
-            return None
-        if (parse_datetime(cutoff) - fetched).total_seconds() > 30 * 60:
-            return None
+        # Some BOAT RACE pages label displayed weather only as, for example,
+        # "11R時点". Retain the label for audit, but do not use it when the
+        # exact source observation time is unavailable.
+        source_label_reason = _weather_source_time_reason(
+            observation.get("kind"), observation.get("source_observation_label"), source_observed)
+        if source_label_reason:
+            return None, source_label_reason
+        if source_observed is not None:
+            source_reason = _source_observation_time_reason(source_observed, target, fetched_at=fetched)
+            if source_reason:
+                return None, source_reason
+        freshness_reason = _observation_freshness_reason(fetched, target)
+        if freshness_reason:
+            return None, freshness_reason
         value = json.loads(str(observation.get("values_json", "{}")))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
+    except (TypeError, ValueError, json.JSONDecodeError, OverflowError):
+        return None, "observation_timestamp_or_values_invalid"
+    if not isinstance(value, dict):
+        return None, "observation_values_invalid"
+    if not observation_has_usable_prerace_features(observation.get("kind"), value):
+        return None, "observation_features_unusable"
+    return value, None
+
+
+def _source_observation_time_reason(source_observed: Any, cutoff: datetime, *,
+                                    fetched_at: datetime | None = None) -> str | None:
+    """Fail closed when the source's displayed observation time is unknown or late."""
+    try:
+        observed = parse_datetime(source_observed)
+        if isinstance(source_observed, str):
+            parsed = datetime.fromisoformat(source_observed.replace("Z", "+00:00"))
+        elif isinstance(source_observed, datetime):
+            parsed = source_observed
+        else:
+            return "source_observation_timestamp_invalid"
+    except (TypeError, ValueError, OverflowError):
+        return "source_observation_timestamp_invalid"
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return "source_observation_timezone_missing"
+    if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+        return "cutoff_timezone_missing"
+    if observed > cutoff:
+        return "source_observation_after_cutoff"
+    if fetched_at is not None and observed > fetched_at:
+        return "source_observation_after_capture"
+    return None
+
+
+def _weather_source_time_reason(kind: Any, source_observation_label: Any,
+                                source_observed: Any) -> str | None:
+    if kind == "weather" and source_observation_label and source_observed is None:
+        return "weather_source_time_unknown"
+    return None
+
+
+def _observation_freshness_reason(fetched: datetime, cutoff: datetime, *, max_age_seconds: int = 30 * 60) -> str | None:
+    """Shared cutoff/freshness classification for point-in-time observations."""
+    if fetched > cutoff:
+        return "observation_after_cutoff"
+    if (cutoff - fetched).total_seconds() > max_age_seconds:
+        return "stale_observation"
+    return None
+
+
+def _observation_selection_key(observation: Mapping[str, Any], values: Mapping[str, Any]):
+    """Stable latest-wins key after provenance and freshness validation."""
+    captured = parse_datetime(observation.get("fetched_at"))
+    digest = str(observation.get("source_sha256") or "")
+    fingerprint = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return captured, digest, fingerprint
+
+
+def _observation_values(observation: Mapping[str, Any], race: Mapping[str, Any], cutoff: Any) -> dict[str, Any] | None:
+    """Compatibility wrapper for callers interested only in usable values."""
+    value, _ = classify_prerace_observation(observation, race, cutoff)
+    return value
 
 
 def build_boat_prerace_v2_features(entries: Iterable[Mapping[str, Any]], *, race: Mapping[str, Any],
@@ -161,29 +253,25 @@ def build_boat_prerace_v2_features(entries: Iterable[Mapping[str, Any]], *, race
         if not values:
             continue
         try:
-            captured = parse_datetime(observation.get("fetched_at"))
+            key = _observation_selection_key(observation, values)
         except (TypeError, ValueError):
             continue
         # The store's arrival order can differ after archive import or replay.
         # Timestamp wins; source hash and canonical values break same-time ties.
-        digest = str(observation.get("source_sha256") or "")
-        fingerprint = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        key = (captured, digest, fingerprint)
         try:
             entry_number = int(observation.get("entry_number", -1))
         except (TypeError, ValueError):
             continue
         if observation.get("kind") == "weather" and entry_number == 0:
             if weather is None or key > (weather[0], weather[1], weather[2]):
-                weather = (captured, digest, fingerprint, values)
+                weather = (*key, values)
         elif observation.get("kind") == "exhibition":
             lane = entry_number
             if 1 <= lane <= 6:
                 if lane not in exhibition or key > (exhibition[lane][0], exhibition[lane][1], exhibition[lane][2]):
-                    exhibition[lane] = (captured, digest, fingerprint, values)
+                    exhibition[lane] = (*key, values)
     weather_values = weather[3] if weather else {}
-    direction = {"北": 0.0, "北東": 45.0, "東": 90.0, "南東": 135.0,
-                 "南": 180.0, "南西": 225.0, "西": 270.0, "北西": 315.0}.get(weather_values.get("wind_direction"))
+    direction = _WIND_DIRECTION_DEGREES.get(weather_values.get("wind_direction"))
     wind_speed = _safe_number(weather_values.get("wind_speed"))
     wave_height = _safe_number(weather_values.get("wave_height"))
     wind_x = wind_speed * math.sin(math.radians(direction)) if wind_speed is not None and direction is not None else None
@@ -224,8 +312,26 @@ def _safe_number(value: Any) -> float | None:
     try:
         number = float(value)
         return number if math.isfinite(number) else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
+
+
+def observation_has_usable_prerace_features(kind: Any, values: Mapping[str, Any]) -> bool:
+    """Match the source fields that the V2 feature builder can turn into values."""
+    if not isinstance(values, Mapping) or not values:
+        return False
+    if kind == "exhibition":
+        numeric_fields = ("exhibition_time", "tilt", "weight", "start_exhibition",
+                          "start_exhibition_course")
+        return (any(_safe_number(values.get(field)) is not None for field in numeric_fields)
+                or isinstance(values.get("start_exhibition_false_start"), bool))
+    if kind == "weather":
+        if _safe_number(values.get("wave_height")) is not None:
+            return True
+        direction = values.get("wind_direction")
+        return (_safe_number(values.get("wind_speed")) is not None
+                and isinstance(direction, str) and direction in _WIND_DIRECTION_DEGREES)
+    return False
 
 
 def build_boat_features(entries: Iterable[Mapping[str, Any]], *, race_date: Any,

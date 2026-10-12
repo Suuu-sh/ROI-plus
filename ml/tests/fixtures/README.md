@@ -1,1 +1,3 @@
 `initial_baseline_validation.synthetic.json` is generated only from deterministic synthetic test rows and a fake estimator. Its `dataOrigin: real`, passing checks, and metrics are contract-shaped test inputs, not evidence about any real model or race data. Never upload, sync, or use it for model approval.
+
+Inline rows in `test_trifecta.py` and `test_trifecta_coverage.py` are also synthetic. Race, result, payout, odds, and observation records use `data_origin: sample` (or an explicit `fixture: synthetic` marker for ordering-only helpers), and must not be changed to `real` to make model or replay tests pass.

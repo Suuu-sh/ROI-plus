@@ -15,7 +15,7 @@ import pickle
 import random
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -25,6 +25,9 @@ from edgelab.features.boat import (BASE_FEATURE_COLUMNS, PRERACE_V2_FEATURE_COLU
                                    PRERACE_V2_SCHEMA, build_boat_prerace_v2_features,
                                    completed_racer_history)
 from edgelab.models.compare import temporal_split
+from edgelab.models.trifecta_coverage import (audit_trifecta_coverage,
+                                               evaluate_candidate_qualification,
+                                               validate_ticket_probabilities)
 from edgelab.normalization.availability import available_by
 
 TICKET_SCHEMA = "ticket-selection-v1"
@@ -145,6 +148,36 @@ def ensemble_ordered_triples(artifact: Mapping[str, Any], group: Sequence[Mappin
     return mean, std
 
 
+def _has_recent_independent_ticket_validation(metrics: Mapping[str, Any], artifact_sha256: str) -> bool:
+    """Mirror the API's artifact-bound validation gate before local inference."""
+    validation = metrics.get("ticketValidation")
+    if not isinstance(validation, Mapping) or validation.get("fixture") is True:
+        return False
+    if (validation.get("status") != "independently_validated"
+            or validation.get("policyVersion") != TICKET_SCHEMA
+            or validation.get("betType") != "trifecta"
+            or validation.get("artifactSha256") != artifact_sha256
+            or validation.get("dataOrigin") != "real"
+            or validation.get("completeCombinationCoverage") is not True
+            or validation.get("probabilitiesNormalized") is not True
+            or validation.get("outOfSampleValidated") is not True
+            or validation.get("pointInTimeSafe") is not True
+            or not isinstance(validation.get("independentReviewId"), str)
+            or not validation.get("independentReviewId")
+            or not re.fullmatch(r"[a-f0-9]{64}", str(validation.get("reportSha256") or ""))):
+        return False
+    validated_at = validation.get("validatedAt")
+    try:
+        stamp = datetime.fromisoformat(str(validated_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        return False
+    now = datetime.now(timezone.utc)
+    stamp = stamp.astimezone(timezone.utc)
+    return stamp <= now and now - stamp <= timedelta(days=30)
+
+
 def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[str, Any],
                               artifact: Mapping[str, Any], model_id: str, cutoff: str,
                               artifact_sha256: str, race_date: str | None = None,
@@ -170,6 +203,7 @@ def active_ticket_predictions(store: Mapping[str, Any], *, model_row: Mapping[st
             or metrics.get("ticketBetType") != "trifecta"
             or metrics.get("promotionEligible") is not True
             or metrics.get("ticketArtifactSha256") != artifact_sha256
+            or not _has_recent_independent_ticket_validation(metrics, artifact_sha256)
             or meta.get("id") != model_id
             or meta.get("ticketModelSchemaVersion") != TICKET_SCHEMA
             or meta.get("ticketPredictionSemantics") != PREDICTION_SEMANTICS
@@ -259,9 +293,12 @@ def _lane_order_model(groups: Sequence[Sequence[Mapping[str, Any]]], alpha: floa
 
 
 def _proper_ticket_metrics(groups, distributions):
+    if len(groups) != len(distributions):
+        raise ValueError("one complete 120-ticket distribution is required per race")
     losses, briers, calibration = [], [], []
     top_calibration = []
-    for group, probs in zip(groups, distributions):
+    for group, raw_probs in zip(groups, distributions):
+        probs = validate_ticket_probabilities(raw_probs)
         actual = _actual_selection(group)
         losses.append(-math.log(max(1e-15, probs[actual])))
         briers.append(sum((prob - (selection == actual)) ** 2
@@ -297,7 +334,8 @@ def _proper_ticket_metrics(groups, distributions):
             "nDates": len({str(group[0].get("race_date")) for group in groups}),
             "topTicketEce": top_ece,
             "topTicketCalibration": top_detail,
-            "raceLogLosses": losses}
+            "raceLogLosses": losses,
+            "raceBriers": briers}
 
 
 def _date_cluster_interval(groups, candidate_losses, baseline_losses, *, samples=1000, seed=17):
@@ -317,6 +355,31 @@ def _date_cluster_interval(groups, candidate_losses, baseline_losses, *, samples
     return {"nDateClusters": len(dates), "meanDeltaLogLossCandidateMinusBaseline": delta,
             "ci95": [means[int(.025 * (samples - 1))], means[int(.975 * (samples - 1))]],
             "interpretation": "negative favors candidate; date-cluster bootstrap, not a profitability interval"}
+
+
+def _paired_delta_interval(groups, candidate_values, baseline_values, *, cluster="race",
+                           samples=1000, seed=17):
+    """Paired 95% bootstrap interval for a proper-score delta (negative is better)."""
+    if len(groups) != len(candidate_values) or len(groups) != len(baseline_values):
+        raise ValueError("paired score vectors must match the race groups")
+    by_cluster: dict[str, list[float]] = defaultdict(list)
+    for index, (group, candidate, baseline) in enumerate(zip(groups, candidate_values, baseline_values)):
+        key = (str(group[0].get("race_date")) if cluster == "date"
+               else str(group[0].get("race_id", index)))
+        by_cluster[key].append(float(candidate) - float(baseline))
+    keys = sorted(by_cluster)
+    cluster_values = [sum(by_cluster[key]) / len(by_cluster[key]) for key in keys]
+    if len(cluster_values) < 2:
+        return {"nClusters": len(cluster_values), "meanDeltaCandidateMinusBaseline": None, "ci95": None,
+                "interpretation": "negative favors candidate; bootstrap is unavailable with fewer than two clusters"}
+    rng = random.Random(seed)
+    means = [sum(rng.choices(cluster_values, k=len(cluster_values))) / len(cluster_values)
+             for _ in range(samples)]
+    means.sort()
+    return {"nClusters": len(cluster_values),
+            "meanDeltaCandidateMinusBaseline": sum(cluster_values) / len(cluster_values),
+            "ci95": [means[int(.025 * (samples - 1))], means[int(.975 * (samples - 1))]],
+            "interpretation": "negative favors candidate; proper-score interval, not a profitability interval"}
 
 
 def _temperature(valid: Sequence[Mapping[str, Any]], model: Mapping[str, Any]) -> float:
@@ -447,6 +510,35 @@ def _consistent_payout(rows: Sequence[Mapping[str, Any]], race_id: str, actual: 
     return matching[0]
 
 
+def _replay_roi_intervals(rows: Sequence[Mapping[str, Any]], *, samples: int = 2000,
+                          seed: int = 17) -> tuple[list[float] | None, list[float] | None]:
+    """Bootstrap race and date-cluster ROI for actually observed payouts only."""
+    selected = [row for row in rows if int(row.get("stake") or 0) > 0]
+    if len(selected) < 2:
+        return None, None
+    rng = random.Random(seed)
+
+    def roi(sampled):
+        stake = sum(int(row["stake"]) for row in sampled)
+        payout = sum(int(row["payout"]) for row in sampled)
+        return payout / stake - 1 if stake else 0.0
+
+    race_samples = sorted(roi(rng.choices(selected, k=len(selected))) for _ in range(samples))
+    by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in selected:
+        by_date[str(row.get("race_date") or "")].append(dict(row))
+    dates = sorted(key for key in by_date if key)
+    if len(dates) < 2:
+        return ([race_samples[int(.025 * (samples - 1))], race_samples[int(.975 * (samples - 1))]], None)
+    date_samples = []
+    for _ in range(samples):
+        chosen = rng.choices(dates, k=len(dates))
+        date_samples.append(roi([row for day in chosen for row in by_date[day]]))
+    date_samples.sort()
+    return ([race_samples[int(.025 * (samples - 1))], race_samples[int(.975 * (samples - 1))]],
+            [date_samples[int(.025 * (samples - 1))], date_samples[int(.975 * (samples - 1))]])
+
+
 def _replay(store: Mapping[str, Any], test_groups: Sequence[Sequence[Mapping[str, Any]]],
             artifact: Mapping[str, Any], *, max_picks: int = 1, race_budget: int = 100,
             min_expected_roi: float = 0.05, max_std: float = 0.05,
@@ -484,17 +576,22 @@ def _replay(store: Mapping[str, Any], test_groups: Sequence[Sequence[Mapping[str
                        for ticket in picked if ticket["selection"] == actual)
         stake = sum(ticket["stake"] for ticket in picked)
         selected_ticket_rois.extend(ticket["conservativeRoi"] for ticket in picked)
-        selected.append({"race_id": race_id, "tickets": len(picked),
+        selected.append({"race_id": race_id, "race_date": group[0].get("race_date"), "tickets": len(picked),
                          "selections": [ticket["selection"] for ticket in picked],
                          "stake": stake, "payout": returned,
                          "conservativeExpectedRois": [ticket["conservativeRoi"] for ticket in picked],
                          "selectionPolicyVersion": REPLAY_SELECTION_POLICY})
     stake = sum(r["stake"] for r in selected)
     payout = sum(r["payout"] for r in selected)
+    roi_race_ci, roi_date_ci = _replay_roi_intervals(selected)
     return {"status": "evaluated" if selected else "insufficient_odds_or_payout_data",
             "races": len(selected), "stake": stake, "payout": payout,
             "roi": payout / stake - 1 if stake else None,
             "racesWithPicks": sum(1 for row in selected if row["tickets"]),
+            "replayDates": len({str(row.get("race_date")) for row in selected if row["tickets"] and row.get("race_date")}),
+            "roiInterval95": roi_race_ci,
+            "roiDateClusterInterval95": roi_date_ci,
+            "roiIntervalMethod": "nonparametric bootstrap of observed, payout-verified replay races and race-date clusters",
             "ticketCount": sum(row["tickets"] for row in selected),
             "meanSelectedConservativeExpectedRoi": (sum(selected_ticket_rois) / len(selected_ticket_rois)
                                          if selected_ticket_rois else None),
@@ -514,6 +611,8 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
                    feature_schema_version: str = "boat-base-v1",
                    replay_max_picks: int = 1, replay_race_budget: int = 100) -> dict[str, Any]:
     """Train and chronologically evaluate an immutable candidate artifact."""
+    if min_train_races < 300:
+        raise ValueError("min_train_races cannot lower the fixed 300-race training floor")
     _select_runtime_like_tickets({}, {}, {}, max_picks=replay_max_picks,
                                  race_budget=replay_race_budget)
     safe_rows = [dict(r) for r in rows if r.get("data_origin") == "real"
@@ -521,6 +620,7 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
                  and r.get("predicted_at") and available_by(r, r["predicted_at"])]
     complete = [g for g in _group_races(safe_rows) if _complete_race(g)]
     complete_rows = [r for g in complete for r in g]
+    coverage = audit_trifecta_coverage(store, complete_rows)
     train, valid, test = temporal_split(complete_rows)
     train_groups = [g for g in _group_races(train) if _complete_race(g)]
     valid_groups = [g for g in _group_races(valid) if _complete_race(g)]
@@ -533,7 +633,8 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
     dates = lambda groups: sorted({str(g[0].get("race_date")) for g in groups})
     if len(train_groups) < min_train_races or not valid_groups or not test_groups:
         return {"id": model_id, "status": "untrained", "reason": "insufficient_temporal_data",
-                "nTrainRaces": len(train_groups), "nValidRaces": len(valid_groups), "nTestRaces": len(test_groups)}
+                "nTrainRaces": len(train_groups), "nValidRaces": len(valid_groups),
+                "nTestRaces": len(test_groups), "coverage": coverage}
     if feature_schema_version not in {"boat-base-v1", PRERACE_V2_SCHEMA}:
         raise ValueError("unsupported boat feature schema version")
     columns = list(PRERACE_V2_FEATURE_COLUMNS if feature_schema_version == PRERACE_V2_SCHEMA
@@ -569,10 +670,32 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
     uniform_metrics = _proper_ticket_metrics(test_groups, [uniform_distribution] * len(test_groups))
     lane_metrics = _proper_ticket_metrics(test_groups, [lane_distribution] * len(test_groups))
     candidate_metrics = _proper_ticket_metrics(test_groups, candidate_distributions)
+    comparison = {
+        "candidateVsLaneLogLossRaceBootstrap": _paired_delta_interval(
+            test_groups, candidate_metrics["raceLogLosses"], lane_metrics["raceLogLosses"], cluster="race"),
+        "candidateVsLaneLogLossDateCluster": _paired_delta_interval(
+            test_groups, candidate_metrics["raceLogLosses"], lane_metrics["raceLogLosses"], cluster="date"),
+        "candidateVsLaneBrierRaceBootstrap": _paired_delta_interval(
+            test_groups, candidate_metrics["raceBriers"], lane_metrics["raceBriers"], cluster="race"),
+        "candidateVsLaneBrierDateCluster": _paired_delta_interval(
+            test_groups, candidate_metrics["raceBriers"], lane_metrics["raceBriers"], cluster="date"),
+    }
     top_one = sum(max(probabilities, key=probabilities.get) == _actual_selection(group)
                   for (_, probabilities), group in zip(score_rows, test_groups))
     replay = _replay(store, test_groups, artifact_for_eval,
                      max_picks=replay_max_picks, race_budget=replay_race_budget)
+    qualification_metrics = {
+        "dataOrigin": "real_only" if all(row.get("data_origin") == "real" for row in complete_rows) else "sample_or_mixed",
+        "boatFeatureSchemaVersion": feature_schema_version,
+        "nTrainRaces": len(train_groups), "nTestRaces": len(test_groups),
+        "nTestDates": len(dates(test_groups)), "topTicketEce": candidate_metrics["topTicketEce"],
+        "completeCombinationCoverage": candidate_metrics["nTicketEventRows"] == 120 * len(test_groups),
+        "payoutReplay": replay, **comparison,
+    }
+    qualification = evaluate_candidate_qualification(qualification_metrics, coverage)
+    promotion_reason = (qualification["reason"] + ": " + ", ".join(qualification["failedChecks"])
+                        if qualification["failedChecks"] else
+                        "offline qualification passed; independent artifact-bound ticket validation is required")
     meta = {"id": model_id, "sport": "boat", "betType": "trifecta", "status": "candidate",
             "algorithm": "five-fit race-bootstrap pairwise logistic ranking + Plackett-Luce exact-order distribution",
             "ticketModelSchemaVersion": TICKET_SCHEMA,
@@ -585,9 +708,15 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
             "nTrainRaces": len(train_groups), "nValidRaces": len(valid_groups), "nTestRaces": len(test_groups),
             "temperature": temperature, "calibration": "validation exact-order log loss",
             "metrics": {"exactOrderLogLoss": sum(losses) / len(losses),
-                        "uniformBaseline": {key: value for key, value in uniform_metrics.items() if key != "raceLogLosses"},
-                        "laneOrderBaseline": {key: value for key, value in lane_metrics.items() if key != "raceLogLosses"},
+                        "uniformBaseline": {key: value for key, value in uniform_metrics.items()
+                                            if key not in {"raceLogLosses", "raceBriers"}},
+                        "laneOrderBaseline": {key: value for key, value in lane_metrics.items()
+                                              if key not in {"raceLogLosses", "raceBriers"}},
                         "laneBaselineSmoothingAlpha": alpha,
+                        "candidateVsLaneLogLossRaceBootstrap": comparison["candidateVsLaneLogLossRaceBootstrap"],
+                        "candidateVsLaneLogLossDateCluster": comparison["candidateVsLaneLogLossDateCluster"],
+                        "candidateVsLaneBrierRaceBootstrap": comparison["candidateVsLaneBrierRaceBootstrap"],
+                        "candidateVsLaneBrierDateCluster": comparison["candidateVsLaneBrierDateCluster"],
                         "candidateVsLaneDateClusterInterval": _date_cluster_interval(
                             test_groups, candidate_metrics["raceLogLosses"], lane_metrics["raceLogLosses"]),
                         "multiclassBrier": candidate_metrics["multiclassBrier"],
@@ -597,10 +726,15 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
                         "topTicketEce": candidate_metrics["topTicketEce"],
                         "topTicketCalibration": candidate_metrics["topTicketCalibration"],
                         "exactTop3HitRate": top_one / len(test_groups),
+                        "nTestRaces": len(test_groups), "nTestDates": len(dates(test_groups)),
+                        "completeCombinationCoverage": candidate_metrics["nTicketEventRows"] == 120 * len(test_groups),
+                        "pointInTimeEvidenceComplete": coverage["promotionEvidenceComplete"],
+                        "qualification": qualification,
+                        "evaluationQualified": qualification["evaluationQualified"],
                         "payoutReplay": replay,
                         "profitabilityProven": False,
                         "promotionEligible": False,
-                        "promotionReason": "candidate-only: B-file point-in-time availability and positive expected value are not proven",
+                        "promotionReason": promotion_reason,
                         "ticketModelSchemaVersion": TICKET_SCHEMA,
                         "ticketPredictionSemantics": PREDICTION_SEMANTICS,
                         "ticketBetType": "trifecta",
@@ -608,13 +742,16 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
             "trainedAt": datetime.now(timezone.utc).isoformat(),
             "nBootstrapModels": len(bootstrap_models),
             "notes": "Candidate-only temporal evaluation; prob_std is between-fit SD (null unless five fits); no automatic promotion or prediction sync.",
-            "availableAtAssumption": ("Source observations and official cutoff timestamps are required; missing cutoff or source timing excludes the race."
-                if feature_schema_version == PRERACE_V2_SCHEMA else
-                "Historical B-file available_at is synthesized at local race-day midnight; actual publication timing is not verified.")}
+            "coverage": coverage,
+            "availableAtAssumption": "B-file available_at is a race-day-midnight assumption unless source_available_at/source_observed_at plus a matching SHA-256 are present; independent arrival evidence is required for qualification."}
+    from edgelab.artifact_bundle import candidate_artifact_provenance
+    meta["artifactProvenance"] = candidate_artifact_provenance(model_id)
     artifact = {"metadata": meta, "model": model, "bootstrap_models": bootstrap_models,
                 "columns": columns, "temperature": temperature}
     with pkl_path.open("wb") as stream:
         pickle.dump(artifact, stream, protocol=pickle.HIGHEST_PROTOCOL)
     meta["ticketArtifactSha256"] = hashlib.sha256(pkl_path.read_bytes()).hexdigest()
     json_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    from edgelab.artifact_bundle import build_candidate_model_bundle
+    meta["candidateBundle"] = build_candidate_model_bundle(model_id, out)
     return meta

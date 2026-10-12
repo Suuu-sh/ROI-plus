@@ -110,6 +110,26 @@ train/validation/test 期間で評価し、candidate 状態だけを登録しま
 しません。手動昇格後に daily でartifactを復旧する場合は、`validated_model_run_id` と
 その run の正確な `validated_model_artifact_name` を指定してください。
 
+定期 daily の復旧は現在、model ID `boat-win-lgbm-20261010-14b4a90a` の検証済み
+artifact 1組だけを Actions run `38053091327` から取得します。この artifact は
+2027-01-08 に期限切れです。PR #43 の daily consumer はこの現行モデル用に固定されており、
+週次 candidate を自動選択したりモデルを有効化したりしません。artifactが未取得、または
+registry SHA・provenance と一致しない場合、予測は `not_ready` のままです。
+
+PR #45 の週次候補 workflow は `candidate-model-artifact-{modelId}` 名で、root-level の
+`<modelId>.pkl` / `<modelId>.json`、両ファイルのSHA-256とサイズを含むmanifest、portable ZIPを
+Actions artifactに90日保存します。manifestとJSON metadataはmodel ID、candidate状態、artifact名、
+run ID/attempt、workflow、repository、commit SHA、学習期間、両ファイルのSHA-256を記録します。
+registryの `metrics_json` にもrun ID、artifact名、ZIP/manifest SHA-256を記録します。
+`verify_candidate_model_bundle` はZIP、manifest、JSON、pickleのidentity・hash・サイズを照合し、
+weekly workflowは別アップロードされた loose pickle/JSON もZIP内の同じmemberと照合します。
+どちらもpickleを読み込む前に検証します。
+
+将来、独立検証後に人が候補を承認した場合だけ、正確な `artifactRunId` と `artifactName` を
+既存の `validated_model_run_id` / `validated_model_artifact_name` 入力へ渡して復旧できます。
+PR #43 はdaily consumerと現行モデルの固定復旧を所有し、PR #45 は週次candidate bundleの
+producer・完全性検証・registry provenanceを所有します。candidate作成やbundle保存だけでは
+dailyの固定対象を変更せず、自動昇格もしません。
 `backfill` はローカル履歴を収集するコマンドです。`backfill-sync` は既定でリモート
 D1書込を拒否し、`--dry-run` の推定だけを実行します。過去履歴のリモート同期は
 日次ワークフローからも外しており、将来の明示的な運用判断なしに実行しません。
