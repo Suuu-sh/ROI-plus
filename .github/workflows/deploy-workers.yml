@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Test and deploy Workers
+    name: Test, verify schema, and deploy Workers
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -30,18 +30,37 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Test migration readiness gate
+        run: node --test scripts/check-d1-migrations-ready.test.mjs
       - name: Typecheck
         run: npm run typecheck
       - name: Run tests
         run: npm test
-      # D1 migrations are intentionally a separate, reviewed release step.
+      # Finish both Worker builds before the first production mutation.
+      - name: Validate API Worker bundle (dry run)
+        run: npm -w apps/api run deploy -- --dry-run
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Build web Worker assets
+        run: npm -w apps/web run build
+      # This performs one bounded read-only SELECT. Missing or unknown ledger state fails closed.
+      - name: Check remote D1 migration readiness
+        run: node scripts/check-d1-migrations-ready.mjs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       - name: Deploy API Worker
         run: npm -w apps/api run deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      - name: Deploy web Worker
-        run: npm -w apps/web run deploy
+      - name: Verify API health
+        run: curl --fail --silent --show-error --max-time 15 --output /dev/null https://roi-plus-api.suuu-sh.workers.dev/api/health
+      # Deploy the dist bundle built above without running a potentially failing second build.
+      - name: Deploy prebuilt web Worker
+        working-directory: apps/web
+        run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
