@@ -91,6 +91,14 @@ const now = () => isoJstAt(Date.now());
 const ODDS_MAX_AGE_MS = 10 * 60 * 1000;
 const oddsFreshAfter = (timestamp = Date.now()) => isoJstAt(timestamp - ODDS_MAX_AGE_MS);
 const reserveWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'essential');
+const manualBetPlacedAt = (id: string) => {
+  const suffix = (BigInt(`0x${id.replaceAll('-', '').slice(0, 16)}`) % 1_000_000_000_000_000_000n).toString().padStart(18, '0');
+  return now().replace(/(\.\d{3})(\+09:00)$/, (_match, millis, offset) => `${millis}${suffix}${offset}`);
+};
+const reserveManualBetWrites = async (db: Db, rows: number) => {
+  for (let attempt = 0; attempt < 3; attempt++) if (await reserveWorkerWrites(db, rows)) return true;
+  return false;
+};
 const reserveOptionalWorkerWrites = (db: Db, rows: number) => reserveWriteBudget(db, utcDate(), estimateWorkerWriteUnits(rows), 'optional');
 const validSport = (v: string | null): v is Sport => v === 'horse' || v === 'boat';
 const originFilter = (v: string | null | undefined) => v === 'sample' || v === 'real' ? v : null;
@@ -864,8 +872,9 @@ app.post('/bets',async c=>{
    const maxStd=Number(await setting(db,'max_prob_std','0.05'));
    const ticket=(await ticketCandidatesForRace(db,{...race,venue_name:venue?.venue_name},maxStd)).find(x=>x.selection===body.selection);
    if(!ticket?.buyEligible)return jsonError(c,'ticket model or audited fresh odds are unavailable');
-   const bet={id:betId(),race_id:race.id,sport:race.sport,bet_type:'trifecta',selection:ticket.selection,stake:body.stake,mode:'manual',predicted_prob:ticket.probability,odds_at_bet:ticket.odds,expected_roi:ticket.expectedRoi,edge_label:ticket.edge,model_id:ticket.modelId,placed_at:now(),status:'open',data_origin:'real',bet_group_id:body.requestId,odds_captured_at:ticket.oddsCapturedAt,predicted_at_at_bet:ticket.predictedAt};
-   if(!await reserveWorkerWrites(db,1)){
+   const id=betId();
+   const bet={id,race_id:race.id,sport:race.sport,bet_type:'trifecta',selection:ticket.selection,stake:body.stake,mode:'manual',predicted_prob:ticket.probability,odds_at_bet:ticket.odds,expected_roi:ticket.expectedRoi,edge_label:ticket.edge,model_id:ticket.modelId,placed_at:manualBetPlacedAt(id),status:'open',data_origin:'real',bet_group_id:body.requestId,odds_captured_at:ticket.oddsCapturedAt,predicted_at_at_bet:ticket.predictedAt};
+   if(!await reserveManualBetWrites(db,1)){
      const repeated=await first<any>(db,'SELECT * FROM bets WHERE bet_group_id=?',body.requestId);
      if(repeated&&repeated.race_id===body.raceId&&repeated.bet_type==='trifecta'&&repeated.mode==='manual'&&repeated.selection===body.selection&&repeated.stake===body.stake)return c.json(mapBet(repeated));
      if(repeated)return jsonError(c,'requestId was already used for a different bet',409);
@@ -897,7 +906,7 @@ app.post('/bets',async c=>{
  if(existing.length){
    const requested=[...selections].sort((a:any,b:any)=>a.selection.localeCompare(b.selection));
    if(existing.length!==requested.length||existing.some((b:any,i:number)=>b.race_id!==body.raceId||b.bet_type!=='win'||b.mode!=='manual'||b.selection!==requested[i].selection||b.stake!==requested[i].stake))return jsonError(c,'requestId was already used for a different bet group',409);
-   return c.json({groupId,bets:existing.map(mapBet)});
+   return c.json(legacyRequest?mapBet(existing[0]):{groupId,bets:existing.map(mapBet)});
  }
  const race=await first<any>(db,'SELECT * FROM races WHERE id=? AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=races.id)',body.raceId); if(!race)return jsonError(c,'race not found',404); if(race.status!=='scheduled')return jsonError(c,'race is not scheduled');
  if(!race.post_time||!Number.isFinite(Date.parse(race.post_time))||Date.parse(race.post_time)<=Date.now())return jsonError(c,'race has started or start time is unavailable');
@@ -922,15 +931,18 @@ app.post('/bets',async c=>{
    }
    picks.push({...row,selection:input.selection,stake:input.stake});
  }
- const placedAt=now(), payload=picks.map(row=>({id:betId(),race_id:race.id,sport:race.sport,selection:row.selection,stake:row.stake,
-   predicted_prob:row.probability,odds_at_bet:row.odds,expected_roi:row.rankData.expectedRoi,edge_label:row.rankData.edge,model_id:row.model_id,
-   placed_at:placedAt,data_origin:race.data_origin,candidate_rank:row.candidateRank,candidate_count:row.candidateCount,
-   odds_captured_at:row.odds_captured_at,predicted_at_at_bet:row.predicted_at}));
- if(!await reserveWorkerWrites(db,payload.length*2)){
+ const payload=picks.map(row=>{
+   const id=betId();
+   return {id,race_id:race.id,sport:race.sport,selection:row.selection,stake:row.stake,
+     predicted_prob:row.probability,odds_at_bet:row.odds,expected_roi:row.rankData.expectedRoi,edge_label:row.rankData.edge,model_id:row.model_id,
+     placed_at:manualBetPlacedAt(id),data_origin:race.data_origin,candidate_rank:row.candidateRank,candidate_count:row.candidateCount,
+     odds_captured_at:row.odds_captured_at,predicted_at_at_bet:row.predicted_at};
+ });
+ if(!await reserveManualBetWrites(db,payload.length*2)){
    const repeated=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY selection',groupId);
    const requested=[...selections].sort((a:any,b:any)=>a.selection.localeCompare(b.selection));
    if(repeated.length){
-     if(repeated.length===requested.length&&repeated.every((b:any,i:number)=>b.race_id===body.raceId&&b.bet_type==='win'&&b.mode==='manual'&&b.selection===requested[i].selection&&b.stake===requested[i].stake))return c.json({groupId,bets:repeated.map(mapBet)});
+     if(repeated.length===requested.length&&repeated.every((b:any,i:number)=>b.race_id===body.raceId&&b.bet_type==='win'&&b.mode==='manual'&&b.selection===requested[i].selection&&b.stake===requested[i].stake))return c.json(legacyRequest?mapBet(repeated[0]):{groupId,bets:repeated.map(mapBet)});
      return jsonError(c,'requestId was already used for a different bet group',409);
    }
    const available=await first<any>(db,`SELECT ${availableBankrollSql} available`);
@@ -945,7 +957,7 @@ app.post('/bets',async c=>{
  if(!inserted.meta?.changes){
    const repeated=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY selection',groupId);
    const requested=[...selections].sort((a:any,b:any)=>a.selection.localeCompare(b.selection));
-   if(repeated.length===requested.length&&repeated.every((b:any,i:number)=>b.race_id===body.raceId&&b.bet_type==='win'&&b.mode==='manual'&&b.selection===requested[i].selection&&b.stake===requested[i].stake))return c.json({groupId,bets:repeated.map(mapBet)});
+   if(repeated.length===requested.length&&repeated.every((b:any,i:number)=>b.race_id===body.raceId&&b.bet_type==='win'&&b.mode==='manual'&&b.selection===requested[i].selection&&b.stake===requested[i].stake))return c.json(legacyRequest?mapBet(repeated[0]):{groupId,bets:repeated.map(mapBet)});
    return jsonError(c,repeated.length?'requestId was already used for a different bet group':'insufficient bankroll',repeated.length?409:400);
  }
  const bets=await all<any>(db,'SELECT * FROM bets WHERE bet_group_id=? ORDER BY candidate_rank',groupId);
