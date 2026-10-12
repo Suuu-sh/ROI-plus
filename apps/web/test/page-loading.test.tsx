@@ -39,7 +39,7 @@ it('boat main page loads only real purchases and performance without exploration
   const performance = screen.getByRole('region', { name: '全期間の仮想運用成績' })
   expect(performance.querySelector('aside')).toBeNull()
   expect(performance.textContent).toContain('損益 / 回収率は確定分')
-  expect(performance.textContent).toContain('確定払戻 ÷ 購入額')
+  expect(performance.textContent).toContain('確定払戻 ÷ 確定購入額（返還除外）')
   expect(performance.className).toContain('min-w-0')
   expect(performance.querySelectorAll(':scope > *')).toHaveLength(3)
   expect([...performance.querySelectorAll('div')].some((node) => node.className.includes('h-[168px]'))).toBe(true)
