@@ -91,16 +91,17 @@ jobs:
           MARK="ml/data/daily_ok_$(TZ=Asia/Tokyo date +%F)"
           HOUR=$(TZ=Asia/Tokyo date +%H)
           if [ "${{ github.event_name }}" = "schedule" ] && [ "$HOUR" -lt 20 ] && [ -f "$MARK" ]; then
-            if grep -Fxq 'daily_collection_success=true' "$MARK" && grep -Fxq 'forecast_ready=true' "$MARK"; then
+            SKIP="$(PYTHONPATH=ml python -m edgelab.daily_marker "$MARK")"
+            if [ "$SKIP" = 'true' ]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
             else
               echo 'Previous daily marker is incomplete or predates readiness tracking; retrying.'
               rm -f "$MARK"
             fi
           fi
-      # Source: Actions run 38053091327 / artifact 11669982332. This original
-      # validated bundle is only a recovery source. The daily
-      # pipeline still selects its active model from the authenticated registry
+      # Current-model recovery only: this validated bundle expires 2027-01-08.
+      # Registry metadata does not consistently link future active models to
+      # an archived Actions artifact. The daily pipeline still selects its active model from the authenticated registry
       # and verifies the artifact SHA256 plus venue/training provenance before inference.
       - name: Restore pinned model artifact for scheduled recovery
         if: github.event_name == 'schedule' && steps.guard.outputs.skip != 'true'

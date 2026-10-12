@@ -85,6 +85,14 @@ train/validation/test 期間で評価し、candidate 状態だけを登録しま
 しません。手動昇格後に daily でartifactを復旧する場合は、`validated_model_run_id` と
 その run の正確な `validated_model_artifact_name` を指定してください。
 
+定期 daily の復旧は現在、model ID `boat-win-lgbm-20261010-14b4a90a` の検証済み
+artifact 1組だけを Actions run `38053091327` から取得します。この artifact は
+2027-01-08 に期限切れです。これは将来の active model 全般に対応する仕組みではありません。
+通常の週次 `retrain` は候補artifactをActions artifactとして保存せず、registryの
+`metrics_json` も常にActions run IDとartifact名を結び付けていません。そのため、
+active model が変わった後は、対応する検証済みrun IDとartifact名を明示して復旧するまで
+日次forecastは `not_ready` のままです。hashやprovenanceが合わないartifactは推論前に拒否します。
+
 `backfill` はローカル履歴を収集するコマンドです。`backfill-sync` は既定でリモート
 D1書込を拒否し、`--dry-run` の推定だけを実行します。過去履歴のリモート同期は
 日次ワークフローからも外しており、将来の明示的な運用判断なしに実行しません。

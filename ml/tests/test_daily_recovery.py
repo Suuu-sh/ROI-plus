@@ -1,7 +1,11 @@
 import copy
+import hashlib
 from pathlib import Path
 
+import pytest
+
 from edgelab import cli
+from edgelab.daily_marker import is_complete_daily_marker, main as daily_marker_main
 
 
 def _store():
@@ -59,7 +63,63 @@ def test_daily_workflow_restores_pinned_bundle_and_skips_only_complete_forecasts
     assert "candidate-model-artifact-boat-win-lgbm-20261010-14b4a90a" in workflow
     assert "run-id: '38053091327'" in workflow
     assert "continue-on-error: true" in workflow
+    assert 'path: ml/artifacts' in workflow
+    assert 'python -m edgelab.daily_marker "$MARK"' in workflow
+    assert 'Current-model recovery only' in workflow
     assert "steps.daily_pipeline.outputs.daily_collection_success == 'true'" in workflow
     assert "steps.daily_pipeline.outputs.forecast_ready == 'true'" in workflow
-    assert "grep -Fxq 'daily_collection_success=true' \"$MARK\"" in workflow
-    assert "grep -Fxq 'forecast_ready=true' \"$MARK\"" in workflow
+
+
+def test_daily_marker_requires_both_success_flags_and_rejects_legacy_or_ambiguous_markers(tmp_path, capsys):
+    cases = {
+        "both-ready": ("daily_collection_success=true\nforecast_ready=true\n", True),
+        "collection-only": ("daily_collection_success=true\nforecast_ready=false\n", False),
+        "legacy-empty": ("", False),
+        "legacy-touch": ("\n", False),
+        "conflicting-duplicate": (
+            "daily_collection_success=true\nforecast_ready=true\nforecast_ready=false\n", False),
+    }
+    for name, (contents, expected) in cases.items():
+        marker = tmp_path / name
+        marker.write_text(contents, encoding="utf-8")
+        assert is_complete_daily_marker(marker) is expected
+        assert daily_marker_main([str(marker)]) == 0
+        assert capsys.readouterr().out.strip() == str(expected).lower()
+
+
+def test_restored_artifact_layout_and_hash_mismatch_fail_before_pickle_load(tmp_path, monkeypatch):
+    model_id = "boat-win-lgbm-layout-fixture"
+    untrusted_bytes = b"fixture bytes; deliberately not a pickle"
+    model = {
+        "id": model_id, "sport": "boat", "bet_type": "win", "status": "active",
+        "metrics": {
+            "boatFeatureSchemaVersion": "boat-base-v1",
+            "boatVenueSchemaVersion": "boat-venue-v2",
+            "correctedTrainingDataSha256": "b" * 64,
+            "boatArtifactSha256": hashlib.sha256(b"registry-approved different bytes").hexdigest(),
+        },
+    }
+    rows = {"models": [model], "races": [], "entries": []}
+    artifact_dir = tmp_path / "ml" / "artifacts"
+    load_calls = []
+
+    def forbidden_load(*args, **kwargs):
+        load_calls.append(args)
+        raise AssertionError("hash-mismatched fixture must not be unpickled")
+
+    monkeypatch.setattr("edgelab.predict.load_artifact", forbidden_load)
+
+    # A wrapper directory is not the documented download layout; runtime looks
+    # for the exact registered model ID directly under ml/artifacts.
+    nested = artifact_dir / "candidate-model-artifact"
+    nested.mkdir(parents=True)
+    (nested / f"{model_id}.pkl").write_bytes(untrusted_bytes)
+    with pytest.raises(FileNotFoundError, match="model artifact not found"):
+        cli._predict_boat_date(rows, "2026-10-09", "2026-10-09T07:30:00+00:00", artifact_dir)
+
+    # A directly extracted file reaches SHA verification and is rejected
+    # before pickle deserialization or JSON-sidecar inspection.
+    (artifact_dir / f"{model_id}.pkl").write_bytes(untrusted_bytes)
+    with pytest.raises(RuntimeError, match="registry-approved SHA256"):
+        cli._predict_boat_date(rows, "2026-10-09", "2026-10-09T07:30:00+00:00", artifact_dir)
+    assert load_calls == []
