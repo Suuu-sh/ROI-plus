@@ -110,14 +110,14 @@ T-30 / T-10 の比較観測は秒単位のスケジューラーがないため�
 
 ## GitHub Actions と変数名
 
-- `.github/workflows/daily.yml`: cron は UTC `00:30`, `02:00`, `04:00`, `14:30`（JST 09:30, 11:00, 13:00, 23:30）と手動実行。朝の複数回は GitHub schedule の遅延・欠落に備える。Python 3.12 / Node 20 で日次 pipeline を実行する。
+- `.github/workflows/daily.yml`: cron は UTC `00:30`, `02:00`, `04:00`, `14:30`（JST 09:30, 11:00, 13:00, 23:30）と手動実行。朝の複数回は GitHub schedule の遅延・欠落に備える。Python 3.12 / Node 22 で日次 pipeline を実行する。
 - `.github/workflows/retrain.yml`: 毎週月曜 UTC `02:41`（JST 11:41）と手動実行。boat の候補学習と比較を行い、候補の `models` 行だけを同期する。
 - 両workflowは学習state/cacheの競合を避ける共通concurrency groupを使う。`ml/data` と `ml/artifacts` をcacheで持ち越し、採点・学習レポートをActions artifactへ保存する。外部サービスのスケジュール実行は常時稼働や実行時刻を保証しない。
 - Actions Secret 名は `EDGELAB_API_URL`, `INGEST_TOKEN`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`。値、アカウント ID の実値、ローカル保管場所は文書・ログ・チャットに書かない。Cloudflare Access の設定や Worker Secret はコード外で管理する。
 
 ## 開発・テスト・デプロイ
 
-前提は Node.js 20+、Python 3.11+。リポジトリルートで:
+前提は Node.js 22+、Python 3.11+。リポジトリルートで:
 
 ```sh
 npm ci
