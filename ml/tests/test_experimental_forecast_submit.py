@@ -90,6 +90,8 @@ def test_submit_forecasts_reports_http_and_allowlisted_api_reason_without_raw_bo
     assert result["status"] == "submission_failed"
     assert result["failureCategory"] == "http_400"
     assert result["apiReason"] == "archive_evidence_invalid"
+    assert result["responseKind"] == "json_api_error"
+    assert result["edgeMitigatedChallenge"] is False
     assert "private" not in json.dumps(result)
     assert "secret" not in json.dumps(result)
 
@@ -106,3 +108,19 @@ def test_submit_forecasts_maps_budget_code_without_exposing_unknown_fields():
     assert result["apiReason"] == "d1_write_budget_exhausted"
     assert "internal" not in json.dumps(result)
     assert "private" not in json.dumps(result)
+
+
+def test_submit_forecasts_classifies_edge_challenge_without_echoing_html_or_headers():
+    body = b"<html><title>Attention Required</title>cf-chl-private-token</html>"
+    headers = {"Content-Type": "text/html; charset=UTF-8", "cf-mitigated": "challenge",
+               "cf-ray": "private-response-id"}
+
+    def opener(*_args, **_kwargs):
+        raise HTTPError("https://private.example", 403, "private", headers, BytesIO(body))
+
+    result = submit_forecasts(_envelope(count=1), base_url="https://api.example", token="test", opener=opener)
+    assert result["failureCategory"] == "http_403"
+    assert result["responseKind"] == "edge_challenge_html"
+    assert result["edgeMitigatedChallenge"] is True
+    rendered = json.dumps(result)
+    assert "private" not in rendered and "cf-chl" not in rendered and "cf-ray" not in rendered

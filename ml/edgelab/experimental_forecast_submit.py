@@ -40,6 +40,41 @@ def _api_diagnostic(body: bytes) -> str | None:
     return _SAFE_API_ERRORS.get(message) if isinstance(message, str) else None
 
 
+def _http_response_diagnostics(exc: urllib.error.HTTPError) -> dict[str, Any]:
+    """Summarize a bounded denial response without exposing its body or headers."""
+    try:
+        body = exc.read(8193)
+    except OSError:
+        body = b""
+    headers = getattr(exc, "headers", None)
+    try:
+        content_type = str(headers.get("Content-Type", "")).lower() if headers else ""
+        mitigated = str(headers.get("cf-mitigated", "")).strip().lower() == "challenge" if headers else False
+        server = str(headers.get("Server", "")).lower() if headers else ""
+    except Exception:
+        content_type, mitigated, server = "", False, ""
+    is_html = "text/html" in content_type or body.lstrip().lower().startswith((b"<!doctype html", b"<html"))
+    if is_html:
+        lower_body = body[:8192].lower()
+        edge_marker = any(marker in lower_body for marker in (b"cf-chl-", b"cloudflare", b"attention required"))
+        edge_challenge = mitigated or (edge_marker and ("cloudflare" in server or not content_type))
+        kind = "edge_challenge_html" if edge_challenge else "html_error"
+    elif not body:
+        edge_challenge, kind = mitigated, "empty_error"
+    else:
+        try:
+            parsed = json.loads(body[:8192].decode("utf-8")) if len(body) <= 8192 else None
+        except (ValueError, UnicodeDecodeError):
+            parsed = None
+        edge_challenge = mitigated
+        kind = "json_api_error" if isinstance(parsed, dict) else "non_json_error"
+    summary: dict[str, Any] = {"responseKind": kind, "edgeMitigatedChallenge": edge_challenge}
+    api_reason = _api_diagnostic(body)
+    if api_reason:
+        summary["apiReason"] = api_reason
+    return summary
+
+
 def _failure_result(stored: list[str], race_count: int, *, reason: str,
                     category: str | None = None, api_reason: str | None = None) -> dict[str, Any]:
     result = {"status": "partially_stored" if stored else "submission_failed",
@@ -89,15 +124,13 @@ def submit_forecasts(envelope: dict[str, Any], *, base_url: str, token: str,
                                        category="response_oversized_or_empty")
             result = json.loads(response_body.decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            try:
-                error_body = exc.read(8193)
-            except OSError:
-                error_body = b""
             status = exc.code
             category = (f"http_{status}" if status in {400, 401, 403, 404, 409, 413, 429} else
                         "http_5xx" if 500 <= status <= 599 else "http_other")
-            return _failure_result(stored, len(races), reason="api_unavailable_or_rejected",
-                                   category=category, api_reason=_api_diagnostic(error_body))
+            result = _failure_result(stored, len(races), reason="api_unavailable_or_rejected",
+                                     category=category)
+            result.update(_http_response_diagnostics(exc))
+            return result
         except (urllib.error.URLError, TimeoutError, OSError):
             return _failure_result(stored, len(races), reason="api_unavailable_or_rejected",
                                    category="transport_error")
