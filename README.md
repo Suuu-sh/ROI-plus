@@ -27,6 +27,8 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab feedback
 
 初回ベースラインの復旧は通常の候補昇格とは別経路です。既存候補を固定済みartifactと時間順holdout・lane基準で検証し、適格でも明示的な人手確認が必要です。これは初期の仮想運用ベースラインであり、安全な稼働 incumbent との改善比較、過去時点の情報到着証明、または正の期待値・利益の証明ではありません。ボート推論は安全な特徴量スキーマと登録済みartifact SHA256を要求し、Pythonでartifact実体との一致を確認します。Workerの候補表示・仮想購入・校正集計も、このスキーマmarkerとSHA256を持つモデルの保存済み予測だけを使い、旧v1の保存済み予測はこれらの判断に使いません。
 
+固定BASE三連単モデルのT-60入力・120確率・締切前120オッズは、実データの取得時刻を保持してprivate R2へ不変保存し、週次の [3か月候補学習](docs/ARCHITECTURE.md#固定baseモデルのr2観測アーカイブと3か月候補学習) はJST暦月のrolling windowで読み取ります。将来の実データだけを積み上げるため、初期は学習可能な3か月分がなく `insufficient_data` となります。これは隔離candidate / 検証reportのみで、通常モデルregistry・live推論・昇格は変更しません。R2欠損・結果ラベル不足・時刻証跡不備を補完せず、全件coverageや利益を主張しません。
+
 ## 構成
 
 | パス | 内容 |
