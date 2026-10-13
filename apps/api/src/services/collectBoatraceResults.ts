@@ -1,5 +1,6 @@
 import { all, first, type Db, type Statement } from '../repo/db.js';
 import { parseBoatraceResults } from './boatraceResults.js';
+import { parseTrifectaOdds, trifectaOddsUrl } from './boatraceTrifectaOdds.js';
 import { USER_AGENT } from './boatraceOdds.js';
 import { estimateWorkerWriteUnits, reserveWriteBudgets, utcDate } from './writeBudget.js';
 import { boatArchiveEvidenceValid } from './boatArchiveEvidence.js';
@@ -54,7 +55,8 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
           AND NOT EXISTS(SELECT 1 FROM collection_runs proof WHERE proof.id='boat-result:'||r.id AND proof.source=?
             AND proof.status='success' AND json_valid(proof.reason) AND json_extract(proof.reason,'$.quality')='verified-official-outcome-v2'
             AND json_type(proof.reason,'$.results')='array' AND json_type(proof.reason,'$.payouts')='array')))
-      AND (?=1 OR NOT (
+      AND (?=1 OR (EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real')
+        AND NOT COALESCE((cr.status='success' AND json_valid(cr.reason) AND json_extract(cr.reason,'$.finalMarket.quality')='verified-result-final-market-v1'),0)) OR NOT (
         (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')=6
         AND (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')+
           (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real' AND json_valid(e.features_json) AND (json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走') OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))=6
@@ -249,6 +251,28 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       if (!await reserveWriteBudgets(db,utcDate(now),[
         {units:estimateWorkerWriteUnits(parsed.results.length+parsed.payouts.length+parsed.terminalEntries.length+2),category:'essential'},
       ])) { reason='daily-write-budget-exhausted'; throw new Error('daily write budget exhausted'); }
+      // Optional post-result market: same fetch budget/spacing, never blocks settlement.
+      let finalMarket:Record<string,unknown>|undefined;
+      const needsMarket=!labelOnly && await first(db,`SELECT 1 FROM bets WHERE race_id=? AND data_origin='real' AND bet_type='trifecta'
+        UNION ALL SELECT 1 FROM experimental_paper_bets WHERE race_id=? AND data_origin='real' LIMIT 1`,race.id,race.id);
+      if(needsMarket&&hasAttemptCapacity()) {
+        const oddsUrl=trifectaOddsUrl(race.race_no,race.venue_id,race.race_date);
+        for(let retry=0;retry<2&&hasAttemptCapacity();retry++) {
+          if(budget.used>0)await sleep(3000);
+          budget.used++;attempted++;
+          let oddsBody:{html:string;sha256:string};
+          try { oddsBody=await readBody(await fetcher(oddsUrl,{headers:{'User-Agent':USER_AGENT,'Accept':'text/html'},redirect:'manual',signal:AbortSignal.timeout(RESULT_FETCH_TIMEOUT_MS)})); }
+          catch { continue; }
+          try {
+            const market=parseTrifectaOdds(oddsBody.html,{raceDate:race.race_date,venueCode:race.venue_id,raceNo:race.race_no});
+            const winner=parsed.payouts.find(p=>p.betType==='trifecta');
+            if(market.final&&winner&&market.odds.find(o=>o.selection===winner.selection)?.odds===winner.payout/100) {
+              finalMarket={quality:'verified-result-final-market-v1',url:oddsUrl,sha256:oddsBody.sha256,fetchedAt:new Date().toISOString(),odds:market.odds};
+            }
+          } catch { /* identity, timing, coverage or payout mismatch stays missing */ }
+          break;
+        }
+      }
       const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId});
       const guardedEntries=labelOnly?entries:entries.map(e=>({...e,finishCode:parsed.terminalEntries.find(x=>x.number===e.number)?.finishCode??e.finishCode}));
       const guardAfterTerminal=JSON.stringify({race,entries:guardedEntries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId});
@@ -263,7 +287,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         WHERE race_id=? AND number=? AND data_origin='real' AND ${currentSourceGuard}`).bind(terminal.finishCode,race.id,terminal.number,guardData));
       statements.push(db.prepare(`UPDATE races SET status='finished',updated_at=? WHERE id=? AND ${currentSourceGuard}`).bind(new Date().toISOString(),race.id,guardAfterTerminal));
       const count=parsed.results.length+parsed.payouts.length+parsed.terminalEntries.length;
-      statements.push(logStatement(db,race,startedAt,'success',count,{raceId:race.id,url,sha256,quality:'verified-official-outcome-v2',fetchedAt:new Date().toISOString(),results:parsed.results,payouts:parsed.payouts,refundTablePresent:parsed.refundTablePresent,nonRefundableNumbers:parsed.nonRefundableNumbers,...(parsed.nonRefundableNumbers.length?{refundPolicy:'official-post-start-capsize-v1',terminalEntries:parsed.terminalEntries}:{})},guardAfterTerminal));
+      statements.push(logStatement(db,race,startedAt,'success',count,{raceId:race.id,url,sha256,quality:'verified-official-outcome-v2',fetchedAt:new Date().toISOString(),results:parsed.results,payouts:parsed.payouts,...(finalMarket?{finalMarket}:{}),refundTablePresent:parsed.refundTablePresent,nonRefundableNumbers:parsed.nonRefundableNumbers,...(parsed.nonRefundableNumbers.length?{refundPolicy:'official-post-start-capsize-v1',terminalEntries:parsed.terminalEntries}:{})},guardAfterTerminal));
       reason='source-state-changed';
       const writes=await db.batch(statements);
       const logged=writes.at(-1) as {meta?:{changes?:number}}|undefined;

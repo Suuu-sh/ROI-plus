@@ -6,6 +6,7 @@ import { afterEach,beforeEach,describe,expect,it,vi } from 'vitest';
 import { D1SqliteAdapter } from './d1-adapter.js';
 import { collectResults,selectResultsTargets,RESULTS_SOURCE } from '../src/services/collectBoatraceResults.js';
 import { boatraceResultPage } from './fixtures/boatraceResultPage.js';
+import { finalTrifectaPage } from './fixtures/finalTrifectaPage.js';
 import { beforeinfoUrl } from '../src/services/boatraceBeforeinfo.js';
 import { raceListUrl } from '../src/services/boatraceRaceList.js';
 import worker,{app,settleOpen} from '../src/index.js';
@@ -66,9 +67,12 @@ describe('purchased real boat hourly results',()=>{
     sqlite.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
       VALUES('experimental-result-ticket','experimental-result-decision',?,?,'1-2-3',100,0.1,0.01,20,1,'2026-10-11T02:00:00Z','open','real')`).run(raceId,modelId);
     expect(await selectResultsTargets(DB,now)).toEqual([expect.objectContaining({id:raceId})]);
-    expect(await collectResults(DB,now,{fetch:fetchPage})).toMatchObject({status:'success',verified:1});
+    expect(await collectResults(DB,now,{fetch:async url=>url.includes('/odds3t?')?new Response(finalTrifectaPage(raceDate,'09',1)):fetchPage(url),sleep:async()=>{}})).toMatchObject({status:'success',verified:1,attempted:2});
     expect(sqlite.prepare("SELECT payout FROM payouts WHERE race_id=? AND bet_type='trifecta'").get(raceId)).toMatchObject({payout:3770});
     expect(await selectResultsTargets(DB,new Date(now.getTime()+3600000))).toEqual([]);
+    expect(await settleOpen(DB)).toBe(1);
+    const history=await (await app.request('/api/bets/experimental',{}, {DB} as any)).json() as any[];
+    expect(history[0]).toMatchObject({status:'lost',finalOdds:37.7,oddsAtBet:20});
   });
   it('records five ranked finishers and settles a capsize ticket only with official no-refund evidence',async()=>{
     const raceId=seed();sqlite.prepare("UPDATE bets SET selection='3' WHERE id=?").run(`${raceId}-bet`);

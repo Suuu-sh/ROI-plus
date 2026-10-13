@@ -1,3 +1,4 @@
+import { finalTrifectaOdds } from './services/finalTrifectaOdds.js';
 import { collectionIssues } from './services/collectionIssues.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
@@ -464,6 +465,11 @@ async function settleOpen(db: Db) {
       if (!await hasVerifiedCapsizeNoRefund(db,{id:b.race_id,race_date:b.race_date,venue_id:b.venue_id,race_no:b.race_no},Number(b.selection))) continue;
     }
     const values = settleValues(b.stake, pay?.payout ?? null, !!pay);
+    if(!pay&&b.bet_type==='trifecta'&&b.data_origin==='real') {
+      const proof=await first<any>(db,"SELECT reason FROM collection_runs WHERE id=? AND source='boatrace-results-worker-v1' AND status='success'",`boat-result:${b.race_id}`);
+      const order=await all<any>(db,"SELECT number FROM results WHERE race_id=? AND data_origin='real' ORDER BY finish_order",b.race_id);
+      values.finalOdds=finalTrifectaOdds(proof?.reason,{id:b.race_id,race_date:b.race_date,venue_id:b.venue_id,race_no:b.race_no},b.selection,order.slice(0,3).map(x=>x.number).join('-'));
+    }
     const evLost = b.expected_roi > 0 && values.finalOdds !== null && b.predicted_prob * values.finalOdds - 1 <= 0;
     if (!await reserveWorkerWrites(db, evLost ? 2 : 1)) break;
     const result = await run(db, `UPDATE bets SET status=?,payout=?,profit=?,final_odds=?,settled_at=? WHERE id=? AND status='open'`, pay ? 'won' : 'lost', values.payout, values.profit, values.finalOdds, now(), b.id);
@@ -1243,7 +1249,8 @@ app.get('/bets/experimental',async c=>{
  const experimentKey='boat-trifecta-small-sample-v1';
  const rows=await all<any>(c.env.DB,`SELECT b.id,b.decision_id,b.race_id,b.selection,b.stake,b.probability,b.prob_std,b.odds_at_bet,b.expected_roi,
    b.model_id,b.placed_at,b.status,b.payout,b.profit,b.settled_at,d.experiment_key,v.name venue_name,r.race_no,r.race_date,
-   q.repair_reason,q.repaired_at,
+   q.repair_reason,q.repaired_at,r.venue_id,
+   (SELECT cr.reason FROM collection_runs cr WHERE cr.id='boat-result:'||b.race_id AND cr.source='boatrace-results-worker-v1' AND cr.status='success') result_evidence,
    (SELECT p.payout FROM payouts p WHERE p.race_id=b.race_id AND p.bet_type='trifecta' AND p.selection=b.selection AND p.data_origin='real' AND p.payout>0) final_payout_per_100,
    (SELECT group_concat(number,'-') FROM (SELECT x.number FROM results x WHERE x.race_id=b.race_id AND x.data_origin='real' AND x.finish_order BETWEEN 1 AND 3 ORDER BY x.finish_order LIMIT 3)) official_selection
    FROM experimental_paper_bets b
@@ -1262,7 +1269,7 @@ app.get('/bets/experimental',async c=>{
    profit:row.repair_reason?0:(row.profit==null?null:Number(row.profit)),
    settledAt:row.repair_reason?row.repaired_at:(row.settled_at??null),repairReason:row.repair_reason??null,
    dataOrigin:'real',venueName:row.venue_name,raceNo:Number(row.race_no),raceDate:row.race_date,
-   finalOdds:!row.repair_reason&&row.status==='won'&&row.selection===row.official_selection&&row.final_payout_per_100!=null?Number(row.final_payout_per_100)/100:null,
+   finalOdds:row.repair_reason||!['won','lost'].includes(row.status)?null:(row.status==='won'&&row.selection===row.official_selection&&row.final_payout_per_100!=null?Number(row.final_payout_per_100)/100:finalTrifectaOdds(row.result_evidence,{id:row.race_id,race_date:row.race_date,venue_id:row.venue_id,race_no:row.race_no},row.selection,row.official_selection)),
    officialSelection:typeof row.official_selection==='string'&&row.official_selection.split('-').length===3?row.official_selection:null})));
 });
 app.get('/paper/decisions',async c=>{
