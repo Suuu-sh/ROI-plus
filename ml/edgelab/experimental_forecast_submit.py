@@ -7,6 +7,51 @@ import urllib.request
 from typing import Any, Callable
 
 
+_SAFE_API_ERRORS = {
+    "experimental forecast envelope must contain exactly one race": "one_race_required",
+    "experimental model or artifact SHA is not registered": "model_not_registered_or_sha_mismatch",
+    "experimental forecast timestamp or row count is invalid": "invalid_timestamp_or_row_count",
+    "experimental forecast predates model training": "forecast_predates_training",
+    "experimental forecast race is not an eligible real race": "race_not_eligible",
+    "experimental forecast is outside a verified pre-cutoff prediction window": "outside_t60_window",
+    "official prerace archive is not fresh as of prediction time": "archive_not_fresh_as_of_prediction",
+    "official prerace archive is invalid": "archive_invalid",
+    "official archive identity, six-lane, or complete odds provenance is invalid": "archive_evidence_invalid",
+    "experimental forecast is not a complete normalized exact-order distribution": "invalid_ticket_distribution",
+    "atomic experimental forecast storage is unavailable": "atomic_storage_unavailable",
+}
+_SAFE_API_CODES = {"d1_write_budget_unavailable", "d1_write_budget_exhausted"}
+
+
+def _api_diagnostic(body: bytes) -> str | None:
+    """Map bounded API error data to fixed diagnostics; never return raw text."""
+    if not body or len(body) > 8192:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code = payload.get("code")
+    if isinstance(code, str) and code in _SAFE_API_CODES:
+        return code
+    message = payload.get("error")
+    return _SAFE_API_ERRORS.get(message) if isinstance(message, str) else None
+
+
+def _failure_result(stored: list[str], race_count: int, *, reason: str,
+                    category: str | None = None, api_reason: str | None = None) -> dict[str, Any]:
+    result = {"status": "partially_stored" if stored else "submission_failed",
+              "storedRaceCount": len(stored), "eligibleRaceCount": race_count,
+              "failedRaceCount": race_count - len(stored), "reason": reason}
+    if category:
+        result["failureCategory"] = category
+    if api_reason:
+        result["apiReason"] = api_reason
+    return result
+
+
 def submit_forecasts(envelope: dict[str, Any], *, base_url: str, token: str,
                      opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
     """POST each race separately and report partial acceptance accurately.
@@ -38,12 +83,27 @@ def submit_forecasts(envelope: dict[str, Any], *, base_url: str, token: str,
             "Content-Type": "application/json", "Accept": "application/json"})
         try:
             with opener(request, timeout=30) as response:
-                result = json.loads(response.read(16384).decode("utf-8"))
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, OSError):
-            return {"status": "partially_stored" if stored else "submission_failed",
-                    "storedRaceCount": len(stored), "eligibleRaceCount": len(races),
-                    "failedRaceCount": len(races) - len(stored),
-                    "reason": "api_unavailable_or_rejected"}
+                response_body = response.read(16_385)
+            if not response_body or len(response_body) > 16_384:
+                return _failure_result(stored, len(races), reason="invalid_api_response",
+                                       category="response_oversized_or_empty")
+            result = json.loads(response_body.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                error_body = exc.read(8193)
+            except OSError:
+                error_body = b""
+            status = exc.code
+            category = (f"http_{status}" if status in {400, 401, 403, 404, 409, 413, 429} else
+                        "http_5xx" if 500 <= status <= 599 else "http_other")
+            return _failure_result(stored, len(races), reason="api_unavailable_or_rejected",
+                                   category=category, api_reason=_api_diagnostic(error_body))
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return _failure_result(stored, len(races), reason="api_unavailable_or_rejected",
+                                   category="transport_error")
+        except (ValueError, UnicodeDecodeError):
+            return _failure_result(stored, len(races), reason="invalid_api_response",
+                                   category="invalid_json")
         accepted = result.get("stored") if isinstance(result, dict) else None
         if (not isinstance(accepted, list) or len(accepted) != 1
                 or not isinstance(accepted[0], dict)

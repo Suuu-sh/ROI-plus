@@ -1,4 +1,6 @@
 import json
+from io import BytesIO
+from urllib.error import HTTPError
 from edgelab.experimental_forecast_submit import submit_forecasts
 
 
@@ -64,7 +66,7 @@ def test_submit_forecasts_reports_partial_storage_after_later_failure_without_re
     result = submit_forecasts(_envelope(), base_url="https://api.example", token="test-only", opener=opener)
     assert result == {"status": "partially_stored", "storedRaceCount": 1,
                       "eligibleRaceCount": 3, "failedRaceCount": 2,
-                      "reason": "api_unavailable_or_rejected"}
+                      "reason": "api_unavailable_or_rejected", "failureCategory": "transport_error"}
     assert requests == ["race-0", "race-1"]
     assert "private" not in json.dumps(result)
 
@@ -75,3 +77,32 @@ def test_submit_forecasts_does_not_claim_success_for_malformed_response():
     assert result["status"] == "submission_failed"
     assert result["reason"] == "invalid_api_response"
     assert result["storedRaceCount"] == 0
+
+
+def test_submit_forecasts_reports_http_and_allowlisted_api_reason_without_raw_body():
+    body = json.dumps({"error": "official archive identity, six-lane, or complete odds provenance is invalid",
+                       "private": "do not expose"}).encode()
+
+    def opener(*_args, **_kwargs):
+        raise HTTPError("https://private.example/?token=secret", 400, "private", {}, BytesIO(body))
+
+    result = submit_forecasts(_envelope(count=1), base_url="https://api.example", token="secret", opener=opener)
+    assert result["status"] == "submission_failed"
+    assert result["failureCategory"] == "http_400"
+    assert result["apiReason"] == "archive_evidence_invalid"
+    assert "private" not in json.dumps(result)
+    assert "secret" not in json.dumps(result)
+
+
+def test_submit_forecasts_maps_budget_code_without_exposing_unknown_fields():
+    body = json.dumps({"error": "internal details", "code": "d1_write_budget_exhausted",
+                       "budget": {"private": "data"}}).encode()
+
+    def opener(*_args, **_kwargs):
+        raise HTTPError("https://api.example", 429, "private", {}, BytesIO(body))
+
+    result = submit_forecasts(_envelope(count=1), base_url="https://api.example", token="test", opener=opener)
+    assert result["failureCategory"] == "http_429"
+    assert result["apiReason"] == "d1_write_budget_exhausted"
+    assert "internal" not in json.dumps(result)
+    assert "private" not in json.dumps(result)
