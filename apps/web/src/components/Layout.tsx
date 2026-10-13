@@ -79,20 +79,20 @@ export function Layout() {
       </aside>
 
       <div className="min-w-0">
-        <header className={`${isBoatRoute || isShadowRoute ? 'lg:hidden' : ''} sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-line bg-bg/85 px-4 py-3 backdrop-blur lg:px-8`}>
+        <header className={`${isBoatRoute || isShadowRoute ? 'lg:hidden' : ''} safe-area-header sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-line bg-bg/85 px-4 py-3 backdrop-blur lg:px-8`}>
           <div className="lg:hidden"><Brand /></div>
           {!isBoatRoute && !isShadowRoute && <>
             <div className="hidden text-xs text-muted lg:block">表示データ</div>
             <OriginToggle />
           </>}
         </header>
-        <main className="mx-auto max-w-[1280px] px-4 pb-28 pt-5 lg:px-8 lg:pb-12">
+        <main className="safe-area-content mx-auto max-w-[1280px] px-4 pb-28 pt-5 lg:px-8 lg:pb-12">
           {!isBoatRoute && !isShadowRoute && <SampleNotice />}
           <ErrorBoundary resetKey={pathname}><Outlet /></ErrorBoundary>
         </main>
       </div>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-7 border-t border-line bg-surface/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden">
+      <nav className="safe-area-bottom-nav fixed inset-x-0 bottom-0 z-30 grid grid-cols-7 border-t border-line bg-surface/95 backdrop-blur lg:hidden">
         {nav.map((n) => (
           <NavLink
             key={n.to}
