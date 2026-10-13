@@ -290,3 +290,50 @@ def test_venue_cache_migration_rebuilds_rows_once_and_preserves_only_history(mon
     second = cli.migrate_boat_venue_cache(raw, marker)
     assert second["status"] == "already_migrated"
     assert len(saved) == 1
+
+
+def test_expected_same_day_pending_k_run_does_not_relax_forecast_readiness(monkeypatch):
+    store = _store()
+    store["collection_runs"] = [
+        {"id": "previous", "source": "mbrace-boat", "sport": "boat",
+         "target_date": "2026-10-08", "status": "success"},
+        {"id": "today", "source": "mbrace-boat", "sport": "boat",
+         "target_date": "2026-10-09", "status": "partial", "error": None,
+         "reason": cli.EXPECTED_PENDING_K_RESULTS_REASON},
+    ]
+    monkeypatch.setattr(cli, "load_rows", lambda: copy.deepcopy(store))
+    monkeypatch.setattr(cli, "save_rows", lambda _rows: None)
+    monkeypatch.setattr(cli, "collect_boat", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(cli, "collect_beforeinfo", lambda *_args, **_kwargs:
+                        {"status": "success", "observations": 0})
+    monkeypatch.setattr(sync, "fetch_open_bet_race_ids", lambda _date: set())
+    monkeypatch.setattr(sync, "fetch_model_registry", lambda: [])
+    monkeypatch.setattr(cli, "_inference_timestamp", lambda: "2026-10-08T22:31:02.345+00:00")
+    monkeypatch.setattr(cli, "_predict_boat_trifecta_date", lambda *_args: [])
+    monkeypatch.setattr("edgelab.learning.score_feedback", lambda _rows: {"models": {}})
+    monkeypatch.setattr(sync, "sync_rows", lambda payload: {
+        table: {"status": 200, "upserted": len(values), "changed": len(values),
+                "noop": not values}
+        for table, values in payload.items() if values
+    })
+
+    result = cli.run_daily("2026-10-09", "2026-10-09T07:30:00+09:00")
+
+    assert result["daily_collection_success"] is True
+    assert result["same_day_results_pending"] is True
+    assert result["forecast_ready"] is False
+    assert result["forecast_reason"] == (
+        "no upcoming real races with verified cutoffs produced v2 trifecta predictions at this cutoff"
+    )
+    assert result["ticket_predictions"] == 0
+
+
+def test_pending_k_collection_status_requires_exact_current_day_partial_without_error():
+    pending = {
+        "source": "mbrace-boat", "target_date": "2026-10-09", "status": "partial",
+        "reason": cli.EXPECTED_PENDING_K_RESULTS_REASON, "error": None,
+    }
+    assert cli._is_expected_pending_same_day_k(pending, "2026-10-09")
+    assert not cli._is_expected_pending_same_day_k(pending, "2026-10-10")
+    assert not cli._is_expected_pending_same_day_k({**pending, "error": "K failure"}, "2026-10-09")
+    assert not cli._is_expected_pending_same_day_k({**pending, "status": "failed"}, "2026-10-09")
