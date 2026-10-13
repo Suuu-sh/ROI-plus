@@ -92,6 +92,11 @@ tbody tr { transition: background-color .2s; }
   .race-wide-hidden { display: none; }
 }
 
+/* Tickets of one purchased race, one per view, swiped horizontally inside the card. */
+.ticket-track { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+.ticket-track::-webkit-scrollbar { display: none; }
+.ticket-slide { flex: 0 0 100%; min-width: 0; scroll-snap-align: start; scroll-snap-stop: always; }
+
 /* ---------- Motion ---------- */
 @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }

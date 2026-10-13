@@ -135,14 +135,29 @@ describe('purchased race review', () => {
     expect(api.race).toHaveBeenCalledWith('other')
   })
 
-  it('keeps multi-ticket cards compact with a keyboard-focusable scrollable snapshot area', () => {
+  it('shows one ticket at a time in a keyboard-focusable swipe carousel', () => {
     render(<MemoryRouter><PurchasedRace bets={Array.from({ length: 6 }, (_, index) => ({ ...bet, id: `b${index}`, selection: String(index + 1) }))} /></MemoryRouter>)
-    const snapshots = screen.getByLabelText('このレースの購入明細')
-    expect(snapshots.tabIndex).toBe(0)
-    expect(snapshots.className).toContain('max-h-[300px]')
-    expect(snapshots.querySelectorAll('dl')).toHaveLength(12)
-    expect(screen.getByText('購入明細は上下にスクロールできます')).toBeTruthy()
+    const track = screen.getByRole('group', { name: 'このレースの購入明細' })
+    expect(track.tabIndex).toBe(0)
+    expect(track.className).toContain('ticket-track')
+    expect(track.querySelectorAll('dl')).toHaveLength(12)
+    expect(screen.getByText('1 / 6')).toBeTruthy()
+    expect(screen.queryByText('購入明細は上下にスクロールできます')).toBeNull()
+    const scrollTo = vi.fn()
+    Object.defineProperty(track, 'scrollTo', { value: scrollTo })
+    fireEvent.keyDown(track, { key: 'ArrowRight' })
+    expect(scrollTo).toHaveBeenCalledOnce()
+    expect(screen.getByText('2 / 6')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '2件目の購入券を表示' }).getAttribute('aria-current')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: '6件目の購入券を表示' }))
+    expect(screen.getByText('6 / 6')).toBeTruthy()
     expect(api.race).not.toHaveBeenCalled()
+  })
+
+  it('shows a single ticket without carousel controls', () => {
+    render(<MemoryRouter><PurchasedRace bets={[bet]} /></MemoryRouter>)
+    expect(screen.queryByRole('group', { name: 'このレースの購入明細' })).toBeNull()
+    expect(screen.queryByText(/横にスワイプ/)).toBeNull()
   })
 
   it('preserves date filtering and empty, loading, and error states', () => {

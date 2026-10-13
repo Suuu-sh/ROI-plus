@@ -171,8 +171,7 @@ export function PurchasedRace({ bets, index = 0 }: { bets: Bet[]; index?: number
     </div>
     <p className="mt-1 text-xs text-muted">{bets[0].raceDate ?? '日付不明'}・このレースの購入 {bets.length}件</p>
     <Link className="focus-ring group/link mt-2 inline-flex items-center gap-1 rounded text-xs font-bold text-muted hover:text-ink" to={`/${bets[0].sport}/${bets[0].raceId}`}>出走表を見る <span className="transition-transform duration-300 group-hover/link:translate-x-1">→</span></Link>
-    {bets.length > 2 && <p className="mt-2 text-[10px] text-muted">購入明細は上下にスクロールできます</p>}
-    <div className={`mt-2 space-y-2 ${bets.length > 2 ? 'max-h-[300px] overflow-y-auto overscroll-contain pr-1 [scrollbar-width:thin]' : ''}`} tabIndex={bets.length > 2 ? 0 : undefined} aria-label={bets.length > 2 ? 'このレースの購入明細' : undefined}>{bets.map((bet) => <PurchaseSnapshot key={bet.id} bet={bet} />)}</div>
+    <TicketCarousel bets={bets} />
     <details className="mt-3 rounded-md border border-line transition-colors hover:border-ink/40" onToggle={(event) => { if (event.currentTarget.open) setReviewEnabled(true) }}>
       <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-xs font-bold text-muted marker:content-none [&::-webkit-details-marker]:hidden"><Chevron />購入後の結果レビューを開く</summary>
       {reviewEnabled && <RaceOutcome bets={bets} />}
@@ -180,9 +179,55 @@ export function PurchasedRace({ bets, index = 0 }: { bets: Bet[]; index?: number
   </article>
 }
 
+/** One ticket per view; several tickets of a race are swiped (or arrowed) through inside the card. */
+function TicketCarousel({ bets }: { bets: HistoryBet[] }) {
+  const track = useRef<HTMLDivElement>(null)
+  const [active, setActive] = useState(0)
+  // A single ticket keeps the same counter row so every card in the rail lines up.
+  if (bets.length === 1) return <div className="mt-2">
+    <div className="mb-1.5 text-[10px] text-muted">購入券 <span className="num font-bold text-ink">1 / 1</span></div>
+    <PurchaseSnapshot bet={bets[0]} />
+  </div>
+
+  const step = (element: HTMLDivElement) => {
+    const [first, second] = element.children as unknown as HTMLElement[]
+    return second && first ? second.offsetLeft - first.offsetLeft : element.clientWidth
+  }
+  const go = (index: number) => {
+    const element = track.current
+    const next = Math.max(0, Math.min(bets.length - 1, index))
+    setActive(next)
+    if (!element) return
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    element.scrollTo({ left: next * step(element), behavior: reduced ? 'auto' : 'smooth' })
+  }
+  return <div className="mt-2">
+    <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-muted">
+      <span>購入券 <span aria-live="polite" className="num font-bold text-ink">{active + 1} / {bets.length}</span>・横にスワイプで切り替え</span>
+      <div className="flex shrink-0 items-center gap-1">
+        {bets.map((bet, index) => <button key={bet.id} type="button" aria-label={`${index + 1}件目の購入券を表示`} aria-current={index === active || undefined} onClick={() => go(index)}
+          className={`focus-ring h-1.5 rounded-full transition-all duration-300 ${index === active ? 'w-4 bg-ink' : 'w-1.5 bg-line hover:bg-muted'}`} />)}
+      </div>
+    </div>
+    <div ref={track} role="group" aria-label="このレースの購入明細" tabIndex={0} className="ticket-track focus-ring rounded-md"
+      onScroll={(event) => {
+        const element = event.currentTarget
+        const width = step(element)
+        if (width > 0) setActive(Math.max(0, Math.min(bets.length - 1, Math.round(element.scrollLeft / width))))
+      }}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return
+        event.preventDefault()
+        go(active + (event.key === 'ArrowLeft' ? -1 : 1))
+      }}>
+      {bets.map((bet, index) => <div key={bet.id} className="ticket-slide" aria-label={`${index + 1}件目 / ${bets.length}件`}><PurchaseSnapshot bet={bet} /></div>)}
+    </div>
+  </div>
+}
+
 function PurchaseSnapshot({ bet: b }: { bet: HistoryBet }) {
   const label = b.status === 'open' ? '仮想購入・精算待ち' : b.status === 'void' ? '無効' : b.status === 'won' ? '的中（精算記録）' : '不的中（精算記録）'
-  return <div className={`rounded-md border p-2.5 ${b.status === 'won' ? 'border-pos/50 bg-pos/5' : 'border-line bg-raised/30'}`}>
+  return <div className={`h-full rounded-md border p-2.5 ${b.status === 'won' ? 'border-pos/50 bg-pos/5' : 'border-line bg-raised/30'}`}>
     <div className="flex flex-wrap items-center justify-between gap-1"><div className="break-words font-mono text-sm font-bold">{betTypeLabel[b.betType]} {b.selection}<span className="ml-2 rounded bg-raised px-1.5 py-0.5 font-sans text-[10px] text-muted">{b.recordKind === 'experimental_paper' ? '実験・通常成績対象外' : `仮想・${b.mode === 'auto' ? '自動' : '手動'}`}</span></div><span className={`text-[11px] font-bold ${b.status === 'won' ? 'anim-stamp inline-block rounded-[3px] border border-pos px-1 text-pos' : b.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{label}</span></div>
     {b.recordKind === 'experimental_paper' && <p className="mt-1 text-[11px] text-muted">公式結果 {b.officialSelection ? `三連単 ${b.officialSelection}` : '未取得'}{b.status === 'void' ? ` · 返金済み${b.repairReason === 'invalid_stake_unit' ? '（購入額が100円単位の条件を満たさないため）' : b.repairReason ? '（旧記録の購入条件を満たさないため）' : ''}` : ''}</p>}
     <dl className="mt-2 grid grid-cols-2 gap-2 rounded-[4px] border border-dashed border-line bg-surface p-2 text-xs">
