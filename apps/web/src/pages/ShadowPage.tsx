@@ -53,7 +53,7 @@ export function ShadowPage() {
   return <div className="space-y-5">
     <header className="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <div className="flex items-center gap-2"><h1 className="text-xl font-semibold tracking-tight">シャドー分析</h1><span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-bold text-accent">READ ONLY</span></div>
+        <div className="flex items-center gap-2"><h1 className="draw-underline text-2xl font-black tracking-tight">シャドー分析</h1><span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-bold text-accent">READ ONLY</span></div>
         <p className="mt-1 text-sm text-muted">本番 D1 に保存された三連単予測とオッズを、指定した実レース1件だけ表示します。</p>
       </div>
       <div className="rounded-lg border border-line bg-surface px-3 py-2 text-xs text-muted">GET /api/shadow/races/:id</div>

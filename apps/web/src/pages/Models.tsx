@@ -55,8 +55,8 @@ export function ModelsPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight">モデル管理</h1>
-        <p className="mt-1 text-sm text-muted">モデルは競技ごとに独立し、自動昇格は無効です。通常昇格と、証拠を確認した初期の仮想基準承認は別の手動操作です。初期基準は利益・正のEVの証明ではありません。</p>
+        <div><div className="kicker">MODELS</div><h1 className="draw-underline mt-1 inline-block text-2xl font-black tracking-tight">モデル管理</h1></div>
+        <p className="mt-3 text-sm text-muted">モデルは競技ごとに独立し、自動昇格は無効です。通常昇格と、証拠を確認した初期の仮想基準承認は別の手動操作です。初期基準は利益・正のEVの証明ではありません。</p>
       </div>
       {msg && <div className="rounded-lg border border-neg/40 bg-neg/10 px-3 py-2 text-sm text-neg">{msg}</div>}
       {(['horse', 'boat'] as Sport[]).map((s) => {

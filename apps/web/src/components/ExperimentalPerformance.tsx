@@ -1,7 +1,7 @@
 import { api } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
 import { dateTime, pct, signedYen, tone, yen } from '../lib/format'
-import { Empty, ErrorState, Loading, Section } from './ui'
+import { CountUp, Empty, ErrorState, Loading, Section } from './ui'
 
 const caveat = '小標本の実験です。通常の件数基準を満たさず、天候データが欠ける場合があります。精度・収益性は未検証です。'
 
@@ -56,5 +56,5 @@ export function ExperimentalPerformance({ compact = false }: { compact?: boolean
 }
 
 function Metric({ label, value, sub, className = '' }: { label: string; value: string; sub?: string; className?: string }) {
-  return <div className="rounded-lg border border-line bg-raised/30 p-3"><div className="text-[11px] text-muted">{label}</div><div className={`num mt-1 text-lg font-semibold ${className}`}>{value}</div>{sub && <div className="mt-1 text-[10px] text-muted">{sub}</div>}</div>
+  return <div className="lift rounded-md border border-line bg-surface p-3"><div className="label">{label}</div><div className={`figure mt-2 text-2xl ${className}`}><CountUp value={value} /></div>{sub && <div className="num mt-1.5 text-[10px] text-muted">{sub}</div>}</div>
 }

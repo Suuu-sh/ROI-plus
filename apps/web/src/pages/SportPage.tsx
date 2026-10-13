@@ -6,7 +6,7 @@ import { useOrigin } from '../lib/origin'
 import { useAsync } from '../lib/useAsync'
 import { dateTime, freshness, num, odds, pct, signedPct, signedYen, yen, timeOf, todayJst, tone } from '../lib/format'
 import { t } from '../i18n'
-import { EdgeBadge, Empty, ErrorState, Loading, OriginBadge, ProbBar, Section, SportIcon } from '../components/ui'
+import { CountUp, EdgeBadge, Empty, ErrorState, LiveDot, Loading, OriginBadge, ProbBar, Section, SportIcon } from '../components/ui'
 import { BetSheet } from '../components/BetSheet'
 import { EquityChart } from '../components/EquityChart'
 import { betTypeLabel } from '../lib/betType'
@@ -34,13 +34,15 @@ export function SportPage({ sport }: { sport: Sport }) {
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className={`flex items-center gap-2 text-xl font-semibold tracking-tight ${accent}`}>
-            <SportIcon sport={sport} className="h-6 w-6" />{t().sport[sport]}
+          <div className="kicker">{sport === 'boat' ? 'BOAT RACE' : 'HORSE RACING'}</div>
+          <h1 className="mt-1 flex items-center gap-2.5 text-2xl font-black tracking-tight">
+            <span className={`anim-pop inline-flex h-9 w-9 items-center justify-center rounded-md border-2 border-ink bg-surface shadow-[2px_2px_0_rgb(var(--ink))] ${accent}`}><SportIcon sport={sport} className="h-5 w-5" /></span>
+            <span className="draw-underline">{t().sport[sport]}</span>
           </h1>
         </div>
         <div className="flex items-center gap-1.5">
           <button className="btn-ghost h-8 w-8 px-0" onClick={() => setDate((d) => shiftDate(d, -1))} aria-label="前日">‹</button>
-          <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="focus-ring num h-8 rounded-lg border border-line bg-surface px-2 text-sm" />
+          <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="focus-ring num h-8 rounded-md border border-ink/20 bg-surface px-2 text-sm font-bold transition-colors hover:border-ink" />
           <button className="btn-ghost h-8 w-8 px-0" onClick={() => setDate((d) => shiftDate(d, 1))} aria-label="翌日">›</button>
           {date !== todayJst() && <button className="btn-ghost h-8 text-xs" onClick={() => setDate(todayJst())}>今日</button>}
         </div>
@@ -57,11 +59,15 @@ export function SportPage({ sport }: { sport: Sport }) {
       {sport === 'boat' && <ExperimentalBetsHistory compact />}
 
       {(sport !== 'boat' || raceId) && <details className="card group" open={researchOpen || undefined} onToggle={(event) => setResearchOpen(event.currentTarget.open)}>
-        <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold marker:content-none">レースを調べる <span className="ml-2 text-xs font-normal text-muted">期待値ランキング・出走表</span></summary>
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-bold transition-colors hover:bg-raised/40 marker:content-none [&::-webkit-details-marker]:hidden"><Chevron />レースを調べる <span className="ml-2 text-xs font-normal text-muted">期待値ランキング・出走表</span></summary>
         {researchOpen && <ResearchArea sport={sport} date={date} origin={origin} raceId={raceId} onDate={setDate} onChanged={() => { bets.reload(); setPerformanceVersion((v) => v + 1) }} />}
       </details>}
     </div>
   )
+}
+
+function Chevron() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" className="chev h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
 }
 
 function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeof useOrigin>['origin']; sport: Sport; version: number }) {
@@ -69,9 +75,9 @@ function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeo
   if (q.error) return <Section className="w-full min-w-0" title="仮想運用成績"><ErrorState error={q.error} onRetry={q.reload} /></Section>
   if (!q.data) return <Section className="w-full min-w-0" title="仮想運用成績"><Loading rows={2} /></Section>
   const ov = q.data
-  return <section className="card w-full min-w-0 overflow-hidden" aria-label="全期間の仮想運用成績">
-    <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line px-4 py-2">
-      <h2 className="text-sm font-semibold">仮想運用成績</h2>
+  return <section className="card w-full min-w-0 overflow-hidden border-t-[3px] border-t-ink" aria-label="全期間の仮想運用成績">
+    <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line px-4 py-2.5">
+      <h2 className="text-[15px] font-bold">仮想運用成績</h2>
       <p className="text-right text-[11px] text-muted">全期間・初期資金 {yen(ov.initialBankroll)}・損益 / 回収率は確定分</p>
     </header>
     <div className="grid grid-cols-2 divide-x divide-y divide-line md:grid-cols-4 md:divide-y-0">
@@ -82,7 +88,7 @@ function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeo
     </div>
     <div className="border-t border-line">
       <div className="flex items-center justify-between gap-3 px-4 pt-2">
-        <h3 className="text-xs font-semibold">資産推移</h3>
+        <h3 className="text-xs font-bold">資産推移</h3>
         <span className="text-[11px] text-muted">確定損益のみ</span>
       </div>
       {ov.equityCurve.length > 1 ? <EquityChart data={ov.equityCurve} base={ov.initialBankroll} compact /> : <div className="px-4 py-4 text-center text-xs text-muted">確定した仮想購入がまだありません。</div>}
@@ -91,10 +97,10 @@ function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeo
 }
 
 function PerformanceMetric({ label, value, sub, valueClass = '' }: { label: string; value: string; sub?: string; valueClass?: string }) {
-  return <div className="min-w-0 bg-surface px-3 py-2">
-    <div className="text-[11px] font-medium text-muted">{label}</div>
-    <div className={`num mt-0.5 break-words text-xl font-semibold tracking-tight ${valueClass}`}>{value}</div>
-    {sub && <div className="num text-[10px] text-muted">{sub}</div>}
+  return <div className="min-w-0 bg-surface px-4 py-3">
+    <div className="label">{label}</div>
+    <div className={`figure mt-1.5 break-words text-[26px] ${valueClass}`}><CountUp value={value} /></div>
+    {sub && <div className="num mt-1 text-[10px] text-muted">{sub}</div>}
   </div>
 }
 
@@ -127,12 +133,12 @@ function PurchaseRail({ groups }: { groups: Bet[][] }) {
     element.scrollBy({ left: direction * ((card?.getBoundingClientRect().width ?? element.clientWidth) + 12), behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
   }
   return <div ref={rail} role="region" aria-label="購入レースの横スクロール" tabIndex={0}
-      className="purchase-rail focus-ring"
+      className="purchase-rail stagger-x focus-ring"
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return
         if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); slide(event.key === 'ArrowLeft' ? -1 : 1) }
       }}>
-    {groups.map((items) => <PurchasedRace key={items[0].raceId} bets={items} />)}
+    {groups.map((items, index) => <PurchasedRace key={items[0].raceId} bets={items} index={Math.min(index, 8)} />)}
   </div>
 }
 
@@ -146,24 +152,26 @@ export function PurchasedRaces({ bets, date, loading, error, onRetry }: {
   const grouped = new Map<string, Bet[]>()
   for (const bet of date ? filterBetsByDate(bets ?? [], date) : bets ?? []) grouped.set(bet.raceId, [...(grouped.get(bet.raceId) ?? []), bet])
   return <section className="w-full min-w-0">
-      <div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">仮想購入履歴</h2><button className="btn-ghost h-8 text-xs" onClick={onRetry} disabled={loading}>更新</button></div>
+      <div className="mb-1 flex items-center justify-between gap-3 border-b-[3px] border-ink pb-2"><h2 className="flex items-baseline gap-2 text-[15px] font-bold">仮想購入履歴{grouped.size > 0 && <span className="num text-xs font-normal text-muted">{grouped.size}レース</span>}</h2><button className="btn-ghost h-8 text-xs" onClick={onRetry} disabled={loading}>更新</button></div>
       {error ? <ErrorState error={error} onRetry={onRetry} /> : loading && !bets ? <Loading rows={2} /> : grouped.size === 0 ? <Empty>{date ? 'この日付の仮想購入はありません。' : '仮想購入はまだありません。'}</Empty> :
         <PurchaseRail key={`${date ?? 'all'}:${[...grouped.keys()].join(',')}`} groups={[...grouped.values()]} />}
   </section>
 }
 
-export function PurchasedRace({ bets }: { bets: Bet[] }) {
+export function PurchasedRace({ bets, index = 0 }: { bets: Bet[]; index?: number }) {
   const [reviewEnabled, setReviewEnabled] = useState(false)
-  return <article className="purchase-race min-w-0 rounded-xl border border-line bg-surface p-3">
+  const open = bets.some((bet) => bet.status === 'open')
+  const won = bets.some((bet) => bet.status === 'won')
+  return <article className={`purchase-race min-w-0 rounded-xl border border-line border-t-4 bg-surface p-3 transition-[border-color,box-shadow] duration-300 hover:border-x-ink hover:border-b-ink hover:shadow-[4px_4px_0_rgb(var(--ink)/0.85)] ${open ? 'border-t-mark' : won ? 'border-t-pos' : 'border-t-line'}`} style={{ ['--i' as string]: index }}>
     <div className="flex min-w-0 items-start justify-between gap-2">
-      <div className="flex min-w-0 items-center gap-1.5"><SportIcon sport={bets[0].sport} className="h-4 w-4 shrink-0"/><h3 className="min-w-0 break-words text-sm font-semibold [overflow-wrap:anywhere]">{bets[0].venueName ?? bets[0].raceId} {bets[0].raceNo != null ? `${bets[0].raceNo}R` : ''}</h3></div><span className="shrink-0 whitespace-nowrap"><OriginBadge origin={bets[0].dataOrigin}/></span>
+      <div className="flex min-w-0 items-center gap-1.5">{open && <LiveDot />}<SportIcon sport={bets[0].sport} className="h-4 w-4 shrink-0"/><h3 className="min-w-0 break-words text-sm font-bold [overflow-wrap:anywhere]">{bets[0].venueName ?? bets[0].raceId} {bets[0].raceNo != null ? `${bets[0].raceNo}R` : ''}</h3></div><span className="shrink-0 whitespace-nowrap"><OriginBadge origin={bets[0].dataOrigin}/></span>
     </div>
     <p className="mt-1 text-xs text-muted">{bets[0].raceDate ?? '日付不明'}・このレースの購入 {bets.length}件</p>
-    <Link className="focus-ring mt-2 inline-block rounded text-xs text-muted hover:text-ink" to={`/${bets[0].sport}/${bets[0].raceId}`}>出走表を見る →</Link>
+    <Link className="focus-ring group/link mt-2 inline-flex items-center gap-1 rounded text-xs font-bold text-muted hover:text-ink" to={`/${bets[0].sport}/${bets[0].raceId}`}>出走表を見る <span className="transition-transform duration-300 group-hover/link:translate-x-1">→</span></Link>
     {bets.length > 2 && <p className="mt-2 text-[10px] text-muted">購入明細は上下にスクロールできます</p>}
     <div className={`mt-2 space-y-2 ${bets.length > 2 ? 'max-h-[300px] overflow-y-auto overscroll-contain pr-1 [scrollbar-width:thin]' : ''}`} tabIndex={bets.length > 2 ? 0 : undefined} aria-label={bets.length > 2 ? 'このレースの購入明細' : undefined}>{bets.map((bet) => <PurchaseSnapshot key={bet.id} bet={bet} />)}</div>
-    <details className="mt-3 rounded-lg border border-line" onToggle={(event) => { if (event.currentTarget.open) setReviewEnabled(true) }}>
-      <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted">購入後の結果レビューを開く</summary>
+    <details className="mt-3 rounded-md border border-line transition-colors hover:border-ink/40" onToggle={(event) => { if (event.currentTarget.open) setReviewEnabled(true) }}>
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-xs font-bold text-muted marker:content-none [&::-webkit-details-marker]:hidden"><Chevron />購入後の結果レビューを開く</summary>
       {reviewEnabled && <RaceOutcome bets={bets} />}
     </details>
   </article>
@@ -171,11 +179,11 @@ export function PurchasedRace({ bets }: { bets: Bet[] }) {
 
 function PurchaseSnapshot({ bet: b }: { bet: Bet }) {
   const label = b.status === 'open' ? '仮想購入・精算待ち' : b.status === 'void' ? '無効' : b.status === 'won' ? '的中（精算記録）' : '不的中（精算記録）'
-  return <div className="rounded-lg border border-line bg-raised/30 p-2.5">
-    <div className="flex flex-wrap items-center justify-between gap-1"><div className="break-words font-mono text-sm font-semibold">{betTypeLabel[b.betType]} {b.selection}<span className="ml-2 rounded bg-raised px-1.5 py-0.5 font-sans text-[10px] text-muted">仮想・{b.mode === 'auto' ? '自動' : '手動'}</span></div><span className={`text-[11px] ${b.status === 'won' ? 'text-pos' : b.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{label}</span></div>
-    <dl className="mt-2 grid grid-cols-2 gap-2 rounded-md bg-surface/60 p-2 text-xs">
-      <div><dt className="text-[10px] text-muted">購入時オッズ</dt><dd className="num mt-0.5 font-semibold">{b.oddsAtBet == null ? '記録なし' : odds(b.oddsAtBet)}</dd></div>
-      <div><dt className="text-[10px] text-muted">確定オッズ（払戻換算）</dt><dd className="num mt-0.5 font-semibold">{b.status === 'void' ? '対象外（無効）' : b.finalOdds == null ? b.status === 'open' ? '未記録 / 精算待ち' : '記録なし' : odds(b.finalOdds)}</dd></div>
+  return <div className={`rounded-md border p-2.5 ${b.status === 'won' ? 'border-pos/50 bg-pos/5' : 'border-line bg-raised/30'}`}>
+    <div className="flex flex-wrap items-center justify-between gap-1"><div className="break-words font-mono text-sm font-bold">{betTypeLabel[b.betType]} {b.selection}<span className="ml-2 rounded bg-raised px-1.5 py-0.5 font-sans text-[10px] text-muted">仮想・{b.mode === 'auto' ? '自動' : '手動'}</span></div><span className={`text-[11px] font-bold ${b.status === 'won' ? 'anim-stamp inline-block rounded-[3px] border border-pos px-1 text-pos' : b.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{label}</span></div>
+    <dl className="mt-2 grid grid-cols-2 gap-2 rounded-[4px] border border-dashed border-line bg-surface p-2 text-xs">
+      <div><dt className="text-[10px] text-muted">購入時オッズ</dt><dd className="num mt-0.5 text-base font-bold">{b.oddsAtBet == null ? '記録なし' : odds(b.oddsAtBet)}</dd></div>
+      <div><dt className="text-[10px] text-muted">確定オッズ（払戻換算）</dt><dd className="num mt-0.5 text-base font-bold">{b.status === 'void' ? '対象外（無効）' : b.finalOdds == null ? b.status === 'open' ? '未記録 / 精算待ち' : '記録なし' : odds(b.finalOdds)}</dd></div>
     </dl>
     <dl className="mt-2 grid grid-cols-3 gap-x-2 gap-y-2 text-xs">
       <div><dt className="text-[10px] text-muted">購入時確率</dt><dd className="num mt-0.5">{pct(b.predictedProb)}</dd></div>
@@ -226,19 +234,19 @@ function RankingStrip({ sport, data, loading, error }: { sport: Sport; data: Ran
       {error ? <ErrorState error={error} /> : loading && !data ? <Loading rows={1} /> : top.length === 0 ? (
         <Empty>購入候補はありません。期待値がプラスでも不確実性が大きい買い目は除外されます。</Empty>
       ) : (
-        <div className="flex gap-3 overflow-x-auto p-4 [scrollbar-width:thin]">
+        <div className="stagger-x flex gap-3 overflow-x-auto p-4 [scrollbar-width:thin]">
           {top.map((c, i) => (
-            <Link key={`${c.raceId}-${'selection' in c ? c.betType + '-' + c.selection : c.number}`} to={`/${sport}/${c.raceId}`}
-              className="focus-ring group min-w-[200px] flex-1 rounded-xl border border-line bg-raised/40 p-3 transition-colors hover:border-ink/30">
+            <Link key={`${c.raceId}-${'selection' in c ? c.betType + '-' + c.selection : c.number}`} to={`/${sport}/${c.raceId}`} style={{ ['--i' as string]: i }}
+              className="focus-ring lift group min-w-[200px] flex-1 rounded-xl border border-line bg-surface p-3">
               <div className="flex items-center justify-between">
-                <span className="num text-xs text-faint">#{i + 1}</span>
+                <span className={`figure text-2xl ${i === 0 ? 'marker' : 'text-faint'}`}>{i + 1}</span>
                 <EdgeBadge edge={c.edge} compact />
               </div>
-              <div className="mt-2 truncate text-sm font-semibold">{c.venueName} {c.raceNo}R・{'selection' in c ? `${betTypeLabel[c.betType]} ${c.selection}` : `単勝 ${c.number}番`}</div>
+              <div className="mt-2 truncate text-sm font-bold">{c.venueName} {c.raceNo}R・{'selection' in c ? `${betTypeLabel[c.betType]} ${c.selection}` : `単勝 ${c.number}番`}</div>
               <div className="truncate text-xs text-muted">{'name' in c ? c.name : c.modelId}</div>
               <div className="mt-3 flex items-end justify-between">
                 <div>
-                  <div className={`num text-xl font-semibold ${tone(c.expectedRoi)}`}>{signedPct(c.expectedRoi, 0)}</div>
+                  <div className={`figure text-[28px] ${tone(c.expectedRoi)}`}><CountUp value={signedPct(c.expectedRoi, 0)} /></div>
                   <div className="text-[10px] text-faint">期待収益率</div>
                 </div>
                 <div className="num text-right text-xs text-muted">
@@ -261,14 +269,14 @@ function RaceList({ races, sport, selected }: { races: RaceSummary[]; sport: Spo
     <div className="lg:max-h-[70vh] lg:overflow-y-auto">
       {[...byVenue].map(([venue, rs]) => (
         <div key={venue}>
-          <div className="sticky top-0 z-10 flex items-center justify-between bg-surface/95 px-4 py-1.5 text-xs font-semibold text-muted backdrop-blur">
+          <div className="sticky top-0 z-10 flex items-center justify-between border-y border-line bg-raised/95 px-4 py-1.5 text-xs font-bold text-ink backdrop-blur">
             {venue}{rs[0].dataOrigin === 'sample' && <OriginBadge origin="sample" />}
           </div>
           {rs.map((r) => (
             <Link key={r.id} to={`/${sport}/${r.id}`}
-              className={`flex items-center gap-3 border-l-2 px-4 py-2.5 text-sm transition-colors ${
-                selected === r.id ? 'border-ink bg-raised' : 'border-transparent hover:bg-raised/50'}`}>
-              <span className="num w-8 font-semibold">{r.raceNo}R</span>
+              className={`group flex items-center gap-3 border-l-4 px-4 py-2.5 text-sm transition-[background-color,border-color,padding] duration-300 ${
+                selected === r.id ? 'border-mark bg-raised pl-5' : 'border-transparent hover:border-ink/30 hover:bg-raised/50 hover:pl-5'}`}>
+              <span className="figure w-9 text-lg">{r.raceNo}<span className="text-xs">R</span></span>
               <div className="min-w-0 flex-1">
                 <div className="truncate">{r.name ?? `${r.raceNo}レース`}</div>
                 <div className="num text-[11px] text-muted">
@@ -305,16 +313,17 @@ function RacePanel({ raceId, sport, onChanged, onDate }: { raceId: string; sport
   return (
     <div className="space-y-4">
       <Link to={`/${sport}`} className="inline-flex items-center gap-1 text-sm text-muted lg:hidden">‹ レース一覧</Link>
-      <div className="card p-4">
+      <div className="card anim-fade border-t-[3px] border-t-ink p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
               <OriginBadge origin={r.dataOrigin} />
               <span className="text-xs text-muted">{r.raceDate}・{t().status[r.status]}</span>
+              {r.status === 'scheduled' && <LiveDot />}
             </div>
-            <h2 className="mt-1.5 text-lg font-semibold">{r.venueName} {r.raceNo}R <span className="font-normal text-muted">{r.name}</span></h2>
+            <h2 className="mt-1.5 flex flex-wrap items-baseline gap-x-2 text-xl font-black">{r.venueName} <span className="figure text-[32px]">{r.raceNo}<span className="text-lg">R</span></span> <span className="text-sm font-normal text-muted">{r.name}</span></h2>
             <div className="num mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
-              <span>発走 {timeOf(r.postTime)}</span>
+              <span className="font-bold text-ink">発走 {timeOf(r.postTime)}</span>
               {r.distance != null && <span>{r.surface ?? ''}{r.distance}m</span>}
               {r.trackCondition && <span>馬場 {r.trackCondition}</span>}
               {r.weather && <span>天候 {r.weather}</span>}
@@ -349,9 +358,9 @@ function RacePanel({ raceId, sport, onChanged, onDate }: { raceId: string; sport
 
       {r.payouts.length > 0 && (
         <Section title="払戻金（確定）">
-          <div className="grid grid-cols-2 gap-px bg-line sm:grid-cols-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4">
             {r.payouts.map((p) => (
-              <div key={`${p.betType}-${p.selection}`} className="bg-surface px-4 py-2.5">
+              <div key={`${p.betType}-${p.selection}`} className="anim-fade border-b border-r border-line bg-surface px-4 py-2.5 transition-colors hover:bg-mark/10">
                 <div className="text-[11px] text-muted">{betTypeJa[p.betType] ?? p.betType}</div>
                 <div className="num flex justify-between gap-2 whitespace-nowrap text-sm"><span className="font-mono">{p.selection}</span><span>¥{p.payout.toLocaleString()}</span></div>
               </div>
@@ -364,7 +373,7 @@ function RacePanel({ raceId, sport, onChanged, onDate }: { raceId: string; sport
         <BetSheet race={r} entry={buying} onClose={() => setBuying(null)}
           onPlaced={(count) => { setBuying(null); setToast(`${count}件を仮想購入として記録しました`); race.reload(); onChanged(); setTimeout(() => setToast(null), 2500) }} />
       )}
-      {toast && <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-full bg-ink px-4 py-2 text-sm text-bg shadow-lg lg:bottom-8">{toast}</div>}
+      {toast && <div role="status" className="anim-toast fixed bottom-24 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-md border-2 border-ink bg-mark px-4 py-2 text-sm font-bold text-[rgb(26_24_20)] shadow-[4px_4px_0_rgb(var(--ink))] lg:bottom-8"><span aria-hidden="true">✓</span>{toast}</div>}
     </div>
   )
 }
@@ -380,10 +389,10 @@ const betTypeJa: Record<string, string> = { win: '単勝', place: '複勝', quin
 
 const boatColors = ['', 'bg-white text-black border border-line', 'bg-black text-white', 'bg-red-600 text-white', 'bg-blue-600 text-white', 'bg-yellow-400 text-black', 'bg-green-600 text-white']
 
-function NumberChip({ sport, n, frame }: { sport: Sport; n: number; frame: number | null }) {
+function NumberChip({ sport, n, frame, index = 0 }: { sport: Sport; n: number; frame: number | null; index?: number }) {
   const cls = sport === 'boat' ? boatColors[n] ?? 'bg-raised' : 'bg-raised text-ink border border-line'
   return (
-    <span className={`num inline-flex h-6 w-6 items-center justify-center rounded text-xs font-bold ${cls}`} title={frame != null ? `${frame}枠` : undefined}>{n}</span>
+    <span className={`num anim-pop inline-flex h-7 w-7 items-center justify-center rounded-[4px] text-sm font-black shadow-[1px_1px_0_rgb(var(--ink)/0.6)] ${cls}`} style={{ animationDelay: `${index * 50}ms` }} title={frame != null ? `${frame}枠` : undefined}>{n}</span>
   )
 }
 
@@ -398,7 +407,7 @@ function EntryTable({ race, sport, canBuy, onBuy }: { race: RaceDetail; sport: S
       <div className="flex items-center justify-between px-4 pt-3 text-xs">
         <div className="flex gap-1">
           {(['number', 'ev'] as const).map((k) => (
-            <button key={k} onClick={() => setSortBy(k)} className={`rounded-md px-2 py-1 ${sortBy === k ? 'bg-raised text-ink' : 'text-muted'}`}>
+            <button key={k} onClick={() => setSortBy(k)} className={`rounded-[4px] border px-2 py-1 font-bold transition-colors duration-300 ${sortBy === k ? 'border-ink bg-ink text-bg' : 'border-transparent text-muted hover:text-ink'}`}>
               {k === 'number' ? (sport === 'horse' ? '馬番順' : '艇番順') : '期待値順'}
             </button>
           ))}
@@ -422,13 +431,13 @@ function EntryTable({ race, sport, canBuy, onBuy }: { race: RaceDetail; sport: S
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
-            {rows.map((e) => (
-              <tr key={e.number} className={`hover:bg-raised/40 ${e.finishOrder === 1 ? 'bg-pos/5' : ''}`}>
-                <td className="px-4 py-2.5"><NumberChip sport={sport} n={e.number} frame={e.frame} /></td>
+            {rows.map((e, index) => (
+              <tr key={e.number} className={`hover:bg-mark/10 ${e.finishOrder === 1 ? 'bg-pos/5' : ''}`}>
+                <td className="px-4 py-2.5"><NumberChip sport={sport} n={e.number} frame={e.frame} index={index} /></td>
                 <td className="px-2 py-2.5">
                   <div className="flex items-center gap-1.5 whitespace-nowrap font-medium">
                     {e.name}
-                    {e.finishOrder != null && <span className={`num rounded px-1 text-[10px] ${e.finishOrder === 1 ? 'bg-pos text-white' : 'bg-raised text-muted'}`}>{e.finishOrder}着</span>}
+                    {e.finishOrder != null && <span className={`num rounded-[3px] px-1 text-[10px] font-bold ${e.finishOrder === 1 ? 'anim-stamp inline-block bg-pos text-white' : 'bg-raised text-muted'}`}>{e.finishOrder}着</span>}
                   </div>
                   <div className="whitespace-nowrap text-xs text-muted">{sport === 'horse' ? [e.jockey, e.trainer].filter(Boolean).join('・') || '—' : e.racerClass ?? '—'}</div>
                 </td>
@@ -443,7 +452,7 @@ function EntryTable({ race, sport, canBuy, onBuy }: { race: RaceDetail; sport: S
                   {e.oddsCapturedAt && <div className="mt-0.5 text-[10px] font-normal text-faint">{freshness(Math.max(0, (Date.now() - Date.parse(e.oddsCapturedAt)) / 60000))}</div>}
                 </td>
                 <td className="num px-2 py-2.5 text-right text-muted">{pct(e.breakEvenProb)}</td>
-                <td className={`num px-2 py-2.5 text-right font-semibold ${tone(e.expectedRoi)}`}>{signedPct(e.expectedRoi)}</td>
+                <td className={`num px-2 py-2.5 text-right text-base font-bold ${tone(e.expectedRoi)}`}>{signedPct(e.expectedRoi)}</td>
                 <td className="num px-2 py-2.5 text-right text-xs text-muted" title="予測確率の標準偏差（小さいほど安定）">
                   {e.probStd == null ? '—' : `±${(e.probStd * 100).toFixed(1)}pt`}
                 </td>
