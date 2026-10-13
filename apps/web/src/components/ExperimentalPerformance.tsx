@@ -16,7 +16,8 @@ function reasonLabel(reason: string) {
   return reason
 }
 
-export function ExperimentalPerformance({ compact = false }: { compact?: boolean }) {
+/** `narrow` lays the summary out for a side column. */
+export function ExperimentalPerformance({ compact = false, narrow = false }: { compact?: boolean; narrow?: boolean }) {
   const q = useAsync(() => api.experimentalPerformance(), [])
   if (q.error) return <Section title="三連単モデル実験"><div className="p-4"><ErrorState error={q.error} onRetry={q.reload} /></div></Section>
   if (!q.data) return <Section title="三連単モデル実験"><div className="p-4"><Loading rows={compact ? 2 : 4} /></div></Section>
@@ -25,7 +26,7 @@ export function ExperimentalPerformance({ compact = false }: { compact?: boolean
   return <Section title="三連単モデル実験" right={<span className="text-xs text-muted">実験専用・未検証</span>}>
     <div className="space-y-3 p-4">
       <p className="text-xs leading-relaxed text-muted">通常の運用成績・資産とは別の仮想台帳です。{caveat}</p>
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className={`grid grid-cols-2 gap-3 ${narrow ? '' : 'md:grid-cols-4'}`}>
         <Metric label="実験用仮想残高" value={yen(data.bankroll.available)} sub={`初期 ${yen(data.bankroll.initial)}`} />
         <Metric label="実験損益" value={signedYen(data.metrics.profit)} className={tone(data.metrics.profit)} />
         <Metric label="実験回収率" value={pct(data.metrics.roi)} />

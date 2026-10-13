@@ -110,7 +110,7 @@ function ResearchArea({ sport, date, origin, raceId, onDate, onChanged }: { spor
   return <div className="space-y-5 border-t border-line p-4">
     <RankingStrip sport={sport} data={ranks.data} loading={ranks.loading} error={ranks.error} />
     <div className="grid gap-5 lg:grid-cols-[300px_1fr]">
-      <div className={`min-w-0 ${raceId ? 'hidden lg:block' : ''}`}>
+      <div className={`min-w-0 lg:sticky lg:top-20 lg:self-start ${raceId ? 'hidden lg:block' : ''}`}>
         <Section title="レース一覧" right={<span className="num text-xs text-muted">{races.data?.length ?? 0}R</span>}>
           {races.error ? <ErrorState error={races.error} onRetry={races.reload} /> : !races.data ? <Loading rows={6} /> : races.data.length === 0 ? <Empty>この日のレースはありません。<br /><span className="text-xs">データ未取得の可能性もあります（データ収集画面で確認）。</span></Empty> : <RaceList races={races.data} sport={sport} selected={raceId} />}
         </Section>
@@ -266,7 +266,7 @@ function RaceList({ races, sport, selected }: { races: RaceSummary[]; sport: Spo
   const byVenue = new Map<string, RaceSummary[]>()
   for (const r of races) byVenue.set(r.venueName, [...(byVenue.get(r.venueName) ?? []), r])
   return (
-    <div className="lg:max-h-[70vh] lg:overflow-y-auto">
+    <div className="lg:max-h-[calc(100vh-11rem)] lg:overflow-y-auto lg:overscroll-contain lg:[scrollbar-width:thin]">
       {[...byVenue].map(([venue, rs]) => (
         <div key={venue}>
           <div className="sticky top-0 z-10 flex items-center justify-between border-y border-line bg-raised/95 px-4 py-1.5 text-xs font-bold text-ink backdrop-blur">
@@ -341,6 +341,19 @@ function RacePanel({ raceId, sport, onChanged, onDate }: { raceId: string; sport
         </div>
       </div>
 
+      {r.payouts.length > 0 && (
+        <Section title="払戻金（確定）">
+          <div className="grid grid-cols-2 sm:grid-cols-4">
+            {r.payouts.map((p) => (
+              <div key={`${p.betType}-${p.selection}`} className="anim-fade border-b border-r border-line bg-surface px-4 py-2.5 transition-colors hover:bg-mark/10">
+                <div className="text-[11px] text-muted">{betTypeJa[p.betType] ?? p.betType}</div>
+                <div className="num flex justify-between gap-2 whitespace-nowrap text-sm"><span className="font-mono">{p.selection}</span><span>¥{p.payout.toLocaleString()}</span></div>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
       <Section title={sport === 'horse' ? '出走馬・AI予測' : '出走艇・AI予測'} right={<span className="hidden text-xs text-muted sm:inline">縦線＝損益分岐勝率</span>}>
         <EntryTable race={r} sport={sport} canBuy={canBuy} onBuy={setBuying} />
       </Section>
@@ -355,19 +368,6 @@ function RacePanel({ raceId, sport, onChanged, onDate }: { raceId: string; sport
       </Section>
 
       {ticketBuying && <BetSheet race={r} ticket={ticketBuying} onClose={() => setTicketBuying(null)} onPlaced={() => { setTicketBuying(null); race.reload(); onChanged() }} />}
-
-      {r.payouts.length > 0 && (
-        <Section title="払戻金（確定）">
-          <div className="grid grid-cols-2 sm:grid-cols-4">
-            {r.payouts.map((p) => (
-              <div key={`${p.betType}-${p.selection}`} className="anim-fade border-b border-r border-line bg-surface px-4 py-2.5 transition-colors hover:bg-mark/10">
-                <div className="text-[11px] text-muted">{betTypeJa[p.betType] ?? p.betType}</div>
-                <div className="num flex justify-between gap-2 whitespace-nowrap text-sm"><span className="font-mono">{p.selection}</span><span>¥{p.payout.toLocaleString()}</span></div>
-              </div>
-            ))}
-          </div>
-        </Section>
-      )}
 
       {buying && (
         <BetSheet race={r} entry={buying} onClose={() => setBuying(null)}

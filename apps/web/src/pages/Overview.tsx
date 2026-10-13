@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { Bet, Overview } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
@@ -66,45 +67,53 @@ export function OverviewPage() {
   const shown = filtered.slice(0, visible)
 
   return <div className="space-y-5">
-    <div className="flex flex-wrap items-end justify-between gap-3">
-      <div>
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
         <div className="kicker">VIRTUAL BOARD</div>
         <h1 className="draw-underline mt-1 inline-block text-2xl font-black tracking-tight">運用ボード</h1>
         <p className="mt-3 text-sm text-muted">仮想購入の実績と、購入記録があるレースだけを表示します。</p>
       </div>
-      <button className="btn-ghost h-8 text-xs" onClick={all.reload} disabled={all.loading}><RefreshIcon spinning={all.loading} />更新</button>
+      <button className="btn-ghost mt-4 h-8 text-xs" onClick={all.reload} disabled={all.loading}><RefreshIcon spinning={all.loading} />更新</button>
     </div>
-
-    <Section title="運用成績" right={<span className="text-xs text-muted">確定分の払戻と損益 · 初期資金 {yen(performance.initialBankroll)}</span>}>
-      <Scoreboard performance={performance} unresolved={unresolved} />
-      <div className="border-t border-line px-2 pb-3 pt-2">
-        {performance.equityCurve.length > 1 ? <EquityChart data={performance.equityCurve} base={performance.initialBankroll} /> : <Empty>確定した仮想購入がまだありません。</Empty>}
-      </div>
-    </Section>
 
     <SettledTicker bets={bets} />
 
-    <ExperimentalPerformance compact />
-    {origin !== 'sample' && <ExperimentalBetsHistory compact />}
+    <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="min-w-0 space-y-5">
+        <Section title="運用成績" right={<span className="text-xs text-muted">確定分の払戻と損益 · 初期資金 {yen(performance.initialBankroll)}</span>}>
+          <Scoreboard performance={performance} unresolved={unresolved} />
+          <div className="border-t border-line px-2 pb-3 pt-2">
+            {performance.equityCurve.length > 1 ? <EquityChart data={performance.equityCurve} base={performance.initialBankroll} /> : <Empty>確定した仮想購入がまだありません。</Empty>}
+          </div>
+        </Section>
 
-    <Section title="購入したレース" right={<span className="num text-xs text-muted">{purchasedRaces.length}レース · {bets.length}点</span>}>
-      {!purchasedRaces.length ? <Empty>この表示条件では仮想購入がありません。未購入レースは表示しません。</Empty> : <>
-        <div className="border-b border-line px-4 py-3">
-          <Segmented<RaceFilter> size="sm" ariaLabel="購入したレースの絞り込み" value={filter} onChange={(next) => { setFilter(next); setVisible(PAGE_SIZE) }} options={[
-            { value: 'all', label: <>すべて <span className="num ml-0.5 text-faint">{counts.all}</span></> },
-            { value: 'open', label: <>精算待ち <span className="num ml-0.5 text-faint">{counts.open}</span></> },
-            { value: 'won', label: <>的中あり <span className="num ml-0.5 text-faint">{counts.won}</span></> },
-            { value: 'lost', label: <>不的中 <span className="num ml-0.5 text-faint">{counts.lost}</span></> },
-          ]} />
-        </div>
-        {!shown.length ? <Empty>この条件に該当するレースはありません。</Empty> : <div key={filter} className="stagger divide-y divide-line">
-          {shown.map((race, index) => <PurchasedRaceCard key={race.raceId} race={race} index={index % PAGE_SIZE} />)}
-        </div>}
-        {filtered.length > shown.length && <div className="border-t border-line p-3 text-center">
-          <button className="btn-ghost h-9 text-xs" onClick={() => setVisible((n) => n + PAGE_SIZE)}>さらに表示（残り {(filtered.length - shown.length).toLocaleString()}レース）</button>
-        </div>}
-      </>}
-    </Section>
+        <Section title="購入したレース" right={<span className="num text-xs text-muted">{purchasedRaces.length}レース · {bets.length}点</span>}>
+          {!purchasedRaces.length ? <Empty>この表示条件では仮想購入がありません。未購入レースは表示しません。</Empty> : <>
+            <div className="border-b border-line px-4 py-3">
+              <Segmented<RaceFilter> size="sm" ariaLabel="購入したレースの絞り込み" value={filter} onChange={(next) => { setFilter(next); setVisible(PAGE_SIZE) }} options={[
+                { value: 'all', label: <>すべて <span className="num ml-0.5 text-faint">{counts.all}</span></> },
+                { value: 'open', label: <>精算待ち <span className="num ml-0.5 text-faint">{counts.open}</span></> },
+                { value: 'won', label: <>的中あり <span className="num ml-0.5 text-faint">{counts.won}</span></> },
+                { value: 'lost', label: <>不的中 <span className="num ml-0.5 text-faint">{counts.lost}</span></> },
+              ]} />
+            </div>
+            {shown.length > 0 && <PurchasedRaceHeader />}
+            {!shown.length ? <Empty>この条件に該当するレースはありません。</Empty> : <div key={filter} className="stagger divide-y divide-line">
+              {shown.map((race, index) => <PurchasedRaceCard key={race.raceId} race={race} index={index % PAGE_SIZE} />)}
+            </div>}
+            {filtered.length > shown.length && <div className="border-t border-line p-3 text-center">
+              <button className="btn-ghost h-9 text-xs" onClick={() => setVisible((n) => n + PAGE_SIZE)}>さらに表示（残り {(filtered.length - shown.length).toLocaleString()}レース）</button>
+            </div>}
+          </>}
+        </Section>
+      </div>
+
+      {/* The experimental ledger is separate from normal results, so it sits beside them rather than between them. */}
+      <aside aria-label="実験台帳" className="min-w-0 space-y-5">
+        <ExperimentalPerformance compact narrow />
+        {origin !== 'sample' && <ExperimentalBetsHistory compact narrow />}
+      </aside>
+    </div>
   </div>
 }
 
@@ -178,6 +187,15 @@ function SettledTicker({ bets }: { bets: Bet[] }) {
   </section>
 }
 
+// Shared by the column header and each row so wide screens read the purchases as one table.
+const raceRowGrid = 'md:grid md:grid-cols-[minmax(0,1.5fr)_minmax(0,1.3fr)_64px_68px_72px_84px] md:items-center md:gap-x-3'
+
+function PurchasedRaceHeader() {
+  return <div aria-hidden="true" className={`hidden border-b border-ink/40 bg-raised/40 px-4 py-2 pl-5 text-[10px] font-bold text-muted ${raceRowGrid}`}>
+    <span>レース</span><span>買い目</span><span className="text-right">購入額</span><span className="text-right">確定払戻</span><span className="text-right">確定損益</span><span className="text-right">精算状況</span>
+  </div>
+}
+
 function PurchasedRaceCard({ race, index }: { race: PurchasedRace; index: number }) {
   const resolved = race.bets.filter((bet) => bet.status !== 'open')
   const pendingCount = race.bets.length - resolved.length
@@ -188,31 +206,35 @@ function PurchasedRaceCard({ race, index }: { race: PurchasedRace; index: number
   const target = `/${race.sport}/${encodeURIComponent(race.raceId)}`
   const state = raceState(race)
   const strip = state === 'open' ? 'bg-mark' : state === 'won' ? 'bg-pos' : 'bg-line'
-  return <article className="group relative p-4 pl-5 transition-colors duration-300 hover:bg-raised/40" style={{ ['--i' as string]: index }}>
+  const profitKnown = knownProfits.length === resolved.length && resolved.length > 0
+  return <article className={`group relative p-4 pl-5 transition-colors duration-300 hover:bg-raised/40 md:py-3 ${raceRowGrid}`} style={{ ['--i' as string]: index }}>
     <span aria-hidden="true" className={`absolute inset-y-3 left-0 w-1 rounded-r transition-[top,bottom] duration-300 group-hover:inset-y-0 ${strip}`} />
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <Link to={target} className="flex items-center gap-2 font-bold hover:text-accent">
-          <SportIcon sport={race.sport} className={`h-4 w-4 ${race.sport === 'boat' ? 'text-boat' : 'text-horse'}`} />
-          {race.venueName ?? race.raceId}{race.raceNo != null ? ` ${race.raceNo}R` : ''}
-          <span className="text-xs font-normal text-muted transition-transform duration-300 group-hover:translate-x-1">詳細 →</span>
-        </Link>
-        <div className="num mt-1 text-[11px] text-muted">{race.raceDate ?? '開催日不明'} · 購入 {race.bets.length}点 · {dateTime(race.latestPurchase)} 時点</div>
-      </div>
-      <div className="grid grid-cols-2 gap-x-5 gap-y-1 text-right text-xs sm:grid-cols-4">
-        <div><div className="text-[10px] text-muted">購入額</div><div className="num font-bold">{yen(race.bets.reduce((sum, bet) => sum + bet.stake, 0))}</div></div>
-        <div><div className="text-[10px] text-muted">確定払戻</div><div className="num font-bold">{knownPayouts.length === resolved.length && resolved.length ? yen(settledPayout) : knownPayouts.length ? '一部未確認' : '未確定'}</div></div>
-        <div><div className="text-[10px] text-muted">確定損益</div><div className={`num font-bold ${knownProfits.length === resolved.length && resolved.length ? tone(settledProfit) : 'text-muted'}`}>{knownProfits.length === resolved.length && resolved.length ? signedYen(settledProfit) : knownProfits.length ? '一部未確認' : '未確定'}</div></div>
-        <div><div className="text-[10px] text-muted">精算状況</div><div className="flex items-center justify-end gap-1.5 font-bold">{pendingCount > 0 && <LiveDot />}{pendingCount ? `未確定 ${pendingCount}点` : '全点確定'}</div></div>
-      </div>
+    <div className="min-w-0">
+      <Link to={target} className="flex items-center gap-2 font-bold hover:text-accent">
+        <SportIcon sport={race.sport} className={`h-4 w-4 shrink-0 ${race.sport === 'boat' ? 'text-boat' : 'text-horse'}`} />
+        <span className="min-w-0 truncate">{race.venueName ?? race.raceId}{race.raceNo != null ? ` ${race.raceNo}R` : ''}</span>
+        <span className="shrink-0 text-xs font-normal text-muted transition-transform duration-300 group-hover:translate-x-1 md:hidden">詳細 →</span>
+      </Link>
+      <div className="num mt-1 text-[11px] text-muted">{race.raceDate ?? '開催日不明'} · 購入 {race.bets.length}点 · {dateTime(race.latestPurchase)} 時点</div>
     </div>
-    <div className="mt-3 flex flex-wrap gap-2">
-      {race.bets.map((bet) => <div key={bet.id} className={`flex items-center gap-2 rounded-[4px] border px-2.5 py-1.5 text-xs ${bet.status === 'won' ? 'border-pos/50 bg-pos/10' : 'border-line bg-surface'}`}>
+    <div className="mt-3 flex min-w-0 flex-wrap gap-1.5 md:mt-0">
+      {race.bets.map((bet) => <div key={bet.id} className={`flex items-center gap-2 rounded-[4px] border px-2 py-1 text-xs ${bet.status === 'won' ? 'border-pos/50 bg-pos/10' : 'border-line bg-surface'}`}>
         <span className="font-mono font-bold">{betTypeLabel[bet.betType]} {bet.selection}</span>
         <span className="num text-muted">{yen(bet.stake)}</span>
         <span className={bet.status === 'won' ? 'anim-stamp inline-block font-bold text-pos' : bet.status === 'void' ? 'text-warn' : 'text-muted'}>{t().betStatus[bet.status]}</span>
         {bet.status !== 'open' && bet.payout != null && <span className="num text-muted">払戻 {yen(bet.payout)}</span>}
       </div>)}
     </div>
+    <RowValue label="購入額"><span className="num font-bold">{yen(race.bets.reduce((sum, bet) => sum + bet.stake, 0))}</span></RowValue>
+    <RowValue label="確定払戻"><span className="num font-bold">{knownPayouts.length === resolved.length && resolved.length ? yen(settledPayout) : knownPayouts.length ? '一部未確認' : '未確定'}</span></RowValue>
+    <RowValue label="確定損益"><span className={`num font-bold ${profitKnown ? tone(settledProfit) : 'text-muted'}`}>{profitKnown ? signedYen(settledProfit) : knownProfits.length ? '一部未確認' : '未確定'}</span></RowValue>
+    <RowValue label="精算状況"><span className="flex items-center justify-end gap-1.5 font-bold">{pendingCount > 0 && <LiveDot />}{pendingCount ? `未確定 ${pendingCount}点` : '全点確定'}</span></RowValue>
   </article>
+}
+
+function RowValue({ label, children }: { label: string; children: ReactNode }) {
+  return <div className="mt-2 flex items-baseline justify-between gap-3 text-xs md:mt-0 md:block md:text-right">
+    <span className="text-[10px] text-muted md:sr-only">{label}</span>
+    {children}
+  </div>
 }

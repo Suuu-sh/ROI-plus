@@ -17,12 +17,12 @@ export function DataPage() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-end justify-between">
-        <div>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
           <div><div className="kicker">DATA PIPELINE</div><h1 className="draw-underline mt-1 inline-block text-2xl font-black tracking-tight">データ収集</h1></div>
           <p className="mt-3 text-sm text-muted">利用規約で許可された無料ソースのみ。取得できない値は欠損として扱い、補完しません。</p>
         </div>
-        <button className="btn-ghost h-8 text-xs" onClick={q.reload}>更新</button>
+        <button className="btn-ghost mt-4 h-8 text-xs" onClick={q.reload}>更新</button>
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -32,107 +32,109 @@ export function DataPage() {
         <Kpi label="保存中の行数（概算）" value={`${d.freeTier.d1RowsApprox.toLocaleString()} 行`} sub="Cloudflare quota 使用量ではありません" />
       </div>
 
-      <Section title="D1 日次書込予約（Worker 内推定）">
-        {d.d1WriteBudget.state === 'disabled' || d.d1WriteBudget.enabled === false ? (
-          <p className="p-4 text-sm leading-relaxed text-muted">
-            アプリ内の日次書込予算制限は無効です。予約・残量の推定値は表示していません。
-            Cloudflare D1 自体の利用上限・実使用量は別管理で、この画面からは分かりません。
-          </p>
-        ) : (
-          <>
-            <div className="grid gap-3 p-4 sm:grid-cols-2">
-              <BudgetKpi label="保護枠の残り" used={d.d1WriteBudget.essentialReserved} remaining={d.d1WriteBudget.essentialRemaining} limit={d.d1WriteBudget.essentialLimit} />
-              <BudgetKpi label="任意処理枠の残り" used={d.d1WriteBudget.optionalReserved} remaining={d.d1WriteBudget.optionalRemaining} limit={d.d1WriteBudget.optionalLimit} />
-            </div>
-            <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">
-              {d.d1WriteBudget.date} UTC の予約推定値です。Cloudflare アカウント全体の実使用量・quota 残量ではありません。
-              {d.d1WriteBudget.state === 'missing' || d.d1WriteBudget.state === 'invalid' ? ' 予約状態を確認できないため、残量は不明です。' : ''}
-            </p>
-          </>
-        )}
-      </Section>
-
-      <Section title="取得状況">
-        {d.sources.length === 0 ? <Empty>収集履歴がありません。</Empty> : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-sm">
-              <thead><tr className="text-left text-[11px] uppercase tracking-wider text-muted">
-                <th className="px-4 py-2 font-medium">ソース</th><th className="px-2 py-2 font-medium">状態</th>
-                <th className="px-2 py-2 font-medium">最終保存記録</th><th className="px-2 py-2 text-right font-medium">記録成功率</th>
-                <th className="px-2 py-2 text-right font-medium">件数</th><th className="px-4 py-2 font-medium">鮮度</th>
-              </tr></thead>
-              <tbody className="divide-y divide-line">
-                {d.sources.map((s) => (
-                  <tr key={s.source}>
-                    <td className="px-4 py-2.5">
-                      <div className="flex items-center gap-2 font-medium"><SportDot sport={s.sport} /><span className="font-mono text-xs">{s.source}</span></div>
-                      {s.note && <div className="mt-0.5 text-xs text-muted">{s.note}</div>}
-                    </td>
-                    <td className="px-2 py-2.5">
-                      {s.enabled ? <span className="text-xs text-pos">● 有効</span> : <span className="text-xs text-faint">○ 無効</span>}
-                    </td>
-                    <td className="num px-2 py-2.5 text-xs">
-                      <div>{dateTime(s.lastRunAt)}</div>
-                      <div className="text-faint">成功記録 {dateTime(s.lastSuccessAt)}</div>
-                    </td>
-                    <td className={`num px-2 py-2.5 text-right ${s.enabled && s.successRate != null && s.successRate < 0.9 ? 'text-warn' : ''}`}>{s.enabled ? pct(s.successRate, 0) : <span className="text-faint">—</span>}<div className="text-[10px] text-faint">{s.runs} 記録 · 品質除外（保存記録全体）{s.qualityExclusions ?? 0} レース試行</div></td>
-                    <td className="num px-2 py-2.5 text-right">{s.records.toLocaleString()}</td>
-                    <td className={`num px-4 py-2.5 text-xs ${s.enabled && (s.freshnessMinutes == null || s.freshnessMinutes > 60 * 48) ? 'text-warn' : ''}`}>{s.enabled ? freshness(s.freshnessMinutes) : <span className="text-faint">取得停止中</span>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">表示時刻・記録成功率は保存された収集記録に基づきます。毎分の起動や未保存の試行をすべて表すものではありません。</p>
-      </Section>
-
-      <Section title="購入済みボートの結果取得">
-        <div className="space-y-3 p-4">
-          <p className="text-sm text-muted">実データの購入済みボートのみ・最大4レース。結果取得後に精算します。</p>
-          <button
-            className="btn-primary text-sm"
-            disabled={manualResults.phase === 'collecting' || manualResults.phase === 'settling'}
-            onClick={() => void collectAndSettleResults(setManualResults)}
-          >
-            {manualResults.phase === 'collecting' ? '結果を取得中…' : manualResults.phase === 'settling' ? '精算中…' : '購入済みの結果を今すぐ取得'}
-          </button>
-          {manualResults.phase === 'failed' && <p role="status" className="text-sm text-neg">{manualResults.message}</p>}
-          {manualResults.phase === 'complete' && <p role="status" className={`text-sm ${manualResults.collection.status === 'success' ? 'text-pos' : 'text-warn'}`}>{manualResults.message}</p>}
-        </div>
-      </Section>
-
-      <Section title="品質チェックによる除外（直近1時間）">
-        <p className="px-4 py-2 text-xs text-muted">{exclusions.reduce((n, row) => n + row.count, 0)} レース試行。通信失敗ではありません。基準外のオッズは保存せず、判定・購入に使いません。成功率から品質のみの除外試行を除きます。1時間より古い品質のみの収集ログは定期的に削除します。</p>
-        {exclusions.length === 0 ? <Empty>品質除外はありません。</Empty> : <ul className="divide-y divide-line">{exclusions.map((row, i) => (
-          <li key={i} className="px-4 py-2.5 text-sm">
-            <div className="flex justify-between text-xs text-muted"><span className="font-mono">{row.source} · {row.count} レース試行</span><span className="num">{dateTime(row.at)}</span></div>
-            <div className="mt-0.5 break-words text-warn">{row.reason}</div>
-          </li>
-        ))}</ul>}
-      </Section>
-
-      <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
-        <Section title="通信・解析等のエラー履歴">
-          {d.errors.length === 0 ? <Empty>エラーはありません。</Empty> : (
-            <ul className="divide-y divide-line">
-              {d.errors.map((e, i) => (
+      <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="min-w-0 space-y-5">
+          <Section title="取得状況">
+            {d.sources.length === 0 ? <Empty>収集履歴がありません。</Empty> : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[760px] text-sm">
+                  <thead><tr className="text-left text-[11px] uppercase tracking-wider text-muted">
+                    <th className="px-4 py-2 font-medium">ソース</th><th className="px-2 py-2 font-medium">状態</th>
+                    <th className="px-2 py-2 font-medium">最終保存記録</th><th className="px-2 py-2 text-right font-medium">記録成功率</th>
+                    <th className="px-2 py-2 text-right font-medium">件数</th><th className="px-4 py-2 font-medium">鮮度</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-line">
+                    {d.sources.map((s) => (
+                      <tr key={s.source}>
+                        <td className="px-4 py-2.5">
+                          <div className="flex items-center gap-2 font-medium"><SportDot sport={s.sport} /><span className="font-mono text-xs">{s.source}</span></div>
+                          {s.note && <div className="mt-0.5 text-xs text-muted">{s.note}</div>}
+                        </td>
+                        <td className="px-2 py-2.5">
+                          {s.enabled ? <span className="text-xs text-pos">● 有効</span> : <span className="text-xs text-faint">○ 無効</span>}
+                        </td>
+                        <td className="num px-2 py-2.5 text-xs">
+                          <div>{dateTime(s.lastRunAt)}</div>
+                          <div className="text-faint">成功記録 {dateTime(s.lastSuccessAt)}</div>
+                        </td>
+                        <td className={`num px-2 py-2.5 text-right ${s.enabled && s.successRate != null && s.successRate < 0.9 ? 'text-warn' : ''}`}>{s.enabled ? pct(s.successRate, 0) : <span className="text-faint">—</span>}<div className="text-[10px] text-faint">{s.runs} 記録 · 品質除外（保存記録全体）{s.qualityExclusions ?? 0} レース試行</div></td>
+                        <td className="num px-2 py-2.5 text-right">{s.records.toLocaleString()}</td>
+                        <td className={`num px-4 py-2.5 text-xs ${s.enabled && (s.freshnessMinutes == null || s.freshnessMinutes > 60 * 48) ? 'text-warn' : ''}`}>{s.enabled ? freshness(s.freshnessMinutes) : <span className="text-faint">取得停止中</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">表示時刻・記録成功率は保存された収集記録に基づきます。毎分の起動や未保存の試行をすべて表すものではありません。</p>
+          </Section>
+          <div className="grid items-start gap-5 xl:grid-cols-2">
+            <Section title="品質チェックによる除外（直近1時間）">
+              <p className="px-4 py-2 text-xs text-muted">{exclusions.reduce((n, row) => n + row.count, 0)} レース試行。通信失敗ではありません。基準外のオッズは保存せず、判定・購入に使いません。成功率から品質のみの除外試行を除きます。1時間より古い品質のみの収集ログは定期的に削除します。</p>
+              {exclusions.length === 0 ? <Empty>品質除外はありません。</Empty> : <ul className="divide-y divide-line">{exclusions.map((row, i) => (
                 <li key={i} className="px-4 py-2.5 text-sm">
-                  <div className="flex justify-between text-xs text-muted"><span className="font-mono">{e.source}</span><span className="num">{dateTime(e.at)}</span></div>
-                  <div className="mt-0.5 break-words text-neg">{e.error}</div>
+                  <div className="flex justify-between text-xs text-muted"><span className="font-mono">{row.source} · {row.count} レース試行</span><span className="num">{dateTime(row.at)}</span></div>
+                  <div className="mt-0.5 break-words text-warn">{row.reason}</div>
                 </li>
+              ))}</ul>}
+            </Section>
+            <Section title="通信・解析等のエラー履歴">
+              {d.errors.length === 0 ? <Empty>エラーはありません。</Empty> : (
+                <ul className="divide-y divide-line">
+                  {d.errors.map((e, i) => (
+                    <li key={i} className="px-4 py-2.5 text-sm">
+                      <div className="flex justify-between text-xs text-muted"><span className="font-mono">{e.source}</span><span className="num">{dateTime(e.at)}</span></div>
+                      <div className="mt-0.5 break-words text-neg">{e.error}</div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Section>
+          </div>
+        </div>
+        <div className="min-w-0 space-y-5">
+          <Section title="購入済みボートの結果取得">
+            <div className="space-y-3 p-4">
+              <p className="text-sm text-muted">実データの購入済みボートのみ・最大4レース。結果取得後に精算します。</p>
+              <button
+                className="btn-primary text-sm"
+                disabled={manualResults.phase === 'collecting' || manualResults.phase === 'settling'}
+                onClick={() => void collectAndSettleResults(setManualResults)}
+              >
+                {manualResults.phase === 'collecting' ? '結果を取得中…' : manualResults.phase === 'settling' ? '精算中…' : '購入済みの結果を今すぐ取得'}
+              </button>
+              {manualResults.phase === 'failed' && <p role="status" className="text-sm text-neg">{manualResults.message}</p>}
+              {manualResults.phase === 'complete' && <p role="status" className={`text-sm ${manualResults.collection.status === 'success' ? 'text-pos' : 'text-warn'}`}>{manualResults.message}</p>}
+            </div>
+          </Section>
+          <Section title="D1 日次書込予約（Worker 内推定）">
+            {d.d1WriteBudget.state === 'disabled' || d.d1WriteBudget.enabled === false ? (
+              <p className="p-4 text-sm leading-relaxed text-muted">
+                アプリ内の日次書込予算制限は無効です。予約・残量の推定値は表示していません。
+                Cloudflare D1 自体の利用上限・実使用量は別管理で、この画面からは分かりません。
+              </p>
+            ) : (
+              <>
+                <div className="grid gap-3 p-4">
+                  <BudgetKpi label="保護枠の残り" used={d.d1WriteBudget.essentialReserved} remaining={d.d1WriteBudget.essentialRemaining} limit={d.d1WriteBudget.essentialLimit} />
+                  <BudgetKpi label="任意処理枠の残り" used={d.d1WriteBudget.optionalReserved} remaining={d.d1WriteBudget.optionalRemaining} limit={d.d1WriteBudget.optionalLimit} />
+                </div>
+                <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">
+                  {d.d1WriteBudget.date} UTC の予約推定値です。Cloudflare アカウント全体の実使用量・quota 残量ではありません。
+                  {d.d1WriteBudget.state === 'missing' || d.d1WriteBudget.state === 'invalid' ? ' 予約状態を確認できないため、残量は不明です。' : ''}
+                </p>
+              </>
+            )}
+          </Section>
+          <Section title="テーブル件数">
+            <ul className="divide-y divide-line text-sm">
+              {Object.entries(d.tableCounts).map(([k, v]) => (
+                <li key={k} className="flex justify-between px-4 py-2"><span className="font-mono text-xs text-muted">{k}</span><span className="num">{v.toLocaleString()}</span></li>
               ))}
             </ul>
-          )}
-        </Section>
-        <Section title="テーブル件数">
-          <ul className="divide-y divide-line text-sm">
-            {Object.entries(d.tableCounts).map(([k, v]) => (
-              <li key={k} className="flex justify-between px-4 py-2"><span className="font-mono text-xs text-muted">{k}</span><span className="num">{v.toLocaleString()}</span></li>
-            ))}
-          </ul>
-          <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">{d.freeTier.d1RowsNote}</p>
-        </Section>
+            <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">{d.freeTier.d1RowsNote}</p>
+          </Section>
+        </div>
       </div>
     </div>
   )

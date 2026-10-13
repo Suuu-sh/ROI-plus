@@ -27,50 +27,34 @@ export function PerformancePage() {
         <p className="mt-3 text-sm text-muted">回収率だけでなく、予測確率の校正と期待値帯ごとの実績で評価します。</p>
       </div>
 
-      <ProfitabilityNotice
-        origin={origin}
-        settledBets={bets.filter((bet) => bet.status === 'won' || bet.status === 'lost').length}
-      />
-
-      <ExperimentalPerformance />
-
-      <Section title="候補1位のみ vs 複数購入" right={<span className="text-xs text-muted">同一レース・同一購入総額で比較</span>}>
-        {origin === 'all' ? <div className="px-4 py-4 text-sm text-muted">比較対象を混ぜないため、「実データ」または「サンプル」を選択してください。</div>
-          : rankComparison == null ? <div className="px-4 py-4 text-sm text-muted">比較データを読み込めませんでした。</div>
-          : <>
-            <div className="grid gap-px bg-line sm:grid-cols-2">
-              <ComparisonMetric title="実際の複数購入" value={rankComparison.multiple} />
-              <ComparisonMetric title="候補1位のみ（同じ総額を仮定）" value={rankComparison.firstOnly} />
-            </div>
-            <div className="space-y-1 px-4 py-3 text-xs text-muted">
-              <p>比較グループ {rankComparison.comparedGroupCount.toLocaleString()}件・対象レース {rankComparison.comparedRaceCount.toLocaleString()}件・購入総額 {yen(rankComparison.totalStake)}。全券が精算済みで順位1位の結果が確定したグループを対象にしています。</p>
-              <p>結果待ち {rankComparison.excludedPendingGroupCount.toLocaleString()}グループ、順位1位なし {rankComparison.excludedMissingRankOneGroupCount.toLocaleString()}グループ、順位不明 {rankComparison.excludedUnknownRankBetCount.toLocaleString()}買い目などは除外。1位のみは同じ総額を順位1位の実際の結果（不的中は払戻0）に当てる反実仮想で、1円未満は切り捨てます。利益の証明ではありません。</p>
-              {rankComparison.note && <p>{rankComparison.note}</p>}
-            </div>
-          </>}
-      </Section>
+      <div className="grid items-stretch gap-3 lg:grid-cols-[1fr_1fr_1.15fr]">
+        <div className="grid gap-3 sm:grid-cols-2 lg:col-span-2">
+          {(['horse', 'boat'] as const).map((s) => {
+            const r = bd.bySport.find((x) => x.sport === s)
+            return (
+              <div key={s} className={`card lift border-t-4 p-4 ${s === 'horse' ? 'border-t-horse' : 'border-t-boat'}`}>
+                <div className={`flex items-center gap-2 text-sm font-bold ${s === 'horse' ? 'text-horse' : 'text-boat'}`}><SportIcon sport={s} />{t().sport[s]}の回収率</div>
+                <div className={`figure mt-3 text-[44px] ${r?.roi == null ? '' : r.roi >= 1 ? 'text-pos' : 'text-neg'}`}><CountUp value={pct(r?.roi)} /></div>
+                <RoiMeter roi={r?.roi ?? null} />
+                <div className="num mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+                  <span>確定購入 {r?.bets ?? 0}</span><span>的中率 {pct(r?.hitRate)}</span>
+                  <span className={tone(r?.profit)}>損益 {signedYen(r?.profit ?? 0)}</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+        <ProfitabilityNotice
+          origin={origin}
+          settledBets={bets.filter((bet) => bet.status === 'won' || bet.status === 'lost').length}
+        />
+      </div>
 
       {origin === 'real' && bets.length === 0 && (
         <div className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-muted">
           実データの仮想購入履歴がまだありません。オッズや予測が未取得の場合、期待収益率や購入候補は算出できません。収益性は、確定した実データの履歴とモデル管理の評価を分けて確認してください。
         </div>
       )}
-
-      <div className="grid gap-3 md:grid-cols-2">
-        {(['horse', 'boat'] as const).map((s) => {
-          const r = bd.bySport.find((x) => x.sport === s)
-          return (
-            <div key={s} className={`card lift border-t-4 p-4 ${s === 'horse' ? 'border-t-horse' : 'border-t-boat'}`}>
-              <div className={`flex items-center gap-2 text-sm font-bold ${s === 'horse' ? 'text-horse' : 'text-boat'}`}><SportIcon sport={s} />{t().sport[s]}の回収率</div>
-              <div className={`figure mt-3 text-[44px] ${r?.roi == null ? '' : r.roi >= 1 ? 'text-pos' : 'text-neg'}`}><CountUp value={pct(r?.roi)} /></div>
-              <div className="num mt-1 flex gap-4 text-xs text-muted">
-                <span>確定購入 {r?.bets ?? 0}</span><span>的中率 {pct(r?.hitRate)}</span>
-                <span className={tone(r?.profit)}>損益 {signedYen(r?.profit ?? 0)}</span>
-              </div>
-            </div>
-          )
-        })}
-      </div>
 
       <div className="grid gap-5 xl:grid-cols-2">
         <Section title="月別確定損益">
@@ -96,18 +80,49 @@ export function PerformancePage() {
         </Section>
       </div>
 
-      <Section title="オッズ変動の影響" right={<span className="text-xs text-muted">購入時オッズ vs 確定オッズ（的中時のみ判明）</span>}>
-        <div className="grid grid-cols-2 gap-px bg-line md:grid-cols-4">
-          <Cell k="対象購入数" v={(bd.oddsDrift.bets ?? 0).toLocaleString()} />
-          <Cell k="平均 購入時オッズ" v={odds(bd.oddsDrift.avgOddsAtBet)} />
-          <Cell k="平均 確定オッズ" v={odds(bd.oddsDrift.avgFinalOdds)} />
-          <Cell k="期待値が消えた購入" v={(bd.oddsDrift.evLostCount ?? 0).toLocaleString()} cls={(bd.oddsDrift.evLostCount ?? 0) > 0 ? 'text-warn' : ''} />
-        </div>
-      </Section>
+      <div className="grid items-start gap-5 xl:grid-cols-2">
+        <Section title="候補1位のみ vs 複数購入" right={<span className="text-xs text-muted">同一レース・同一購入総額で比較</span>}>
+          {origin === 'all' ? <div className="px-4 py-4 text-sm text-muted">比較対象を混ぜないため、「実データ」または「サンプル」を選択してください。</div>
+            : rankComparison == null ? <div className="px-4 py-4 text-sm text-muted">比較データを読み込めませんでした。</div>
+            : <>
+              <div className="grid gap-px bg-line sm:grid-cols-2">
+                <ComparisonMetric title="実際の複数購入" value={rankComparison.multiple} />
+                <ComparisonMetric title="候補1位のみ（同じ総額を仮定）" value={rankComparison.firstOnly} />
+              </div>
+              <div className="space-y-1 px-4 py-3 text-xs text-muted">
+                <p>比較グループ {rankComparison.comparedGroupCount.toLocaleString()}件・対象レース {rankComparison.comparedRaceCount.toLocaleString()}件・購入総額 {yen(rankComparison.totalStake)}。全券が精算済みで順位1位の結果が確定したグループを対象にしています。</p>
+                <p>結果待ち {rankComparison.excludedPendingGroupCount.toLocaleString()}グループ、順位1位なし {rankComparison.excludedMissingRankOneGroupCount.toLocaleString()}グループ、順位不明 {rankComparison.excludedUnknownRankBetCount.toLocaleString()}買い目などは除外。1位のみは同じ総額を順位1位の実際の結果（不的中は払戻0）に当てる反実仮想で、1円未満は切り捨てます。利益の証明ではありません。</p>
+                {rankComparison.note && <p>{rankComparison.note}</p>}
+              </div>
+            </>}
+        </Section>
+        <Section title="オッズ変動の影響" right={<span className="text-xs text-muted">購入時オッズ vs 確定オッズ（的中時のみ判明）</span>}>
+          <div className="grid grid-cols-2 gap-px bg-line">
+            <Cell k="対象購入数" v={(bd.oddsDrift.bets ?? 0).toLocaleString()} />
+            <Cell k="平均 購入時オッズ" v={odds(bd.oddsDrift.avgOddsAtBet)} />
+            <Cell k="平均 確定オッズ" v={odds(bd.oddsDrift.avgFinalOdds)} />
+            <Cell k="期待値が消えた購入" v={(bd.oddsDrift.evLostCount ?? 0).toLocaleString()} cls={(bd.oddsDrift.evLostCount ?? 0) > 0 ? 'text-warn' : ''} />
+          </div>
+        </Section>
+      </div>
 
       <Section title="仮想購入履歴" right={<span className="num text-xs text-muted">{bets.length.toLocaleString()}点</span>}><PagedBets bets={bets} /></Section>
+
+      {/* Separate experimental ledger: kept after the normal results it must not be mixed with. */}
+      <ExperimentalPerformance />
     </div>
   )
+}
+
+function RoiMeter({ roi }: { roi: number | null }) {
+  const fill = roi == null ? 0 : Math.min(1, Math.max(0, roi / 2))
+  return <div className="mt-4">
+    <div className="relative h-2.5 rounded-[2px] border border-ink/20 bg-raised" role="img" aria-label={roi == null ? '回収率は未確定' : `回収率 ${pct(roi)}、損益分岐 100%`}>
+      <div className={`bar-grow h-full ${roi != null && roi >= 1 ? 'bg-pos' : 'bg-neg/80'}`} style={{ width: `${fill * 100}%` }} />
+      <div className="absolute -top-1 bottom-[-4px] left-1/2 w-[2px] -translate-x-1/2 bg-ink" />
+    </div>
+    <div className="num mt-1 flex justify-between text-[10px] text-faint"><span>0%</span><span className="font-bold text-muted">損益分岐 100%</span><span>200%</span></div>
+  </div>
 }
 
 const BET_PAGE = 50
@@ -134,7 +149,7 @@ function ComparisonMetric({ title, value }: { title: string; value: { stake: num
 
 export function ProfitabilityNotice({ origin, settledBets }: { origin: OriginFilter; settledBets: number }) {
   return (
-    <aside className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-muted" aria-label="収益性の評価について">
+    <aside className="caution-tape rounded-xl border border-line bg-surface py-3 pl-6 pr-4 text-sm leading-relaxed text-muted" aria-label="収益性の評価について">
       <p className="font-medium text-primary">期待収益率はモデル上の推定値であり、真のプラス期待値や利益を証明するものではありません。</p>
       <p className="mt-1">個々の購入の負けだけで予測の誤りとは判断できません。収益性の評価には、事前オッズを使った十分な out-of-sample 予測と、確定した実データの長期成績が必要です。</p>
       {origin === 'sample' ? (
