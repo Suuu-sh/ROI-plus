@@ -53,6 +53,16 @@ _MAX_EXPERIMENTAL_LABEL_PAGE_BYTES = 512 * 1024
 _MAX_EXPERIMENTAL_LABEL_PAGES = 10
 
 
+class ExperimentalLabelExportError(RuntimeError):
+    """Safe static diagnostic for authenticated official-label exports."""
+
+    def __init__(self, category: str):
+        allowed = {"http_401", "http_403", "http_404", "http_429", "http_5xx",
+                   "http_other", "transport_error", "invalid_json", "oversized_page",
+                   "invalid_envelope", "invalid_cursor", "page_limit_exceeded"}
+        self.failure_category = category if category in allowed else "transport_error"
+
+
 def _safe_ingest_error_code(exc: HTTPError) -> str | None:
     """Return only known, non-sensitive API error codes from a bounded body."""
     try:
@@ -275,24 +285,31 @@ def fetch_experimental_training_result_labels(target_date: str, *, base_url: str
             with open_request(request, timeout=30) as response:
                 body = response.read(_MAX_EXPERIMENTAL_LABEL_PAGE_BYTES + 1)
             if not body or len(body) > _MAX_EXPERIMENTAL_LABEL_PAGE_BYTES:
-                raise RuntimeError("experimental label page size invalid")
+                raise ExperimentalLabelExportError("oversized_page")
             payload = json.loads(body.decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, ValueError, UnicodeDecodeError, OSError) as exc:
-            raise RuntimeError("experimental label export unavailable") from None
+        except HTTPError as exc:
+            code = exc.code
+            category = (f"http_{code}" if code in {401, 403, 404, 429} else
+                        "http_5xx" if 500 <= code <= 599 else "http_other")
+            raise ExperimentalLabelExportError(category) from None
+        except (URLError, TimeoutError, OSError):
+            raise ExperimentalLabelExportError("transport_error") from None
+        except (ValueError, UnicodeDecodeError):
+            raise ExperimentalLabelExportError("invalid_json") from None
         if (not isinstance(payload, dict) or payload.get("schema") != "boat-official-k-result-label-export-v1"
                 or payload.get("date") != target_date or payload.get("limit") != 5
                 or not isinstance(payload.get("labels"), list) or len(payload["labels"]) > 5):
-            raise RuntimeError("experimental label page envelope invalid")
+            raise ExperimentalLabelExportError("invalid_envelope")
         pages.append(payload)
         labels.extend(payload["labels"])
         next_cursor = payload.get("nextCursor")
         if next_cursor is None:
             return pages
         if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
-            raise RuntimeError("experimental label cursor invalid or repeated")
+            raise ExperimentalLabelExportError("invalid_cursor")
         seen_cursors.add(next_cursor)
         cursor = next_cursor
-    raise RuntimeError("experimental label export exceeded the page safety limit")
+    raise ExperimentalLabelExportError("page_limit_exceeded")
 
 
 def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False,

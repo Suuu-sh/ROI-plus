@@ -23,7 +23,8 @@ from edgelab.sync import (collect_experimental_training_results,
                           fetch_prerace_capture_archives)
 
 _SAFE_EXCEPTION_CLASSES = {"ValueError", "TypeError", "KeyError", "AttributeError", "IndexError", "NameError",
-                           "OverflowError", "OSError", "RuntimeError", "ImportError", "AssertionError"}
+                           "OverflowError", "OSError", "RuntimeError", "ImportError", "AssertionError",
+                           "ExperimentalLabelExportError"}
 _SAFE_STAGES = {"input_validation", "credentials", "load_local_cache", "archive_export",
                 "archive_import", "save_local_cache", "training_row_build", "coverage_audit",
                 "model_fit", "report_write", "official_result_collection", "result_label_export",
@@ -33,10 +34,14 @@ _SAFE_STAGES = {"input_validation", "credentials", "load_local_cache", "archive_
 class PipelineStageFailure(Exception):
     """Sanitized failure carrying only a fixed stage and allowlisted class name."""
 
-    def __init__(self, stage: str, exception_class: str):
+    def __init__(self, stage: str, exception_class: str, failure_category: str | None = None):
         self.stage = stage if stage in _SAFE_STAGES else "unknown_stage"
         self.exception_class = (exception_class if exception_class in _SAFE_EXCEPTION_CLASSES
                                 else "OtherError")
+        allowed = {"http_401", "http_403", "http_404", "http_429", "http_5xx",
+                   "http_other", "transport_error", "invalid_json", "oversized_page",
+                   "invalid_envelope", "invalid_cursor", "page_limit_exceeded"}
+        self.failure_category = failure_category if failure_category in allowed else None
 
 
 def _stage_call(stage: str, callback, *args, **kwargs):
@@ -45,7 +50,8 @@ def _stage_call(stage: str, callback, *args, **kwargs):
     except Exception as exc:
         if isinstance(exc, PipelineStageFailure):
             raise
-        raise PipelineStageFailure(stage, type(exc).__name__) from None
+        raise PipelineStageFailure(stage, type(exc).__name__,
+                                   getattr(exc, "failure_category", None)) from None
 
 
 def _refresh_same_day_k(rows: dict[str, list[dict[str, Any]]], day: date,
@@ -137,6 +143,7 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
     # today's official K file, and only when no same-day completed result is in
     # the cache. This is one bounded request; no historical K data is retimed.
     if end == datetime.now(ZoneInfo("Asia/Tokyo")).date():
+        collection = None
         try:
             k_refresh = _refresh_same_day_k(rows, end)
         except Exception:
@@ -169,6 +176,10 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
             report["sameDayOfficialResultLabels"] = {
                 "status": "unavailable", "failureStage": exc.stage,
                 "exceptionClass": exc.exception_class,
+                **({"failureCategory": exc.failure_category} if exc.failure_category else {}),
+                **({"collectorStatus": collection.get("collectorStatus"),
+                    "targets": collection.get("targets", 0), "verified": collection.get("verified", 0),
+                    "attempted": collection.get("attempted", 0)} if collection else {}),
                 "featureRowsModified": 0,
             }
 

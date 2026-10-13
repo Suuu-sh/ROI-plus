@@ -203,3 +203,17 @@ def test_label_collection_skipped_is_a_nonfatal_status_for_followup_export():
     with patch("edgelab.sync.urlopen", return_value=response):
         result = collect_experimental_training_results(base_url="https://example.test", token="test-only")
     assert result["collectorStatus"] == "skipped"
+
+
+def test_result_export_failure_category_is_static_and_preserves_collector_counts():
+    from edgelab.sync import ExperimentalLabelExportError
+    from edgelab.trifecta_experimental_pipeline import _stage_call
+    collector = {"collectorStatus": "success", "targets": 4, "verified": 2, "attempted": 4}
+    try:
+        _stage_call("result_label_export",
+                    lambda: (_ for _ in ()).throw(ExperimentalLabelExportError("http_404")))
+    except PipelineStageFailure as exc:
+        assert exc.stage == "result_label_export"
+        assert exc.exception_class == "ExperimentalLabelExportError"
+        assert exc.failure_category == "http_404"
+    assert collector == {"collectorStatus": "success", "targets": 4, "verified": 2, "attempted": 4}
