@@ -1,5 +1,7 @@
+import hashlib
 import json
 from io import BytesIO
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -184,7 +186,7 @@ def test_sync_prioritizes_parent_rows_then_results_and_payouts_before_entries(mo
 
 
 @pytest.mark.parametrize("table", [
-    "results", "odds_snapshots", "predictions", "ticket_predictions",
+    "odds_snapshots", "predictions", "ticket_predictions",
 ])
 def test_race_related_ingests_chunk_at_50_rows(monkeypatch, table):
     payload_sizes = []
@@ -202,7 +204,7 @@ def test_race_related_ingests_chunk_at_50_rows(monkeypatch, table):
     assert len(result[table]) == 3
 
 
-@pytest.mark.parametrize("table", ["races", "payouts", "entries"])
+@pytest.mark.parametrize("table", ["races", "results", "payouts", "entries"])
 def test_sequential_lookup_ingests_use_smaller_chunks(monkeypatch, table):
     payload_sizes = []
 
@@ -217,24 +219,84 @@ def test_sequential_lookup_ingests_use_smaller_chunks(monkeypatch, table):
     assert payload_sizes == [10, 10, 3]
     assert sum(payload_sizes) == 23
     assert len(result[table]) == 3
+    diagnostics = result["_ingest_diagnostics"]
+    assert [item["row_count"] for item in diagnostics] == [10, 10, 3]
+    assert [item["chunk_index"] for item in diagnostics] == [1, 2, 3]
+    assert all(item["chunk_count"] == 3 and item["attempt_count"] == 1
+               and len(item["attempt_ids"]) == 1 for item in diagnostics)
+    assert all(len(item["payload_sha256"]) == 64 for item in diagnostics)
+    assert all(item["table"] == table for item in diagnostics)
+    assert "race_id" not in json.dumps(diagnostics)
 
 
-def test_ingest_retries_one_timed_out_idempotent_chunk(monkeypatch):
+def test_dry_run_results_outbox_uses_live_ten_row_chunk_size(tmp_path):
+    rows = [{"id": f"result-{index}"} for index in range(23)]
+    result = sync.sync_rows({"results": rows}, dry_run=True, output_dir=tmp_path)
+    chunks = [json.loads(Path(path).read_text(encoding="utf-8")) for path in result["files"]]
+    assert [len(chunk) for chunk in chunks] == [10, 10, 3]
+    assert [row["id"] for chunk in chunks for row in chunk] == [row["id"] for row in rows]
+
+
+def test_ingest_retries_timeout_after_commit_with_same_idempotent_results_chunk(monkeypatch):
     requests = []
+    committed = {}
 
-    def timeout_then_accept(req, **_kwargs):
-        requests.append(req.data)
+    def timeout_after_commit(req, **_kwargs):
+        payload = json.loads(req.data)
+        requests.append(req)
+        changed = 0
+        for row in payload:
+            natural_key = (row["race_id"], row["number"])
+            if natural_key not in committed:
+                committed[natural_key] = row
+                changed += 1
         if len(requests) == 1:
-            raise TimeoutError("response timed out")
-        return _Response({"upserted": 1, "changed": 0})
+            raise TimeoutError("response lost after commit")
+        return _Response({"upserted": len(payload), "changed": changed})
 
-    monkeypatch.setattr(sync, "urlopen", timeout_then_accept)
+    row = {"race_id": "boat-20261013-01-01", "number": 1,
+           "finish_order": 1, "data_origin": "real"}
+    monkeypatch.setattr(sync, "urlopen", timeout_after_commit)
     monkeypatch.setattr(sync.time, "sleep", lambda _seconds: None)
-    result = sync.sync_rows({"races": [{"id": "race"}]},
+    result = sync.sync_rows({"results": [row]},
                             base_url="https://example.test", token="t")
+
     assert len(requests) == 2
-    assert requests[0] == requests[1]
-    assert result["races"]["noop"] is True
+    assert requests[0].data == requests[1].data
+    assert len(committed) == 1
+    assert result["results"] == {"status": 200, "upserted": 1, "changed": 0, "noop": True}
+    diagnostic = result["_ingest_diagnostics"][0]
+    assert diagnostic["attempt_count"] == 2
+    assert len(diagnostic["attempt_ids"]) == 2
+    assert diagnostic["attempt_ids"][0] != diagnostic["attempt_ids"][1]
+    assert diagnostic["chunk_id"] in diagnostic["attempt_ids"][0]
+    assert diagnostic["row_count"] == 1
+    assert diagnostic["payload_sha256"] == hashlib.sha256(requests[0].data).hexdigest()
+    assert row["race_id"] not in json.dumps(diagnostic)
+
+
+def test_timeout_failure_includes_safe_chunk_and_attempt_diagnostics(monkeypatch):
+    requests = []
+    row = {"race_id": "boat-private-payload", "number": 1,
+           "finish_order": 1, "data_origin": "real"}
+
+    def timeout(req, **_kwargs):
+        requests.append(req)
+        raise TimeoutError("response timed out")
+
+    monkeypatch.setattr(sync, "urlopen", timeout)
+    monkeypatch.setattr(sync.time, "sleep", lambda _seconds: None)
+    with pytest.raises(RuntimeError, match="ingest results failed") as error:
+        sync.sync_rows({"results": [row]}, base_url="https://example.test", token="t")
+
+    message = str(error.value)
+    assert len(requests) == 2
+    assert requests[0].data == requests[1].data
+    assert "chunk_id=" in message and "attempt_id=" in message
+    assert "attempt=2/2" in message and "chunk=1/1" in message
+    assert "attempt_ids=" in message and "row_count=1" in message
+    assert "payload_sha256=" in message
+    assert row["race_id"] not in message and "finish_order" not in message
 
 
 def test_ingest_does_not_retry_non_timeout_or_repeat_timeout(monkeypatch):
