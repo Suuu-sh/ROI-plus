@@ -297,3 +297,5 @@ def test_experimental_workflow_schedules_learning_only_and_gates_registry_foreca
     assert "steps.mode.outputs.value == 'train_and_forecast'" in workflow
     assert "steps.mode.outputs.value == 'forecast_only'" in workflow
     assert "steps.mode.outputs.value != 'learning_only'" in workflow
+    assert "EDGELAB_API_URL: https://roi-plus-api.suuu-sh.workers.dev" in workflow
+    assert "secrets.EDGELAB_API_URL" not in workflow

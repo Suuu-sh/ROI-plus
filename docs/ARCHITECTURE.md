@@ -104,7 +104,7 @@ T-30 / T-10 の比較観測は秒単位のスケジューラーがないため�
 - 予測時点で未公開の情報を使わない。特に結果を学習特徴量にしない。新しい特徴量・collector を追加するときは `available_at` と時刻の意味をテストする。
 - ingest は自然キー upsert 前提。再実行で重複や新しい `data_origin` の混入を起こさない。サンプルと実データを統合する変更はしない。
 - 実購入・外部決済は存在しない。自動 bet も仮想 D1 レコード。モデル昇格は明示操作であり、学習や Actions に自動昇格を足さない。
-- API / Actions / Wrangler の秘密は値ではなく変数名だけを扱う。該当名: `INGEST_TOKEN`, `PROXY_TOKEN`, `EDGELAB_API_URL`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`。Actions では日次 workflow が4名を参照し、retrain workflow は `EDGELAB_API_URL` と `INGEST_TOKEN` を参照する。Worker の非秘密フラグ名は `ENABLE_AUTO_BET`, `ENABLE_BOATRACE_ODDS_SCRAPE`。
+- API / Actions / Wrangler の秘密は値ではなく変数名だけを扱う。Actions の認証 Secret は `INGEST_TOKEN`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`。`EDGELAB_API_URL` は秘密ではなく、API を直接呼ぶ tracked Actions workflow では canonical API Worker URL を固定する。ローカル Python は引き続き環境変数で接続先を指定できる。Worker の非秘密フラグ名は `ENABLE_AUTO_BET`, `ENABLE_BOATRACE_ODDS_SCRAPE`。
 - `data/raw/`, `data/private_fixtures/`, `ml/data/` はローカル／キャッシュ用途で、ignore 対象。公式データや運用 state を不用意に追加・出力しない。Wrangler のローカル秘密ファイルなど、秘密値を含むものも追跡・表示しない。
 - `npm run dev` は起動前に `db:reset` を実行し、**ローカル D1 state を削除して**マイグレーションとサンプルを入れ直す。重要なローカルデータを保持したい場合は起動しない。
 
@@ -113,10 +113,10 @@ T-30 / T-10 の比較観測は秒単位のスケジューラーがないため�
 - `.github/workflows/daily.yml`: cron は UTC `00:30`, `02:00`, `04:00`, `14:30`（JST 09:30, 11:00, 13:00, 23:30）と手動実行。朝の複数回は GitHub schedule の遅延・欠落に備える。Python 3.12 / Node 22 で日次 pipeline を実行する。
 - `.github/workflows/retrain.yml`: 毎週月曜 UTC `02:41`（JST 11:41）と手動実行。boat の候補学習と比較を行い、候補の `models` 行だけを同期する。
 - `.github/workflows/trifecta-experimental-pipeline.yml`: UTC `00:50`, `04:20`, `14:50`（JST 09:50, 13:20, 23:50）の schedule は `learning_only` 固定で、PIT archive/結果ラベル取込、weather-missing experimental候補の学習・shadow比較・artifact保存のみ行う。registry登録・forecast submissionは行わない。手動の `train_and_forecast` と登録済みartifactを指定する `forecast_only` は維持。shadow holdoutはrace-date block単位、train-only lane-order baseline比較で、全cohort fit artifactの独立検証を意味しない。
-- forecast submission のPython `urllib` 経路で観測された403は未解決。学習専用scheduleは認証・UA・経路・security設定を変更せず、この拒否を修復・迂回しない。候補artifact保存を本番推論／仮想購入の稼働証明とみなさない。
+- forecast submission のPython `urllib` 経路で観測された403を受け、API を直接呼ぶ tracked Actions workflow は canonical `https://roi-plus-api.suuu-sh.workers.dev` に固定し、`INGEST_TOKEN` Bearer 認証は維持する。`.github/workflows/verify-api-routing.yml` は手動実行の読み取り専用 `GET /api/health` でHTTP 200と API revision marker を確認する。workflow の静的設定や health 成功だけでは forecast 保存を証明しない。学習専用 schedule は従来どおり認証・UA・security 設定を変更せず、候補 artifact 保存を本番推論／仮想購入の稼働証明とみなさない。
 - `.github/workflows/deploy-workers.yml`: `main` への push のうち API / Web / shared、root npm manifest・lockfile、D1 migrations、readiness gate の本体・テスト、またはこの workflow 自体を含む変更で実行する。migration readiness テスト、typecheck、全テスト、Worker dry run / web build、読み取り専用の D1 ledger readiness を通過した後に API deploy・health check・Web deploy を行う。PR 更新では実行しない。workflow 自身と gate 入力を paths に含め、デプロイ設定や fail-closed gate の修正も通常の検証経路を通す。
 - 両workflowは学習state/cacheの競合を避ける共通concurrency groupを使う。`ml/data` と `ml/artifacts` をcacheで持ち越し、採点・学習レポートをActions artifactへ保存する。外部サービスのスケジュール実行は常時稼働や実行時刻を保証しない。
-- Actions Secret 名は `EDGELAB_API_URL`, `INGEST_TOKEN`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`。値、アカウント ID の実値、ローカル保管場所は文書・ログ・チャットに書かない。Cloudflare Access の設定や Worker Secret はコード外で管理する。
+- Actions Secret 名は `INGEST_TOKEN`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`。値、アカウント ID の実値、ローカル保管場所は文書・ログ・チャットに書かない。Cloudflare Access の設定や Worker Secret はコード外で管理する。
 
 ## 開発・テスト・デプロイ
 

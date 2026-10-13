@@ -47,7 +47,7 @@ jobs:
         id: recovery
         env:
           PYTHONPATH: ml
-          EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
+          EDGELAB_API_URL: https://roi-plus-api.suuu-sh.workers.dev
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
