@@ -54,6 +54,8 @@ GitHub Actions / ローカル Python (ml/)
 
 Experimental T-60 三連単の置かれた券は別テーブル `experimental_paper_bets` に保存され、通常の `/api/bets`・損益集計・残高には含めない。各券の仮想購入額は100円以上かつ100円単位で、Kelly予算が100円に届かない判断は購入せず見送る。旧実装が作成した条件外の未精算券は `experimental_paper_bet_reconciliations` に原記録を残したまま無効化・返金し、精算と実験成績から除外する。券単位の参照は `GET /api/bets/experimental` を使う。この API は固定 experiment の placed ticket のみ（実データのボートに限定、最大500件、新しい順）を明示的な `recordKind: 'experimental_paper'` として返し、棄権判断は返さない。無効化した旧券は監査用に `status: 'void'` と返す。`dataOrigin: 'real'` は実データ由来を示すだけで実購入ではなく、通常履歴とも分離した仮想実験の記録である。応答は `private, no-store` で、通常履歴の短期 read cache を通らない。
 
+`GET /api/performance/experimental` は保存済み実験券の結果から、柔軟購入額と「同じ券を各100円」とした固定額の事後比較を返す。新しい台帳・購入判断・bankroll更新は行わない。比較はレース単位で全券が won/lost に確定した場合だけ同じ券集合を使い、openは保留、void・reconciliation・100円単位で払戻復元できない券は除外する。さらに実験の現行レース上限（10券・合計1,000円）を超える記録は比較から除く。固定額払戻は精算済みの実験払戻を実購入額の100円単位数で割って復元するため、同額予算比較や独立戦略の成績を意味しない。
+
 ## AI・データフロー
 
 1. `ml/edgelab/collectors/` が公式ボートレース B/K ファイルと、日次 Action 内の上限付き beforeinfo 取得を行い、`parsers/` が正規化する。日次処理はローカル JSON store を再利用し、再実行できる自然キーでデータをまとめる。

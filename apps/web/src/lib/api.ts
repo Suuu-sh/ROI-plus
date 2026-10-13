@@ -121,6 +121,11 @@ export interface ExperimentalPerformance {
   model: { id: string; status: 'candidate' | 'experimental'; artifactSha256: string; schemaVersion: string; trainedAt: string } | null
   bankroll: { initial: 100000; available: number }
   metrics: { races: number; bets: number; stake: number; payout: number; profit: number; roi: number | null }
+  comparison?: {
+    actual: { tickets: number; stake: number; payout: number; profit: number; roi: number | null }
+    fixed100: { tickets: number; stake: number; payout: number; profit: number; roi: number | null }
+    settledRaceCount: number; pendingRaceCount: number; excludedRaceCount: number
+  }
   decisions: ExperimentalDecision[]
   sizing: { method: 'fractional-kelly-portfolio'; minimumTicketStake?: 100; stakeUnit?: 100; perRaceCombinedCap: 1000; dailyCap: null; balanceGuard: 'nonnegative-virtual-balance' }
 }

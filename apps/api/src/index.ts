@@ -12,6 +12,7 @@ import { collectResults, resultUrl, RESULTS_SOURCE } from './services/collectBoa
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
 import { sizeExperimentalPortfolioResult } from './services/experimentalSizing.js';
+import { buildExperimentalStakeComparison } from './services/experimentalStakeComparison.js';
 import { splitRowsForD1 } from './services/d1Batch.js';
 import { boatArchiveEvidenceValid } from './services/boatArchiveEvidence.js';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
@@ -1470,6 +1471,11 @@ app.get('/performance/experimental',async c=>{
    COALESCE(SUM(CASE WHEN status IN ('won','lost') THEN profit ELSE 0 END),0) profit
    FROM experimental_paper_bets b
    WHERE NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id)`);
+ const comparisonRows=await all<{race_id:string;stake:number;status:string;payout:number|null;reconciled:number}>(db,`SELECT b.race_id,b.stake,b.status,b.payout,
+   EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id) reconciled
+   FROM experimental_paper_bets b JOIN experimental_paper_decisions d ON d.id=b.decision_id
+   WHERE d.experiment_key=? AND b.data_origin='real' ORDER BY b.race_id,b.id`,experimentKey);
+ const comparison=buildExperimentalStakeComparison(comparisonRows.map(row=>({raceId:row.race_id,stake:Number(row.stake),status:row.status,payout:row.payout==null?null:Number(row.payout),reconciled:Boolean(row.reconciled)})));
  const rows=await all<any>(db,`SELECT d.race_id,r.race_date,r.race_no,v.name venue_name,
    CASE WHEN d.outcome='placed' AND EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q JOIN experimental_paper_bets qb ON qb.id=q.bet_id WHERE qb.decision_id=d.id)
      AND NOT EXISTS(SELECT 1 FROM experimental_paper_bets vb WHERE vb.decision_id=d.id AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations vq WHERE vq.bet_id=vb.id)) THEN 'void' ELSE d.outcome END outcome,
@@ -1496,6 +1502,7 @@ app.get('/performance/experimental',async c=>{
    forecastCoverage:{date:coverageDate,storedRaceCount:coverage.length,races:coverage.map((x:any)=>({raceId:x.race_id,predictedAt:x.predicted_at,predictionCount:120}))},
    bankroll:{initial:Number(balance?.initial_balance??100000),available:Number(balance?.available_balance??100000)},
    metrics:{races:Number(n.races),bets:Number(n.bets),stake:Number(n.stake),payout:Number(n.payout),profit:Number(n.profit),roi:Number(n.settled_stake)>0?Number(n.payout)/Number(n.settled_stake):null},
+   comparison,
    decisions:rows.map((x:any)=>({raceId:x.race_id,raceDate:x.race_date,raceNo:Number(x.race_no),venueName:x.venue_name??null,outcome:x.outcome,reason:x.reason??null,stake:Number(x.stake),modelId:x.model_id,decidedAt:x.decided_at,probability:x.probability==null?null:Number(x.probability),odds:x.odds==null?null:Number(x.odds),uncertainty:x.uncertainty==null?null:Number(x.uncertainty),expectedRoi:x.expected_roi==null?null:Number(x.expected_roi)})),
    sizing:{method:'fractional-kelly-portfolio',minimumTicketStake:100,stakeUnit:100,perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'}});
 });
