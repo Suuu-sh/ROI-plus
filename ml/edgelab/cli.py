@@ -337,14 +337,36 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
         "venues": __import__("edgelab.venues", fromlist=["venue_rows"]).venue_rows(),
         "models": rows.get("models", []),
     }
-    from edgelab.sync import sync_rows
-    # Before outcome rows can mark a race finished, persist official K-file
-    # non-finisher markers for open-bet races. A 429 in any phase still fails
-    # the run; the ordering only determines which essential facts go first.
+    from edgelab.sync import WriteBudgetRefused, sync_rows
+    observations_to_sync = payload.pop("prerace_observations")
+    # Persist settlement-critical input first. A previous-day race already has
+    # a persisted row because the open bet references it; don't spend budget
+    # re-upserting it. K-file non-finisher markers must arrive before outcomes
+    # can mark the race finished.
     prior_entry_sync = sync_rows({"entries": prior_nonfinisher_entries})
     settlement_sync = sync_rows(settlement_payload)
     daily_sync = sync_rows(payload)
     synced = _merge_sync_responses(prior_entry_sync, settlement_sync, daily_sync)
+    observation_sync_status = "not_needed"
+    if observations_to_sync:
+        try:
+            synced.update(sync_rows({"prerace_observations": observations_to_sync}))
+            observation_sync_status = "synced"
+        except WriteBudgetRefused as exc:
+            if exc.table != "prerace_observations":
+                raise
+            # This capture is bounded auxiliary evidence. Core race, result,
+            # payout, entry, forecast, and run-log sync already completed, so
+            # preserve that batch and report exactly where the optional upload
+            # stopped instead of failing the daily workflow.
+            refusal = {"status": "budget_refused", "http_status": 429,
+                       "chunk": exc.chunk, "total_chunks": exc.total_chunks}
+            observation_responses = [*exc.completed_chunks, refusal]
+            synced["prerace_observations"] = (
+                observation_responses[0] if len(observation_responses) == 1
+                else observation_responses)
+            observation_sync_status = (
+                "partial_budget_refusal" if exc.completed_chunks else "budget_refused")
     from edgelab.learning import score_feedback
     learning_report = score_feedback(rows)
     collection_runs = [run for run in payload["collection_runs"] if run.get("sport") == "boat"]
@@ -361,6 +383,7 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
             "forecast_reason": forecast_reason,
             "predictions": len(ticket_predictions), "ticket_predictions": len(ticket_predictions),
             "prerace_observations": beforeinfo_result, "sync": synced,
+            "prerace_observation_sync_status": observation_sync_status,
             "feedback_models": len(learning_report["models"])}
 
 
