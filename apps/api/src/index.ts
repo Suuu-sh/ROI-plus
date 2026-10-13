@@ -12,6 +12,7 @@ import { collectResults, resultUrl, RESULTS_SOURCE } from './services/collectBoa
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
 import { sizeExperimentalPortfolio } from './services/experimentalSizing.js';
+import { splitRowsForD1 } from './services/d1Batch.js';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
@@ -455,7 +456,7 @@ async function settleExperimentalOpen(db: Db) {
  const open=await all<any>(db,`SELECT b.* FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id
    WHERE b.status='open' AND r.status='finished' AND r.data_origin='real'
    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-   ORDER BY b.placed_at,b.id`);
+   ORDER BY b.placed_at,b.id LIMIT 4`);
  let settled=0;
  for(const bet of open){
    const integrity=await first<any>(db,`SELECT
@@ -493,7 +494,9 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now()) {
  if(metadata.trainingMode!=='experimental'||metadata.experimentalOnly!==true||metadata.ticketArtifactSha256!==model.artifact_sha256
     ||metadata.boatFeatureSchemaVersion!=='boat-prerace-v2-no-weather-experimental-v1')return report;
  const date=jstRaceDate(new Date(decisionAt));
- const races=await all<any>(db,"SELECT * FROM races WHERE sport='boat' AND data_origin='real' AND status='scheduled' AND race_date=? AND betting_cutoff_source=? ORDER BY betting_cutoff_at,id LIMIT 24",date,TRUSTED_CUTOFF_SOURCE);
+ const eligibleCutoffFrom=isoJstAt(decisionAt+PRIMARY_PAPER_OFFSET_MS-PRIMARY_PAPER_TOLERANCE_MS);
+ const eligibleCutoffTo=isoJstAt(decisionAt+PRIMARY_PAPER_OFFSET_MS+PRIMARY_PAPER_TOLERANCE_MS);
+ const races=await all<any>(db,"SELECT * FROM races WHERE sport='boat' AND data_origin='real' AND status='scheduled' AND race_date=? AND betting_cutoff_source=? AND julianday(betting_cutoff_at) BETWEEN julianday(?) AND julianday(?) ORDER BY betting_cutoff_at,id LIMIT 1",date,TRUSTED_CUTOFF_SOURCE,eligibleCutoffFrom,eligibleCutoffTo);
  for(const race of races){
    const timing=primaryPaperTiming(race.betting_cutoff_at,decisionAt,race.betting_cutoff_source,race.betting_cutoff_observed_at);
    if(!timing.eligible)continue;
@@ -528,26 +531,35 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now()) {
    const stakes=reason?[]:sizeExperimentalPortfolio(tickets,Number(balance?.available_balance??0));
    const totalStake=stakes.reduce((sum,x)=>sum+x.stake,0),outcome=totalStake?'placed':'abstained';
    const abstentionReason=reason??(Number(balance?.available_balance??0)<=0?'virtual_balance_unavailable':'no_conservative_positive_edge');
-   const decisionId=crypto.randomUUID(),decidedAt=isoJstAt(decisionAt);
+   const decisionId=crypto.randomUUID();
    const snapshot={phase:'experimental_t60',cutoffAt:race.betting_cutoff_at,cutoffSource:race.betting_cutoff_source,cutoffObservedAt:race.betting_cutoff_observed_at,targetAt,predictedAt:predictionAt,
      captureArchiveId:archiveRow?.id??null,sourceHashes:archive?{beforeinfo:archive.beforeinfo.sha256,racelist:archive.raceList.sha256,odds:archive.trifectaOdds.sha256}:null,
      predictionCount:predictions.length,predictionDigest:predictions.length?await sha256Json(predictions):null,
      sizing:{method:'fractional-kelly-portfolio',fraction:0.25,uncertaintyMultiplier:1.96,perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'},tickets:stakes};
    if(!db.batch)return report;
+   if(!await reserveWorkerWrites(db,predictions.length+stakes.length+3))continue;
+   const commitAt=Date.now();
+   if(!primaryPaperTiming(race.betting_cutoff_at,commitAt,race.betting_cutoff_source,race.betting_cutoff_observed_at).eligible)continue;
+   if(totalStake>0&&(!archive||commitAt-Date.parse(archiveRow?.captured_at??'')>5*60_000
+      ||Date.parse(archive?.beforeinfo?.capturedAt??'')>commitAt||Date.parse(archive?.raceList?.capturedAt??'')>commitAt
+      ||Date.parse(archive?.trifectaOdds?.capturedAt??'')>commitAt))continue;
+   const committedAt=isoJstAt(commitAt);
    const statements:Statement[]=[];
-   if(totalStake>0)statements.push(db.prepare(`UPDATE experimental_bankroll SET available_balance=available_balance-?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND available_balance>=? AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)`).bind(totalStake,decidedAt,totalStake,race.id));
+   if(totalStake>0)statements.push(db.prepare(`UPDATE experimental_bankroll SET available_balance=available_balance-?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND available_balance>=? AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)`).bind(totalStake,committedAt,totalStake,race.id));
    statements.push(totalStake>0
      ?db.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,capture_archive_id,decision_at,outcome,reason,total_stake,sizing_method,snapshot_json)
-       SELECT ?,'boat-trifecta-small-sample-v1',?,?,?,?,'placed',NULL,?,'fractional-kelly-portfolio',? WHERE changes()>0 AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)`).bind(decisionId,race.id,model.id,archiveRow.id,decidedAt,totalStake,JSON.stringify(snapshot),race.id)
+       SELECT ?,'boat-trifecta-small-sample-v1',?,?,?,?,'placed',NULL,?,'fractional-kelly-portfolio',? WHERE changes()>0 AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)`).bind(decisionId,race.id,model.id,archiveRow.id,committedAt,totalStake,JSON.stringify(snapshot),race.id)
      :db.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,capture_archive_id,decision_at,outcome,reason,total_stake,sizing_method,snapshot_json)
-       VALUES(?,'boat-trifecta-small-sample-v1',?,?,?,?,?,?,0,'fractional-kelly-portfolio',?) ON CONFLICT(experiment_key,race_id) DO NOTHING`).bind(decisionId,race.id,model.id,archiveRow?.id??null,decidedAt,'abstained',abstentionReason,JSON.stringify(snapshot)));
+       VALUES(?,'boat-trifecta-small-sample-v1',?,?,?,?,?,?,0,'fractional-kelly-portfolio',?) ON CONFLICT(experiment_key,race_id) DO NOTHING`).bind(decisionId,race.id,model.id,archiveRow?.id??null,committedAt,'abstained',abstentionReason,JSON.stringify(snapshot)));
    if(totalStake>0){
-     const values:any[]=[];const cols='id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at';
-     const selects=stakes.map((x:any,index:number)=>{values.push(crypto.randomUUID(),decisionId,race.id,model.id,x.selection,x.stake,x.probability,x.probStd,x.odds,x.expectedRoi,decidedAt);return `SELECT ${index===0?cols.split(',').map((name:string)=>`? AS ${name}`).join(','):'?,?,?,?,?,?,?,?,?,?,?'}`;}).join(' UNION ALL ');
-     statements.push(db.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
-       SELECT id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,'open','real' FROM (${selects}) WHERE EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE id=?)`).bind(...values,decisionId));
+     for(const chunk of splitRowsForD1(stakes,11,1)){
+       const values:any[]=[];const cols='id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at';
+       const selects=chunk.map((x:any,index:number)=>{values.push(crypto.randomUUID(),decisionId,race.id,model.id,x.selection,x.stake,x.probability,x.probStd,x.odds,x.expectedRoi,committedAt);return `SELECT ${index===0?cols.split(',').map((name:string)=>`? AS ${name}`).join(','):'?,?,?,?,?,?,?,?,?,?,?'}`;}).join(' UNION ALL ');
+       statements.push(db.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+         SELECT id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,'open','real' FROM (${selects}) WHERE EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE id=?)`).bind(...values,decisionId));
+     }
    }
-   if(!await reserveWorkerWrites(db,predictions.length+stakes.length+3))continue;
+   if(!primaryPaperTiming(race.betting_cutoff_at,Date.now(),race.betting_cutoff_source,race.betting_cutoff_observed_at).eligible)continue;
    const results=await db.batch(statements) as any[];
    const decisionChanges=Number(results?.[totalStake>0?1:0]?.meta?.changes??0);
    if(decisionChanges&&totalStake){report.placedRaces++;report.placedBets+=stakes.length;}
@@ -1353,7 +1365,7 @@ app.post('/ingest/experimental-trifecta/forecast',async c=>{
  if(!isRecord(body)||body.schema!=='edgelab-experimental-trifecta-forecast-v1'||body.trainingMode!=='experimental'||body.experimentalOnly!==true
     ||body.ticketModelSchemaVersion!=='ticket-selection-v1'||body.ticketPredictionSemantics!=='exact-selection-probability-v1'
     ||body.boatFeatureSchemaVersion!=='boat-prerace-v2-no-weather-experimental-v1'||!isSha256(body.artifactSha256)
-    ||!Array.isArray(body.races)||body.races.length<1||body.races.length>4) return jsonError(c,'invalid experimental forecast envelope');
+    ||!Array.isArray(body.races)||body.races.length!==1) return jsonError(c,'experimental forecast envelope must contain exactly one race');
  const db=c.env.DB,model=await first<any>(db,'SELECT * FROM experimental_models WHERE id=?',body.modelId);
  if(!model||model.artifact_sha256!==body.artifactSha256)return jsonError(c,'experimental model or artifact SHA is not registered',409);
  const decisionAt=Date.now(),accepted:any[]=[];
@@ -1383,8 +1395,8 @@ app.post('/ingest/experimental-trifecta/forecast',async c=>{
  const statements:Statement[]=[];
  for(const item of accepted){
    const {race,forecast,predictions}=item;
-   for(let offset=0;offset<predictions.length;offset+=50){
-     const chunk=predictions.slice(offset,offset+50),values:any[]=[];
+   for(const chunk of splitRowsForD1<any>(predictions,9)){
+     const values:any[]=[];
      for(const row of chunk)values.push(crypto.randomUUID(),race.id,model.id,row.selection,Number(row.probability),Number(row.prob_std),forecast.predictedAt,'ticket-selection-v1',model.artifact_sha256);
      statements.push(db.prepare(`INSERT INTO experimental_ticket_predictions(id,race_id,model_id,selection,probability,prob_std,predicted_at,feature_schema_version,artifact_sha256,data_origin)
        VALUES ${chunk.map(()=>"(?,?,?,?,?,?,?,?,?,'real')").join(',')} ON CONFLICT(race_id,model_id,selection,predicted_at) DO NOTHING`).bind(...values));

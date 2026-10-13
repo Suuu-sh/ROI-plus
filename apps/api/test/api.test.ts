@@ -1148,6 +1148,8 @@ it('admits an experimental portfolio only with live-cutoff archive and full sour
  sqlite.prepare("INSERT OR IGNORE INTO venues(id,sport,name) VALUES('99','boat','Experimental source fixture')").run();
  sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at,betting_cutoff_at,betting_cutoff_source,betting_cutoff_observed_at)
   VALUES(?,'boat','99',?,1,?,'scheduled','real',? ,?,'boatrace-racelist-cutoff-v1',?)`).run(raceId,raceDate,jstIso(at+180_000),jstIso(at),jstIso(at+60_000),jstIso(at-1_000));
+ for(let n=0;n<24;n++)sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at,betting_cutoff_at,betting_cutoff_source,betting_cutoff_observed_at)
+  VALUES(?,'boat','99',?,? ,?,'scheduled','real',?,?, 'boatrace-racelist-cutoff-v1',?)`).run(`${raceId}-past-${n}`,raceDate,n+2,jstIso(at-60_000),jstIso(at-180_000),jstIso(at-120_000+n*1000),jstIso(at-120_000));
  for(let n=1;n<=6;n++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,available_at,features_json,data_origin) VALUES(?,?,?,?,?,?,'real')").run(`${raceId}-e${n}`,raceId,n,`Boat ${n}`,jstIso(at-60_000),JSON.stringify({racer_id:String(1000+n)}));
  const selections:string[]=[];for(let a=1;a<=6;a++)for(let b=1;b<=6;b++)for(let d=1;d<=6;d++)if(a!==b&&a!==d&&b!==d)selections.push(`${a}-${b}-${d}`);
  const archive={schema:'boat-prerace-capture-v1',race:{id:raceId,date:raceDate,venueCode:'99',raceNo:1,lanes:[1,2,3,4,5,6]},capturedAt:jstIso(at-2_000),archivedAt:jstIso(at),
@@ -1171,6 +1173,12 @@ it('admits an experimental portfolio only with live-cutoff archive and full sour
  const decision=await app.request('/api/ingest/experimental-trifecta/forecast',{method:'POST',headers:{Authorization:'Bearer test-token','content-type':'application/json'},body:JSON.stringify(forecast)},env());
  expect(decision.status).toBe(200);expect(await decision.json()).toMatchObject({stored:[{raceId,modelId,predictionCount:120}],decision:'worker T-60 timing gate'});
  expect(sqlite.prepare('SELECT COUNT(*) n FROM experimental_paper_bets WHERE race_id=?').get(raceId)).toMatchObject({n:0});
+ const multiRace={...forecast,races:[...forecast.races,...forecast.races]};
+ expect((await app.request('/api/ingest/experimental-trifecta/forecast',{method:'POST',headers:{Authorization:'Bearer test-token','content-type':'application/json'},body:JSON.stringify(multiRace)},env())).status).toBe(400);
+ vi.spyOn(Date,'now').mockReturnValue(at+11_001);
+ expect(await experimentalPaperDecision(DB,at+1_000)).toMatchObject({evaluated:1,placedRaces:0});
+ expect(sqlite.prepare('SELECT COUNT(*) n FROM experimental_paper_decisions WHERE race_id=?').get(raceId)).toMatchObject({n:0});
+ vi.restoreAllMocks();
  const report=await experimentalPaperDecision(DB,at+1_000);
  expect(report).toMatchObject({evaluated:1,placedRaces:1});
  const result:any=sqlite.prepare('SELECT total_stake FROM experimental_paper_decisions WHERE race_id=?').get(raceId);
