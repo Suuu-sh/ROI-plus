@@ -6,7 +6,7 @@ import { candidate, betId, payoutYen, settleValues, validateYenStake } from './s
 import { collectOdds } from './services/collectBoatraceOdds.js';
 import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
 import { collectBoatraceCaptureArchives } from './services/collectBoatraceCaptureArchives.js';
-import { collectResults } from './services/collectBoatraceResults.js';
+import { collectResults, resultUrl, RESULTS_SOURCE } from './services/collectBoatraceResults.js';
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, seedUnknownWriteBudget, allowOneDayWriteBudget, ONE_DAY_ALLOWANCE, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
@@ -35,6 +35,20 @@ const terminalFinishCodeSql = `(json_valid(e.features_json) AND (
 const isTerminalFinishCode = (value: unknown): boolean =>
   typeof value === 'string' && (['F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走'].includes(value)
     || /^K\d$/.test(value));
+async function hasVerifiedCapsizeNoRefund(db: Db, race: {id:string;race_date:string;venue_id:string;race_no:number}, number: number): Promise<boolean> {
+  const record=await first<any>(db,'SELECT target_date,status,reason FROM collection_runs WHERE id=? AND source=? AND sport=\'boat\'',`boat-result:${race.id}`,RESULTS_SOURCE);
+  if(!record||record.status!=='success'||record.target_date!==race.race_date)return false;
+  let evidence:any;
+  try{evidence=JSON.parse(record.reason||'{}')}catch{return false;}
+  const expectedUrl=resultUrl({id:race.id,venue_id:race.venue_id,race_no:race.race_no,race_date:race.race_date});
+  const fetchedAtMs=typeof evidence?.fetchedAt==='string'&&/(Z|[+-]\d{2}:\d{2})$/i.test(evidence.fetchedAt)?Date.parse(evidence.fetchedAt):NaN;
+  return evidence?.raceId===race.id && evidence?.quality==='verified-official-outcome-v2'
+    && evidence?.url===expectedUrl && typeof evidence?.sha256==='string' && /^[a-f0-9]{64}$/.test(evidence.sha256)
+    && Number.isFinite(fetchedAtMs) && fetchedAtMs<=Date.now()
+    && evidence?.refundTablePresent===true && evidence?.refundPolicy==='official-post-start-capsize-v1'
+    && Array.isArray(evidence?.nonRefundableNumbers) && evidence.nonRefundableNumbers.includes(number)
+    && Array.isArray(evidence?.terminalEntries) && evidence.terminalEntries.some((x:any)=>x?.number===number&&x?.finishCode==='転覆');
+}
 const app = new Hono<Ctx>().basePath('/api');
 app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization'] }));
 // 本番では閲覧系 API を、Cloudflare Access で保護された画面 Worker（Service Binding）経由に限定する。
@@ -361,7 +375,7 @@ async function ingest(c: any, name: string) {
   return c.json({ upserted: rows.length, changed: changedRows });
 }
 async function settleOpen(db: Db) {
-  const bets = await all<any>(db, `SELECT b.*, r.status AS race_status, r.data_origin AS race_origin FROM bets b JOIN races r ON r.id=b.race_id WHERE b.status='open' AND r.status IN ('finished','cancelled') AND b.data_origin=r.data_origin AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) AND ${nonQuarantinedBet()}`);
+  const bets = await all<any>(db, `SELECT b.*, r.status AS race_status, r.data_origin AS race_origin,r.race_date,r.venue_id,r.race_no FROM bets b JOIN races r ON r.id=b.race_id WHERE b.status='open' AND r.status IN ('finished','cancelled') AND b.data_origin=r.data_origin AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) AND ${nonQuarantinedBet()}`);
   let settled = 0;
   for (const b of bets) {
     if (b.race_status === 'cancelled') {
@@ -417,7 +431,12 @@ async function settleOpen(db: Db) {
     // A recorded false-start / disqualification does not establish whether
     // this exact ticket was refunded. Do not turn missing refund evidence into
     // a loss; keep that bet open while other, fully evidenced picks can settle.
-    if (b.bet_type === 'win' && isTerminalFinishCode(integrity.selected_finish_code) && !pay) continue;
+    if (b.bet_type === 'win' && isTerminalFinishCode(integrity.selected_finish_code) && !pay) {
+      // Only a parsed after-start capsize plus an empty official refund table
+      // proves this ticket lost. Other terminal outcomes remain unresolved.
+      if (integrity.selected_finish_code !== '転覆' && integrity.selected_finish_code !== '転') continue;
+      if (!await hasVerifiedCapsizeNoRefund(db,{id:b.race_id,race_date:b.race_date,venue_id:b.venue_id,race_no:b.race_no},Number(b.selection))) continue;
+    }
     const values = settleValues(b.stake, pay?.payout ?? null, !!pay);
     const evLost = b.expected_roi > 0 && values.finalOdds !== null && b.predicted_prob * values.finalOdds - 1 <= 0;
     if (!await reserveWorkerWrites(db, evLost ? 2 : 1)) break;

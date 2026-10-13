@@ -10,6 +10,8 @@ export type BoatraceResultExpected = {
 export type BoatraceResults = {
   results: Array<{ number: number; finishOrder: number }>;
   terminalEntries: Array<{ number: number; finishCode: string }>;
+  refundTablePresent: boolean;
+  nonRefundableNumbers: number[];
   payouts: Array<{ betType: 'win' | 'trifecta'; selection: string; payout: number }>;
 };
 
@@ -28,12 +30,14 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   if (/中止|不成立|同着/.test(text(nonHeaderText))) fail();
   const refundTables = [...html.matchAll(/<table\b[^>]*>[\s\S]*?<\/table>/gi)].map(match => match[0])
     .filter(table => /<th\b[^>]*>\s*返還\s*<\/th>/i.test(table));
+  let refundTableEmpty = refundTables.length === 1;
   for (const table of refundTables) {
-    for (const body of table.matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)) {
-      for (const row of body[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const bodies = [...table.matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)];
+    const rows = bodies.flatMap(body => [...body[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)]);
+    if (!rows.length) refundTableEmpty = false;
+    for (const row of rows) {
         const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map(cell => cell[1]);
-        if (cells.some(cell => text(cell) !== '')) fail();
-      }
+        if (cells.some(cell => text(cell) !== '')) { refundTableEmpty = false; fail(); }
     }
   }
 
@@ -105,8 +109,11 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   const trifecta = payouts.find(payout => payout.betType === 'trifecta');
   const firstThree = [1, 2, 3].map(rank => numericRows.find(row => row.finishOrder === rank)!.number).join('-');
   if (trifecta && trifecta.selection !== firstThree) fail();
+  const nonRefundableNumbers = refundTableEmpty && terminalRows.length === 1 && terminalRows[0].finishCode === '転覆'
+    ? [terminalRows[0].number] : [];
   return { results: numericRows.map(({ number, finishOrder }) => ({ number, finishOrder: finishOrder! })),
-    terminalEntries: terminalRows.map(({number,finishCode})=>({number,finishCode:finishCode!})), payouts };
+    terminalEntries: terminalRows.map(({number,finishCode})=>({number,finishCode:finishCode!})),
+    refundTablePresent: refundTables.length === 1, nonRefundableNumbers, payouts };
 }
 
 // Official result pages use short markers in the finish column. Keep the

@@ -134,7 +134,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
   const reserveBatch=async (count:number)=>reserveWriteBudgets(db,utcDate(now),[
     // The lock is one real settings-row mutation; result rows are reserved
     // only after the official page has passed validation below.
-    ...(!lockClaimed ? [{units:estimateWorkerWriteUnits(1),category:'essential' as const}] : []),
+    ...(!lockClaimed ? [{units:estimateWorkerWriteUnits(manual?2:1),category:'essential' as const}] : []),
     {units:count*5,category:'collection'},
   ]);
   const claimLock=async ()=>{
@@ -203,13 +203,6 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       sha256=body.sha256;
       reason='official-page-identity-or-outcome-rejected';
       const parsed=parseBoatraceResults(body.html,{url,raceDate:race.race_date,venueCode:race.venue_id,raceNo:race.race_no,entries});
-      // Reserve for the verified result, payout, race status and run-log rows
-      // only once their exact count is known. Failed/unavailable pages need
-      // only the separately reserved collection log, not speculative result
-      // headroom.
-      if (!await reserveWriteBudgets(db,utcDate(now),[
-        {units:estimateWorkerWriteUnits(parsed.results.length+parsed.payouts.length+parsed.terminalEntries.length+2),category:'essential'},
-      ])) { reason='daily-write-budget-exhausted'; throw new Error('daily write budget exhausted'); }
       const [existingResults,existingPayouts]=await Promise.all([
         all<{number:number;finish_order:number}>(db,"SELECT number,finish_order FROM results WHERE race_id=? AND data_origin='real'",race.id),
         all<{bet_type:string;selection:string;payout:number}>(db,"SELECT bet_type,selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type IN ('win','trifecta')",race.id),
@@ -220,7 +213,14 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
           ||existingPayouts.some(x=>!parsed.payouts.some(y=>y.betType===x.bet_type&&y.selection===x.selection&&y.payout===x.payout))
           ||parsed.terminalEntries.some(x=>{const old=entries.find(e=>e.number===x.number)?.finishCode;return old!==null&&old!==x.finishCode&&!(old==='転'&&x.finishCode==='転覆');})
           ||parsed.results.some(x=>!!entries.find(e=>e.number===x.number)?.finishCode)) throw new Error('existing result evidence conflict');
+      // Reserve for the verified result, payout, race status and run-log rows
+      // only once source and stored evidence are both accepted.
+      if (!await reserveWriteBudgets(db,utcDate(now),[
+        {units:estimateWorkerWriteUnits(parsed.results.length+parsed.payouts.length+parsed.terminalEntries.length+2),category:'essential'},
+      ])) { reason='daily-write-budget-exhausted'; throw new Error('daily write budget exhausted'); }
       const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts});
+      const guardedEntries=entries.map(e=>({...e,finishCode:parsed.terminalEntries.find(x=>x.number===e.number)?.finishCode??e.finishCode}));
+      const guardAfterTerminal=JSON.stringify({race,entries:guardedEntries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts});
       const statements:Statement[]=[];
       statements.push(db.prepare(`INSERT INTO results(race_id,number,finish_order,data_origin)
         SELECT ?,json_extract(value,'$.number'),json_extract(value,'$.finishOrder'),'real' FROM json_each(?) WHERE ${currentSourceGuard}
@@ -230,9 +230,9 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         ON CONFLICT(race_id,bet_type,selection) DO NOTHING`).bind(race.id,JSON.stringify(parsed.payouts),guardData));
       for(const terminal of parsed.terminalEntries) statements.push(db.prepare(`UPDATE entries SET features_json=json_set(CASE WHEN json_valid(features_json) THEN features_json ELSE '{}' END,'$.finish_code',?)
         WHERE race_id=? AND number=? AND data_origin='real' AND ${currentSourceGuard}`).bind(terminal.finishCode,race.id,terminal.number,guardData));
-      statements.push(db.prepare(`UPDATE races SET status='finished',updated_at=? WHERE id=? AND ${currentSourceGuard}`).bind(new Date().toISOString(),race.id,guardData));
+      statements.push(db.prepare(`UPDATE races SET status='finished',updated_at=? WHERE id=? AND ${currentSourceGuard}`).bind(new Date().toISOString(),race.id,guardAfterTerminal));
       const count=parsed.results.length+parsed.payouts.length+parsed.terminalEntries.length;
-      statements.push(logStatement(db,race,startedAt,'success',count,{raceId:race.id,url,sha256,quality:'verified-official-outcome-v2',fetchedAt:new Date().toISOString()},guardData));
+      statements.push(logStatement(db,race,startedAt,'success',count,{raceId:race.id,url,sha256,quality:'verified-official-outcome-v2',fetchedAt:new Date().toISOString(),refundTablePresent:parsed.refundTablePresent,nonRefundableNumbers:parsed.nonRefundableNumbers,...(parsed.nonRefundableNumbers.length?{refundPolicy:'official-post-start-capsize-v1',terminalEntries:parsed.terminalEntries}:{})},guardAfterTerminal));
       reason='source-state-changed';
       const writes=await db.batch(statements);
       const logged=writes.at(-1) as {meta?:{changes?:number}}|undefined;
@@ -277,6 +277,9 @@ const currentSourceGuard = `EXISTS(SELECT 1 FROM races current JOIN (SELECT ? da
       ON e.number=json_extract(saved.value,'$.number')
       WHERE e.race_id=current.id AND e.data_origin='real' AND CASE WHEN json_valid(e.features_json) THEN
         json_extract(e.features_json,'$.racer_id')=json_extract(saved.value,'$.racerId') ELSE 0 END)=6
+    AND NOT EXISTS(SELECT 1 FROM entries e JOIN json_each(gate.data,'$.entries') saved
+      ON e.number=json_extract(saved.value,'$.number') WHERE e.race_id=current.id AND e.data_origin='real'
+      AND (CASE WHEN json_valid(e.features_json) THEN json_extract(e.features_json,'$.finish_code') END) IS NOT json_extract(saved.value,'$.finishCode'))
     AND NOT EXISTS(SELECT 1 FROM results existing WHERE existing.race_id=current.id AND NOT EXISTS(
       SELECT 1 FROM json_each(gate.data,'$.results') incoming WHERE existing.data_origin='real'
         AND existing.number=json_extract(incoming.value,'$.number') AND existing.finish_order=json_extract(incoming.value,'$.finishOrder')))

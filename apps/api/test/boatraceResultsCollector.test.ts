@@ -41,18 +41,45 @@ describe('purchased real boat hourly results',()=>{
     expect(await settleOpen(DB)).toBe(1);
     expect(sqlite.prepare('SELECT status,profit,odds_at_bet FROM bets').get()).toMatchObject({status:'won',profit:330,odds_at_bet:null});
   });
-  it('records five ranked finishers plus an official capsize marker and keeps that ticket open without refund proof',async()=>{
+  it('records five ranked finishers and settles a capsize ticket only with official no-refund evidence',async()=>{
     const raceId=seed();sqlite.prepare("UPDATE bets SET selection='3' WHERE id=?").run(`${raceId}-bet`);
     sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES(?,?,'boat','win','6',100,'manual','INSUFFICIENT_DATA','2026-10-11T02:01:00Z','open','real')").run(`${raceId}-terminal-bet`,raceId);
     const fetch=async()=>new Response(boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']}));
     expect(await collectResults(DB,now,{fetch})).toMatchObject({status:'success',records:8,verified:1});
     expect(sqlite.prepare('SELECT number,finish_order FROM results ORDER BY finish_order').all()).toHaveLength(5);
     expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number=6').get(raceId)).toMatchObject({features_json:expect.stringContaining('転覆')});
-    expect(await settleOpen(DB)).toBe(1);
+    const provenance=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs').get() as {reason:string}).reason);
+    expect(provenance).toMatchObject({raceId,url:`https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=09&hd=20261011`,quality:'verified-official-outcome-v2',sha256:expect.stringMatching(/^[a-f0-9]{64}$/),refundTablePresent:true,refundPolicy:'official-post-start-capsize-v1',nonRefundableNumbers:[6],terminalEntries:[{number:6,finishCode:'転覆'}]});
+    expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number=6').get(raceId)).toMatchObject({features_json:expect.stringContaining('転覆')});
+    const settled=await settleOpen(DB);
     expect(sqlite.prepare('SELECT id,status FROM bets ORDER BY id').all()).toEqual([
-      {id:`${raceId}-bet`,status:'lost'}, {id:`${raceId}-terminal-bet`,status:'open'},
+      {id:`${raceId}-bet`,status:'lost'}, {id:`${raceId}-terminal-bet`,status:'lost'},
+    ]);
+    expect(settled).toBe(2);
+    expect(sqlite.prepare('SELECT id,status FROM bets ORDER BY id').all()).toEqual([
+      {id:`${raceId}-bet`,status:'lost'}, {id:`${raceId}-terminal-bet`,status:'lost'},
     ]);
     expect(await selectResultsTargets(DB,new Date(now.getTime()+3600000))).toEqual([]);
+  });
+  it.each([{marker:'転',removeRefundTable:true},{marker:'F',removeRefundTable:false}])('keeps terminal $marker open without the exact capsize refund proof',async({marker,removeRefundTable})=>{
+    const raceId=seed();sqlite.prepare("UPDATE bets SET selection='6' WHERE id=?").run(`${raceId}-bet`);
+    const source=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,marker]});
+    const page=removeRefundTable?source.replace(/<div class="table1"><table><thead><tr><th>返還<\/th><\/tr><\/thead><tbody>[\s\S]*?<\/tbody><\/table><\/div>/,''):source;
+    expect(await collectResults(DB,now,{fetch:async()=>new Response(page)})).toMatchObject({status:'success',verified:1});
+    const provenance=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs').get() as {reason:string}).reason);
+    expect(provenance.nonRefundableNumbers??[]).toEqual([]);
+    expect(await settleOpen(DB)).toBe(0);
+    expect(sqlite.prepare('SELECT status FROM bets').get()).toMatchObject({status:'open'});
+  });
+  it.each(['url','future-fetch-time'])('rejects a terminal settlement when successful-source %s provenance is invalid',async field=>{
+    const raceId=seed();sqlite.prepare("UPDATE bets SET selection='6' WHERE id=?").run(`${raceId}-bet`);
+    const fetch=async()=>new Response(boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']}));
+    await collectResults(DB,now,{fetch});
+    const record=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs').get() as {reason:string}).reason);
+    const changed=field==='url'?{...record,url:'https://www.boatrace.jp/wrong'}:{...record,fetchedAt:new Date(Date.now()+60_000).toISOString()};
+    sqlite.prepare('UPDATE collection_runs SET reason=? WHERE id=?').run(JSON.stringify(changed),`boat-result:${raceId}`);
+    expect(await settleOpen(DB)).toBe(0);
+    expect(sqlite.prepare('SELECT status FROM bets').get()).toMatchObject({status:'open'});
   });
   it('targets only elapsed real open purchased races, excludes audit/quarantine and future races',async()=>{
     seed(1);seed(2,'sample');seed(3,'real','won');seed(4,'real','open','2026-10-11T04:30:00Z');seed(5);seed(6);
@@ -112,12 +139,13 @@ describe('purchased real boat hourly results',()=>{
     expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({records:0,attempted:0});expect(fetcher).not.toHaveBeenCalled();
     const log=sqlite.prepare('SELECT reason FROM collection_runs').get() as {reason:string};expect(JSON.parse(log.reason).reason).toBe('saved-registry-incomplete');
   });
-  it.each(['registry','quarantine','settled','postTime'])('rejects %s authority changes during fetch in the guarded atomic write',async change=>{
+  it.each(['registry','quarantine','settled','postTime','terminalFinishCode'])('rejects %s authority changes during fetch in the guarded atomic write',async change=>{
     seed();const fetcher=async(input:string)=>{
       if(change==='registry')sqlite.prepare("UPDATE entries SET features_json='{}' WHERE number=1").run();
       if(change==='quarantine')sqlite.prepare("INSERT INTO data_repair_quarantined_races(race_id,repair_id,reason) VALUES(?,'fixture','fixture')").run(id());
       if(change==='settled')sqlite.prepare("UPDATE bets SET status='lost' WHERE race_id=?").run(id());
       if(change==='postTime')sqlite.prepare("UPDATE races SET post_time='2099-01-01T00:00:00Z' WHERE id=?").run(id());
+      if(change==='terminalFinishCode')sqlite.prepare('UPDATE entries SET features_json=? WHERE race_id=? AND number=6').run('{"racer_id":"4006","finish_code":"F"}',id());
       return fetchPage(input);
     };
     expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({status:'failed',records:0});
