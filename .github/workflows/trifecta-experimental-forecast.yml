@@ -1,14 +1,6 @@
 name: trifecta experimental forecast only
 on:
-  schedule:
-    # GitHub limits each schedule expression to a five-minute cadence. Five
-    # staggered expressions provide one invocation per minute during the
-    # Japanese boat-racing day (10:00-23:59 JST / 01:00-14:59 UTC).
-    - cron: '0-59/5 1-14 * * *'
-    - cron: '1-59/5 1-14 * * *'
-    - cron: '2-59/5 1-14 * * *'
-    - cron: '3-59/5 1-14 * * *'
-    - cron: '4-59/5 1-14 * * *'
+  workflow_call:
   workflow_dispatch:
 permissions:
   contents: read

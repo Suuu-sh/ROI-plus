@@ -304,9 +304,14 @@ def test_experimental_workflow_schedules_learning_only_and_gates_registry_foreca
 
 def test_separate_minute_experimental_forecast_workflow_is_read_only_to_learning_state():
     workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/trifecta-experimental-forecast.yml").read_text()
+    schedule = (Path(__file__).resolve().parents[2] / ".github/workflows/daily.yml").read_text()
+    assert "workflow_call:" in workflow
+    assert "uses: ./.github/workflows/trifecta-experimental-forecast.yml" in schedule
+    assert "secrets: inherit" in schedule
     for minute in range(5):
-        assert f"cron: '{minute}-59/5 1-14 * * *'" in workflow
-    assert workflow.count("cron: '") == 5
+        assert f"cron: '{minute}-59/5 1-14 * * *'" in schedule
+    assert schedule.count("endsWith(github.event.schedule, '1-14 * * *')") == 3
+    assert "boat-experimental-forecast-trigger" in schedule
     assert "group: boat-experimental-forecast" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "actions/cache/restore@v4" in workflow
