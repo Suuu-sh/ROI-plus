@@ -3,7 +3,7 @@ import Sqlite from 'better-sqlite3'
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { D1SqliteAdapter } from './d1-adapter.js'
-import { historicalTrifectaExperimentDecision } from '../src/services/historicalTrifectaExperiment.js'
+import { historicalTrifectaExperimentDecision, historicalTrifectaExperimentPerformance } from '../src/services/historicalTrifectaExperiment.js'
 import { purchaseOddsContext } from '../src/services/purchaseOdds.js'
 import { beforeinfoUrl } from '../src/services/boatraceBeforeinfo.js'
 import { raceListUrl } from '../src/services/boatraceRaceList.js'
@@ -59,6 +59,19 @@ function createFixture(actualArrival: string) {
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('historical BASE dedicated T-60 virtual experiment', () => {
+  it('returns zero-valued counters for an empty dedicated ledger', async () => {
+    const sqlite = new Sqlite(':memory:')
+    for (const file of readdirSync(resolve(root, 'db/migrations')).filter(x => x.endsWith('.sql')).sort()) {
+      sqlite.exec(readFileSync(resolve(root, 'db/migrations', file), 'utf8'))
+    }
+    const performance = await historicalTrifectaExperimentPerformance(new D1SqliteAdapter(sqlite))
+    expect(performance.summary).toMatchObject({
+      decisions: 0, placed_races: 0, abstained_races: 0, bets: 0, total_stake: 0,
+      settled_profit: 0, open_bets: 0, available_balance: 100000,
+    })
+    sqlite.close()
+  })
+
   it('uses fresh official current odds and writes only its isolated virtual ledger', async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-15T03:00:00.000Z'))
     const f = createFixture(jst(Date.now() - 30_000))
