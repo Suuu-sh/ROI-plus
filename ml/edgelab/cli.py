@@ -566,6 +566,8 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                             parsed_races = parsed.get("races", [])
                             race_ids = {str(r.get("id")) for r in parsed_races if r.get("id")}
                             result_rows = parsed.get("results", [])
+                            entry_rows = parsed.get("entries", [])
+                            payout_rows = parsed.get("payouts", [])
                             if ((source_date is not None and source_date != expected_date)
                                     or any(r.get("race_date") != expected_date for r in parsed_races)):
                                 raise ValueError("refreshed K file has no valid same-day race results")
@@ -574,7 +576,8 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                                 now_at_check = _coerce_dt(_now())
                                 current_jst_day = now_at_check.astimezone(
                                     ZoneInfo("Asia/Tokyo")).date().isoformat()
-                                if (not result_rows and source_date == expected_date
+                                if (not result_rows and not entry_rows and not payout_rows
+                                        and source_date == expected_date
                                         and expected_date == current_jst_day
                                         and verified_b_first_cutoff is not None
                                         and now_at_check < verified_b_first_cutoff):
