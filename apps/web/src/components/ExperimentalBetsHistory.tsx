@@ -15,7 +15,7 @@ export function ExperimentalBetsHistory({ compact = false }: { compact?: boolean
 
   return <Section title="実験購入履歴（別台帳）" right={<span className="text-xs text-muted">実験・通常成績に含まず</span>}>
     <div className="p-4">
-      <p className="mb-3 text-xs text-muted">実験専用の仮想購入です。通常の購入履歴・残高・成績とは別に表示しています。</p>
+      <p className="mb-3 text-xs text-muted">実験専用の仮想購入です。通常の購入履歴・残高・成績とは別に表示しています。確定オッズは的中券の公式払戻から換算し、不的中券は未取得です。</p>
       {!bets.length ? <Empty>実験購入はまだありません。</Empty> : <div className="space-y-2">
         {bets.map((bet) => <article key={bet.id} className="rounded-lg border border-line bg-raised/30 p-3">
           <div className="flex flex-wrap items-start justify-between gap-2">
@@ -33,9 +33,10 @@ export function ExperimentalBetsHistory({ compact = false }: { compact?: boolean
           </div>
           {bet.status === 'void' && <p className="mt-2 text-xs text-muted">返金済み{bet.repairReason ? ` · ${repairReasonLabel(bet.repairReason)}` : ''}</p>}
           <p className="mt-2 text-xs text-muted">公式結果 {bet.officialSelection ? `三連単 ${bet.officialSelection}` : '未取得'}</p>
-          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-4">
+          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-5">
             <Metric label={bet.status === 'void' ? '無効化した旧記録額' : '購入額'} value={yen(bet.stake)} />
             <Metric label="購入時オッズ" value={bet.oddsAtBet == null ? '—' : bet.oddsAtBet.toFixed(2)} />
+            <Metric label="確定オッズ（払戻換算）" value={bet.status === 'void' ? '対象外（無効）' : bet.finalOdds == null ? bet.status === 'open' ? '精算待ち' : '未取得' : bet.finalOdds.toFixed(2)} />
             <Metric label="確率 / 期待ROI" value={`${pct(bet.predictedProb)} / ${pct(bet.expectedRoi)}`} />
             <Metric label="払戻 / 損益" value={`${bet.payout == null ? '—' : yen(bet.payout)} / ${bet.profit == null ? '—' : signedYen(bet.profit)}`} />
           </div>

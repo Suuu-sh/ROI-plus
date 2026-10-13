@@ -1275,6 +1275,8 @@ it('lists placed experimental paper tickets separately from ordinary bet history
   .run('history-exp-2',settledAt,settledAt);
  sqlite.prepare(`INSERT INTO experimental_paper_bet_reconciliations(bet_id,experiment_key,original_stake,refund_amount,repair_reason,repaired_at,refund_applied_at)
   VALUES(?,'boat-trifecta-small-sample-v1',100,100,'invalid_stake_unit',?,?)`).run('history-exp-void',settledAt,settledAt);
+ sqlite.prepare("INSERT INTO results(race_id,finish_order,number,data_origin) VALUES(?,1,1,'real'),(?,2,2,'real'),(?,3,3,'real')").run(placedRace,placedRace,placedRace);
+ sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin) VALUES(?,'trifecta','1-2-3',500,'real')").run(placedRace);
  const normalBefore=Number(((await (await app.request('/api/performance/overview',{},env())).json()) as any).betCount);
 
  const response=await app.request('/api/bets/experimental',{},env());
@@ -1284,10 +1286,20 @@ it('lists placed experimental paper tickets separately from ordinary bet history
  expect(rows[0]).toMatchObject({id:'history-exp-void',recordKind:'experimental_paper',decisionId:voidDecision,status:'void',payout:100,profit:0,repairReason:'invalid_stake_unit'});
  expect(rows.find(row=>row.id==='history-exp-2')).toEqual({id:'history-exp-2',recordKind:'experimental_paper',experimentKey:'boat-trifecta-small-sample-v1',decisionId:placedDecision,
   raceId:placedRace,sport:'boat',betType:'trifecta',selection:'1-3-2',stake:100,predictedProb:0.1,probabilityStd:0.01,oddsAtBet:20,expectedRoi:1,
-  modelId,placedAt,status:'void',payout:100,profit:0,settledAt,repairReason:'invalid_stake_unit',dataOrigin:'real',venueName:'Ticket fixture',raceNo:41,raceDate:'2099-01-01',officialSelection:null});
+  modelId,placedAt,status:'void',payout:100,profit:0,settledAt,repairReason:'invalid_stake_unit',dataOrigin:'real',venueName:'Ticket fixture',raceNo:41,raceDate:'2099-01-01',finalOdds:null,officialSelection:'1-2-3'});
  expect(rows.find(row=>row.id==='history-exp-1')).toMatchObject({id:'history-exp-1',recordKind:'experimental_paper',status:'won',payout:500,profit:400,settledAt,
-  raceId:placedRace,raceNo:41,raceDate:'2099-01-01'});
- expect(rows.find(row=>row.id==='history-exp-2')).not.toHaveProperty('edgeLabel');expect(rows.find(row=>row.id==='history-exp-2')).not.toHaveProperty('finalOdds');
+  raceId:placedRace,raceNo:41,raceDate:'2099-01-01',finalOdds:5});
+ expect(rows.find(row=>row.id==='history-exp-2')).not.toHaveProperty('edgeLabel');expect(rows.find(row=>row.id==='history-exp-2').finalOdds).toBeNull();
+ // A losing ticket, even with an inconsistent matching payout row, has no confirmed odds.
+ sqlite.prepare("UPDATE experimental_paper_bets SET status='lost' WHERE id='history-exp-1'").run();
+ const lostRows=await (await app.request('/api/bets/experimental',{},env())).json() as any[];
+ expect(lostRows.find(row=>row.id==='history-exp-1').finalOdds).toBeNull();
+ sqlite.prepare("UPDATE experimental_paper_bets SET status='won' WHERE id='history-exp-1'").run();
+ // Results must agree with the payout selection; a payout alone is not sufficient.
+ sqlite.prepare("UPDATE results SET number=4 WHERE race_id=? AND number=1").run(placedRace);
+ const mismatchRows=await (await app.request('/api/bets/experimental',{},env())).json() as any[];
+ expect(mismatchRows.find(row=>row.id==='history-exp-1').finalOdds).toBeNull();
+ sqlite.prepare("UPDATE results SET number=1 WHERE race_id=? AND number=4").run(placedRace);
  expect(rows.some(row=>row.raceId===abstainedRace)).toBe(false);
  const ordinary=await app.request('/api/bets?origin=all',{},env());
  expect((await ordinary.json() as any[]).some(row=>String(row.id).startsWith('history-exp-'))).toBe(false);

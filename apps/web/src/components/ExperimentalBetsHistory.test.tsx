@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { ExperimentalBet } from '../lib/api'
 
@@ -7,6 +7,8 @@ const { experimentalBets } = vi.hoisted(() => ({ experimentalBets: vi.fn() }))
 vi.mock('../lib/api', () => ({ api: { experimentalBets } }))
 
 import { ExperimentalBetsHistory } from './ExperimentalBetsHistory'
+
+afterEach(cleanup)
 
 describe('ExperimentalBetsHistory', () => {
   it('shows ticket-level experimental purchase separately for the example race and stake', async () => {
@@ -16,7 +18,7 @@ describe('ExperimentalBetsHistory', () => {
       predictedProb: 0.12, probabilityStd: 0.02, oddsAtBet: 9.5, expectedRoi: 0.14, modelId: 'experimental-model',
       placedAt: '2026-10-13T03:00:00.000Z', status: 'open', payout: null, profit: null, settledAt: null,
       dataOrigin: 'real', venueName: '平和島', raceNo: 12, raceDate: '2026-10-13',
-      officialSelection: null,
+      finalOdds: null, officialSelection: null,
     }
     experimentalBets.mockResolvedValue([bet])
 
@@ -28,6 +30,7 @@ describe('ExperimentalBetsHistory', () => {
     expect(screen.getByText('三連単 1-2-3')).toBeTruthy()
     expect(screen.getByText('¥100')).toBeTruthy()
     expect(screen.getByText('公式結果 未取得')).toBeTruthy()
+    expect(screen.getByText('確定オッズ（払戻換算）')).toBeTruthy()
     expect(screen.getByText(/通常の購入履歴・残高・成績とは別/)).toBeTruthy()
   })
 
@@ -38,17 +41,30 @@ describe('ExperimentalBetsHistory', () => {
       predictedProb: 0.12, probabilityStd: 0.02, oddsAtBet: 9.5, expectedRoi: 0.14, modelId: 'experimental-model',
       placedAt: '2026-10-13T03:00:00.000Z', status: 'void', repairReason: 'invalid_stake_unit', payout: 22, profit: 0, settledAt: '2026-10-13T04:00:00.000Z',
       dataOrigin: 'real', venueName: '平和島', raceNo: 12, raceDate: '2026-10-13',
-      officialSelection: '4-1-3',
+      finalOdds: null, officialSelection: '4-1-3',
     }
     experimentalBets.mockResolvedValue([bet])
 
     render(<MemoryRouter><ExperimentalBetsHistory compact /></MemoryRouter>)
 
     expect(await screen.findByText('無効（返金）')).toBeTruthy()
+    expect(screen.getByText('対象外（無効）')).toBeTruthy()
     expect(screen.getByText(/返金済み · 購入額が100円単位の条件を満たさないため/)).toBeTruthy()
     expect(screen.getByText('無効化した旧記録額')).toBeTruthy()
     expect(screen.queryByText('invalid_stake_unit')).toBeNull()
     expect(screen.getByText('¥22')).toBeTruthy()
     expect(screen.getByText('公式結果 三連単 4-1-3')).toBeTruthy()
   })
+  it.each([{ status: 'won', finalOdds: 5, displayed: '5.00' }, { status: 'lost', finalOdds: null, displayed: '未取得' }] as const)('shows confirmed odds or missing for $status without purchase-odds fallback', async ({ status, finalOdds, displayed }) => {
+    experimentalBets.mockResolvedValue([{
+      id: 'confirmed-ticket', raceId: 'boat-fixture', selection: '1-2-3', stake: 100,
+      oddsAtBet: 20, finalOdds, status, payout: status === 'won' ? 500 : 0, profit: status === 'won' ? 400 : -100,
+      placedAt: '2026-10-13T03:00:00Z', raceDate: '2026-10-13', raceNo: 1, venueName: 'テスト場',
+      officialSelection: '1-2-3', predictedProb: 0.1, expectedRoi: 1,
+    }])
+    render(<MemoryRouter><ExperimentalBetsHistory compact /></MemoryRouter>)
+    expect(await screen.findByText(displayed)).toBeTruthy()
+    expect(screen.getByText('20.00')).toBeTruthy()
+  })
+
 })

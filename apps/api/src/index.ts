@@ -1244,6 +1244,7 @@ app.get('/bets/experimental',async c=>{
  const rows=await all<any>(c.env.DB,`SELECT b.id,b.decision_id,b.race_id,b.selection,b.stake,b.probability,b.prob_std,b.odds_at_bet,b.expected_roi,
    b.model_id,b.placed_at,b.status,b.payout,b.profit,b.settled_at,d.experiment_key,v.name venue_name,r.race_no,r.race_date,
    q.repair_reason,q.repaired_at,
+   (SELECT p.payout FROM payouts p WHERE p.race_id=b.race_id AND p.bet_type='trifecta' AND p.selection=b.selection AND p.data_origin='real' AND p.payout>0) final_payout_per_100,
    (SELECT group_concat(number,'-') FROM (SELECT x.number FROM results x WHERE x.race_id=b.race_id AND x.data_origin='real' AND x.finish_order BETWEEN 1 AND 3 ORDER BY x.finish_order LIMIT 3)) official_selection
    FROM experimental_paper_bets b
    JOIN experimental_paper_decisions d ON d.id=b.decision_id AND d.experiment_key=? AND d.outcome='placed'
@@ -1261,6 +1262,7 @@ app.get('/bets/experimental',async c=>{
    profit:row.repair_reason?0:(row.profit==null?null:Number(row.profit)),
    settledAt:row.repair_reason?row.repaired_at:(row.settled_at??null),repairReason:row.repair_reason??null,
    dataOrigin:'real',venueName:row.venue_name,raceNo:Number(row.race_no),raceDate:row.race_date,
+   finalOdds:!row.repair_reason&&row.status==='won'&&row.selection===row.official_selection&&row.final_payout_per_100!=null?Number(row.final_payout_per_100)/100:null,
    officialSelection:typeof row.official_selection==='string'&&row.official_selection.split('-').length===3?row.official_selection:null})));
 });
 app.get('/paper/decisions',async c=>{
