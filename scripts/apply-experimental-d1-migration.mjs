@@ -45,7 +45,9 @@ export function validateExperimentalMigrationSet(localNames, appliedNames) {
 export function validateMigrationContent(content, expectedHash = approvedMigrationSha256) {
   const actualHash = createHash("sha256").update(content).digest("hex");
   if (actualHash !== expectedHash) throw new Error("Pinned experimental migration content verification failed.");
-  const uncommented = content.replace(/^\s*--.*$/gm, "");
+  const sql = Buffer.isBuffer(content) ? content.toString("utf8") : content;
+  if (typeof sql !== "string") throw new Error("Experimental migration content is invalid.");
+  const uncommented = sql.replace(/^\s*--.*$/gm, "");
   if (/^\s*(?:DROP|ALTER|UPDATE|DELETE|REPLACE|PRAGMA|ATTACH|DETACH|VACUUM)\b/im.test(uncommented)) {
     throw new Error("Experimental migration contains a non-additive SQL operation.");
   }

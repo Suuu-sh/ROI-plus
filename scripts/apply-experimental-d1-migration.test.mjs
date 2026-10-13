@@ -32,6 +32,7 @@ test("pins migration bytes and rejects destructive SQL commands", () => {
   const additive = "CREATE TABLE experimental_bankroll (id TEXT);\nINSERT INTO experimental_bankroll VALUES ('x');\n";
   const hash = createHash("sha256").update(additive).digest("hex");
   assert.doesNotThrow(() => validateMigrationContent(additive, hash));
+  assert.doesNotThrow(() => validateMigrationContent(Buffer.from(additive, "utf8"), hash));
   assert.throws(() => validateMigrationContent(`${additive}DROP TABLE races;`, createHash("sha256").update(`${additive}DROP TABLE races;`).digest("hex")), /non-additive/);
   assert.throws(() => validateMigrationContent(additive, "0".repeat(64)), /content verification/);
 });
