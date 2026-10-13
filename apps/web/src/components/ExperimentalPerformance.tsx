@@ -1,4 +1,4 @@
-import { api } from '../lib/api'
+import { api, type ExperimentalPerformance as ExperimentalPerformanceData } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
 import { dateTime, pct, signedYen, tone, yen } from '../lib/format'
 import { CountUp, Empty, ErrorState, Loading, Section } from './ui'
@@ -26,6 +26,15 @@ export function ExperimentalPerformance({ compact = false, narrow = false }: { c
   return <Section title="三連単モデル実験" right={<span className="text-xs text-muted">実験専用・未検証</span>}>
     <div className="space-y-3 p-4">
       <p className="text-xs leading-relaxed text-muted">通常の運用成績・資産とは別の仮想台帳です。{caveat}</p>
+      {data.comparison && <div className="border-t border-line pt-3">
+        <h3 className="mb-1 text-sm font-medium">選択買い目の固定100円比較</h3>
+        <p className="mb-3 text-xs leading-relaxed text-muted">既存の実験購入と同じ選択・購入時オッズ・公式精算結果を使った事後比較です。固定方式は選択券ごとに100円を仮想計上し、実験台帳・購入判断・実験用残高には影響しません。投資総額が異なるため同額予算比較ではなく、独立した購入戦略でもありません。全券が確定したレースのみを両方式に同じく含め、保留中 {data.comparison.pendingRaceCount} レースは除外、無効・証跡/賭け額条件外 {data.comparison.excludedRaceCount} レースは比較対象外です。</p>
+        <div className={`grid grid-cols-1 gap-3 ${narrow ? '' : 'md:grid-cols-2'}`}>
+          <ComparisonMetric label="柔軟額（実験台帳）" data={data.comparison.actual} />
+          <ComparisonMetric label="固定100円/選択" data={data.comparison.fixed100} />
+        </div>
+        <p className="mt-2 text-[10px] text-muted">比較対象 {data.comparison.settledRaceCount} レース · 各方式のROI = 払戻合計 ÷ その方式の購入額。固定払戻は保存済み実験精算額から券ごとの100円払戻を復元しています。</p>
+      </div>}
       <div className={`grid grid-cols-2 gap-3 ${narrow ? '' : 'md:grid-cols-4'}`}>
         <Metric label="実験用仮想残高" value={yen(data.bankroll.available)} sub={`初期 ${yen(data.bankroll.initial)}`} />
         <Metric label="実験損益" value={signedYen(data.metrics.profit)} className={tone(data.metrics.profit)} />
@@ -54,6 +63,14 @@ export function ExperimentalPerformance({ compact = false, narrow = false }: { c
       </>}
     </div>
   </Section>
+}
+
+function ComparisonMetric({ label, data }: { label: string; data: NonNullable<ExperimentalPerformanceData['comparison']>['actual'] }) {
+  return <div className="rounded-md border border-line bg-surface p-3">
+    <div className="label">{label}</div>
+    <div className={`figure mt-2 text-2xl ${tone(data.profit)}`}>{signedYen(data.profit)}</div>
+    <div className="mt-1.5 text-xs text-muted">購入 {yen(data.stake)} · 払戻 {yen(data.payout)} · ROI {pct(data.roi)} · {data.tickets} 券</div>
+  </div>
 }
 
 function Metric({ label, value, sub, className = '' }: { label: string; value: string; sub?: string; className?: string }) {

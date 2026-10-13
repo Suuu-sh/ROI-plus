@@ -1,0 +1,50 @@
+name: Reset approved normal purchase history
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact reviewed source commit SHA
+        required: true
+        type: string
+      confirmation:
+        description: Type RESET NORMAL PURCHASE HISTORY ONLY
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: roi-plus-production-deploy
+  cancel-in-progress: false
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APPROVED_SOURCE_SHA: ${{ inputs.approved_sha }}
+      RESET_CONFIRMATION: ${{ inputs.confirmation }}
+      INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Capture exact scoped backup before any mutation
+        run: node scripts/reset-normal-history.mjs --backup
+      - name: Persist access-controlled backup before reset
+        uses: actions/upload-artifact@v4
+        with:
+          name: normal-history-backup-${{ github.run_id }}
+          path: normal-history-backup.json
+          retention-days: 30
+          if-no-files-found: error
+      - name: Atomic normal-only reset and preservation check
+        run: node scripts/reset-normal-history.mjs --reset
+      - name: Upload reset verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: normal-history-reset-report-${{ github.run_id }}
+          path: normal-history-reset-report.json
+          retention-days: 30

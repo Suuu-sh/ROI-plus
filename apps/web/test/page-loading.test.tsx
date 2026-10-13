@@ -61,7 +61,7 @@ it('boat main page loads only real purchases and performance without exploration
   expect(screen.queryByText(/レースを調べるから購入できます/)).toBeNull()
   expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?sport=boat&origin=real', '/api/performance/overview?sport=boat&origin=real'])
 })
-it('boat purchase-history surface shows ticket-level experimental purchases in the separate ledger', async () => {
+it('boat purchase-history surface shows ticket-level experimental purchases in the unified history', async () => {
   const experimentalBet: ExperimentalBet = {
     id: 'experimental-ticket-boat-example', recordKind: 'experimental_paper', experimentKey: 'boat-trifecta-small-sample-v1', decisionId: 'decision-example',
     raceId: 'boat-20261013-04-12', sport: 'boat', betType: 'trifecta', selection: '1-2-3', stake: 22,
@@ -71,11 +71,12 @@ it('boat purchase-history surface shows ticket-level experimental purchases in t
   }
   const fetcher = mockReads([], [experimentalBet])
   render(<MemoryRouter><SportPage sport="boat" /></MemoryRouter>)
-  expect(await screen.findByRole('heading', { name: '実験購入履歴（別台帳）' })).toBeTruthy()
-  expect(screen.getByRole('link', { name: /boat-20261013-04-12|平和島 12R/ })).toBeTruthy()
-  expect(screen.getByText('¥22')).toBeTruthy()
+  expect(await screen.findByText('実験・通常成績対象外')).toBeTruthy()
+  expect(screen.queryByRole('heading', { name: '実験購入履歴（別台帳）' })).toBeNull()
+  expect(screen.getByRole('link', { name: '出走表を見る →' }).getAttribute('href')).toBe('/boat/boat-20261013-04-12')
+  expect(screen.getByText('22円')).toBeTruthy()
   expect(fetcher).toHaveBeenCalledWith('/api/bets/experimental', expect.anything())
-  expect(screen.getByText(/通常の購入履歴・残高・成績とは別/)).toBeTruthy()
+  expect(screen.getAllByRole('heading', { name: /^仮想購入履歴/ })).toHaveLength(1)
 })
 it('hides origin controls and sample notice on boat routes only', () => {
   const stored = new Map([['edgelab.origin', 'sample']])
@@ -165,4 +166,13 @@ it('keeps the date controls while boat uses all purchases and horse filters by s
   view.rerender(<MemoryRouter><SportPage sport="boat" /></MemoryRouter>)
   await screen.findByText(/仮想購入はまだありません/)
   expect(screen.queryByText(/この日付の仮想購入はありません/)).toBeNull()
+})
+
+it('board unifies experiment tickets but keeps normal performance count unchanged', async () => {
+  mockReads([], [{ id: 'e-board', recordKind: 'experimental_paper', raceId: 'boat-example', sport: 'boat', betType: 'trifecta', selection: '1-2-3', stake: 100, placedAt: '2026-10-14T00:00:00Z', status: 'lost', payout: 0, profit: -100, finalOdds: 8, dataOrigin: 'real', venueName: '実験場', raceNo: 1, raceDate: '2026-10-14' } as ExperimentalBet])
+  render(<MemoryRouter><OverviewPage /></MemoryRouter>)
+  expect(await screen.findByText('実験・通常成績対象外')).toBeTruthy()
+  expect(screen.getByText('1レース · 1点')).toBeTruthy()
+  expect(screen.queryByRole('heading', { name: '実験購入履歴（別台帳）' })).toBeNull()
+  expect(screen.getByText('購入点数').parentElement?.textContent).toContain('0')
 })
