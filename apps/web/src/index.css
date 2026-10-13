@@ -36,5 +36,5 @@ body { @apply bg-bg text-ink font-sans antialiased; font-feature-settings: 'tnum
 thead th { white-space: nowrap; }
 
 /* Keep purchase reviews in one swipeable row without widening the page. */
-.purchase-rail { display: flex; align-items: flex-start; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scroll-padding-inline: 12px; padding: 12px; scrollbar-width: thin; }
+.purchase-rail { display: flex; align-items: flex-start; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scroll-padding-inline: 0; padding: 12px 0; scrollbar-width: thin; }
 .purchase-race { flex: 0 0 min(340px, calc(100% - 32px)); scroll-snap-align: start; overflow-wrap: anywhere; }
