@@ -45,10 +45,14 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
         AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=b.id))
         OR EXISTS(SELECT 1 FROM experimental_paper_bets eb
           JOIN experimental_paper_decisions ed ON ed.id=eb.decision_id AND ed.experiment_key='boat-trifecta-small-sample-v1'
-          WHERE eb.race_id=r.id AND eb.data_origin='real')))
+          WHERE eb.race_id=r.id AND eb.data_origin='real')
+        OR EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb
+          JOIN historical_trifecta_experiment_decisions hd ON hd.id=hb.decision_id AND hd.experiment_key='boat-trifecta-historical-base-v1'
+          WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open')))
         OR (?=1 AND r.race_date=? AND r.betting_cutoff_source='boatrace-racelist-cutoff-v1'
           AND julianday(r.betting_cutoff_at)<=julianday(?,'-5 minutes')
           AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.data_origin='real' AND b.status='open')
+          AND NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open')
           AND EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives ar WHERE ar.race_id=r.id AND ar.data_origin='real'
             AND julianday(ar.captured_at)<=julianday(r.betting_cutoff_at,'-60 seconds')
             AND json_valid(ar.archive_json) AND json_extract(ar.archive_json,'$.schema')='boat-prerace-capture-v1')
@@ -71,6 +75,9 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
             AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3)))
         AND NOT EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real' AND eb.status='open'
           AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=eb.id)
+          AND NOT EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
+            AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3)))
+        AND NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open'
           AND NOT EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
             AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3)))
       ))

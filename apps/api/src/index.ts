@@ -13,6 +13,9 @@ import { collectResults, resultUrl, RESULTS_SOURCE } from './services/collectBoa
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
 import { sizeExperimentalPortfolioResult } from './services/experimentalSizing.js';
+import { historicalTrifectaExperimentDecision, historicalTrifectaExperimentPerformance,
+  historicalTrifectaExperimentBets, settleHistoricalTrifectaExperimentOpen } from './services/historicalTrifectaExperiment.js';
+import { primaryPaperTiming } from './services/paperTiming.js';
 import { buildExperimentalStakeComparison } from './services/experimentalStakeComparison.js';
 import { splitRowsForD1 } from './services/d1Batch.js';
 import { boatArchiveEvidenceValid } from './services/boatArchiveEvidence.js';
@@ -481,7 +484,7 @@ async function settleOpen(db: Db) {
       settled++;
     }
   }
-  return settled + await settleExperimentalOpen(db);
+  return settled + await settleExperimentalOpen(db) + await settleHistoricalTrifectaExperimentOpen(db);
 }
 async function settleExperimentalOpen(db: Db) {
  const open=await all<any>(db,`SELECT b.* FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id
@@ -606,19 +609,6 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now(), oddsCont
    else if(decisionChanges){report.abstainedByReason[abstentionReason]=(report.abstainedByReason[abstentionReason]??0)+1;}
  }
  return report;
-}
-function primaryPaperTiming(cutoffAt: string | null | undefined, decisionAt: number, cutoffSource?: string | null, cutoffObservedAt?: string | null) {
-  const cutoffMs = cutoffAt ? Date.parse(cutoffAt) : Number.NaN;
-  const observedMs = cutoffObservedAt ? Date.parse(cutoffObservedAt) : Number.NaN;
-  if (cutoffSource !== TRUSTED_CUTOFF_SOURCE || !Number.isFinite(cutoffMs) || !Number.isFinite(observedMs)) return { eligible: false, reason: 'missing_or_invalid_cutoff', cutoffMs: null, targetMs: null, secondsBeforeCutoff: null, targetDeltaSeconds: null };
-  if (observedMs > decisionAt + 5_000) return { eligible: false, reason: 'future_cutoff_observation', cutoffMs, targetMs: cutoffMs - PRIMARY_PAPER_OFFSET_MS, secondsBeforeCutoff: null, targetDeltaSeconds: null };
-  if (decisionAt - observedMs > BOATRACE_CUTOFF_MAX_AGE_MS) return { eligible: false, reason: 'stale_cutoff_evidence', cutoffMs, targetMs: cutoffMs - PRIMARY_PAPER_OFFSET_MS, secondsBeforeCutoff: null, targetDeltaSeconds: null };
-  const targetMs = cutoffMs - PRIMARY_PAPER_OFFSET_MS;
-  const delta = decisionAt - targetMs;
-  const secondsBeforeCutoff = (cutoffMs - decisionAt) / 1000;
-  const targetDeltaSeconds = delta / 1000;
-  if (Math.abs(delta) <= PRIMARY_PAPER_TOLERANCE_MS) return { eligible: true, reason: null, cutoffMs, targetMs, secondsBeforeCutoff, targetDeltaSeconds };
-  return { eligible: false, reason: delta > PRIMARY_PAPER_TOLERANCE_MS ? 'missed_timing' : 'not_due', cutoffMs, targetMs, secondsBeforeCutoff, targetDeltaSeconds };
 }
 function validProbability(value: unknown): boolean {
   return value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 1;
@@ -1299,6 +1289,10 @@ app.get('/bets/experimental',async c=>{
    finalOdds:row.repair_reason||!['won','lost'].includes(row.status)?null:(row.status==='won'&&row.selection===row.official_selection&&row.final_payout_per_100!=null?Number(row.final_payout_per_100)/100:finalTrifectaOdds(row.result_evidence,{id:row.race_id,race_date:row.race_date,venue_id:row.venue_id,race_no:row.race_no},row.selection,row.official_selection)),
    officialSelection:typeof row.official_selection==='string'&&row.official_selection.split('-').length===3?row.official_selection:null})));
 });
+app.get('/bets/historical-trifecta-experiment',async c=>{
+ c.header('Cache-Control','private, no-store');
+ return c.json(await historicalTrifectaExperimentBets(c.env.DB));
+});
 app.get('/paper/decisions',async c=>{
  const date=c.req.query('date')??jstRaceDate();
  if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return jsonError(c,'date must be YYYY-MM-DD');
@@ -1519,6 +1513,10 @@ app.get('/performance/experimental',async c=>{
    comparison,
    decisions:rows.map((x:any)=>({raceId:x.race_id,raceDate:x.race_date,raceNo:Number(x.race_no),venueName:x.venue_name??null,outcome:x.outcome,reason:x.reason??null,stake:Number(x.stake),modelId:x.model_id,decidedAt:x.decided_at,probability:x.probability==null?null:Number(x.probability),odds:x.odds==null?null:Number(x.odds),uncertainty:x.uncertainty==null?null:Number(x.uncertainty),expectedRoi:x.expected_roi==null?null:Number(x.expected_roi)})),
    sizing:{method:'fractional-kelly-portfolio',minimumTicketStake:100,stakeUnit:100,perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'}});
+});
+app.get('/performance/historical-trifecta-experiment',async c=>{
+ c.header('Cache-Control','private, no-store');
+ return c.json(await historicalTrifectaExperimentPerformance(c.env.DB));
 });
 app.get('/performance/breakdown',async c=>{const db=c.env.DB,origin=originFilter(c.req.query('origin'));
  const O=`(? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet('b')}`;
@@ -1779,6 +1777,8 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
   // This is before the hourly :05 early return and before ten-minute maintenance.
   const experimental=await experimentalPaperDecision(env.DB,Date.now(),oddsContext);
   console.info(JSON.stringify({event:'experimental-paper-decision',...experimental}));
+  const historical=await historicalTrifectaExperimentDecision(env.DB,Date.now(),oddsContext);
+  console.info(JSON.stringify({event:'historical-trifecta-virtual-experiment',...historical}));
   const paperBoundary = Math.floor(event.scheduledTime / 60_000) % 10 === 0;
   // Reserve minute :05 for the hourly result pass. This is not a ten-minute
   // maintenance boundary; isolating it avoids consuming the 50-query free
