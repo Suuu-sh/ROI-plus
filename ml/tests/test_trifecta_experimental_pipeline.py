@@ -308,7 +308,7 @@ def test_separate_minute_experimental_forecast_workflow_is_read_only_to_learning
     assert "workflow_call:" in workflow
     assert "uses: ./.github/workflows/trifecta-experimental-forecast.yml" in schedule
     assert "secrets: inherit" in schedule
-    forecast_cron = "3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *"
+    forecast_cron = "40 0,5,10 * * *"
     assert f"cron: '{forecast_cron}'" in schedule
     assert schedule.count(f"github.event.schedule == '{forecast_cron}'") == 2
     assert schedule.count(f"github.event.schedule != '{forecast_cron}'") == 1
@@ -318,7 +318,8 @@ def test_separate_minute_experimental_forecast_workflow_is_read_only_to_learning
     assert "cancel-in-progress: false" in workflow
     assert "actions/cache/restore@v4" in workflow
     assert "actions/cache/save@v4" not in workflow
-    assert "python -m edgelab.experimental_forecast_job" in workflow
+    assert "python -u -m edgelab.experimental_forecast_job --duration-minutes 300" in workflow
+    assert "timeout-minutes: 320" in workflow
     assert "INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}" in workflow
     assert "train-trifecta-experimental" not in workflow
     assert "Register only" not in workflow
