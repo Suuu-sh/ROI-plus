@@ -32,6 +32,7 @@ export function ExperimentalBetsHistory({ compact = false }: { compact?: boolean
             <span className={`text-xs ${bet.status === 'won' ? 'text-pos' : bet.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{statusLabel[bet.status]}</span>
           </div>
           {bet.status === 'void' && <p className="mt-2 text-xs text-muted">返金済み{bet.repairReason ? ` · ${repairReasonLabel(bet.repairReason)}` : ''}</p>}
+          <p className="mt-2 text-xs text-muted">公式結果 {bet.officialSelection ? `三連単 ${bet.officialSelection}` : '未取得'}</p>
           <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-4">
             <Metric label={bet.status === 'void' ? '無効化した旧記録額' : '購入額'} value={yen(bet.stake)} />
             <Metric label="購入時オッズ" value={bet.oddsAtBet == null ? '—' : bet.oddsAtBet.toFixed(2)} />

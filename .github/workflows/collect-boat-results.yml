@@ -1,0 +1,31 @@
+name: collect purchased boat results
+on:
+  workflow_dispatch:
+    inputs:
+      confirmed:
+        description: 'Explicitly confirm one production result collection pass'
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: boat-result-collection
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: inputs.confirmed == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect and settle eligible virtual purchases
+        env:
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+        run: |
+          set -euo pipefail
+          response="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${INGEST_TOKEN}" \
+            --header 'content-type: application/json' \
+            --data '{"confirmed":true}' \
+            https://roi-plus-api.suuu-sh.workers.dev/api/admin/collect-boat-results)"
+          python -c 'import json,sys; data=json.load(sys.stdin); print(json.dumps({k:data.get(k) for k in ("status","targets","verified","records","attempted","reason")},ensure_ascii=False))' <<<"$response"

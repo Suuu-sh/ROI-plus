@@ -1266,7 +1266,7 @@ it('lists placed experimental paper tickets separately from ordinary bet history
  expect(rows[0]).toMatchObject({id:'history-exp-void',recordKind:'experimental_paper',decisionId:voidDecision,status:'void',payout:100,profit:0,repairReason:'invalid_stake_unit'});
  expect(rows.find(row=>row.id==='history-exp-2')).toEqual({id:'history-exp-2',recordKind:'experimental_paper',experimentKey:'boat-trifecta-small-sample-v1',decisionId:placedDecision,
   raceId:placedRace,sport:'boat',betType:'trifecta',selection:'1-3-2',stake:100,predictedProb:0.1,probabilityStd:0.01,oddsAtBet:20,expectedRoi:1,
-  modelId,placedAt,status:'void',payout:100,profit:0,settledAt,repairReason:'invalid_stake_unit',dataOrigin:'real',venueName:'Ticket fixture',raceNo:41,raceDate:'2099-01-01'});
+  modelId,placedAt,status:'void',payout:100,profit:0,settledAt,repairReason:'invalid_stake_unit',dataOrigin:'real',venueName:'Ticket fixture',raceNo:41,raceDate:'2099-01-01',officialSelection:null});
  expect(rows.find(row=>row.id==='history-exp-1')).toMatchObject({id:'history-exp-1',recordKind:'experimental_paper',status:'won',payout:500,profit:400,settledAt,
   raceId:placedRace,raceNo:41,raceDate:'2099-01-01'});
  expect(rows.find(row=>row.id==='history-exp-2')).not.toHaveProperty('edgeLabel');expect(rows.find(row=>row.id==='history-exp-2')).not.toHaveProperty('finalOdds');

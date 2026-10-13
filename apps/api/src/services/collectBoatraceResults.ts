@@ -39,9 +39,12 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
     WHERE r.sport='boat' AND r.data_origin='real' AND r.status IN ('scheduled','closed','finished')
       AND r.post_time IS NOT NULL AND julianday(r.post_time)<=julianday(?)
       AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-      AND ((?=0 AND EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.sport='boat' AND b.data_origin='real'
+      AND ((?=0 AND (EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.sport='boat' AND b.data_origin='real'
         AND b.status='open' AND b.bet_type IN ('win','trifecta')
-        AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=b.id)))
+        AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=b.id))
+        OR EXISTS(SELECT 1 FROM experimental_paper_bets eb
+          JOIN experimental_paper_decisions ed ON ed.id=eb.decision_id AND ed.experiment_key='boat-trifecta-small-sample-v1'
+          WHERE eb.race_id=r.id AND eb.data_origin='real')))
         OR (?=1 AND r.race_date=? AND r.betting_cutoff_source='boatrace-racelist-cutoff-v1'
           AND julianday(r.betting_cutoff_at)<=julianday(?,'-5 minutes')
           AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.data_origin='real' AND b.status='open')
@@ -62,6 +65,10 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
         AND NOT EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='win' AND NOT EXISTS(SELECT 1 FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1 AND p.selection=CAST(x.number AS TEXT)))
         AND EXISTS(SELECT 1 FROM results x JOIN payouts p ON p.race_id=x.race_id AND p.data_origin=x.data_origin AND p.bet_type='win' AND p.selection=CAST(x.number AS TEXT) AND p.payout>0 WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)
         AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.data_origin='real' AND b.status='open' AND b.bet_type='trifecta'
+          AND NOT EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
+            AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3)))
+        AND NOT EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real' AND eb.status='open'
+          AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=eb.id)
           AND NOT EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
             AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3)))
       ))
@@ -296,6 +303,9 @@ const currentSourceGuard = `EXISTS(SELECT 1 FROM races current JOIN (SELECT ? da
     AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=current.id)
     AND (EXISTS(SELECT 1 FROM bets b WHERE b.race_id=current.id AND b.data_origin='real' AND b.status='open' AND b.sport='boat' AND b.bet_type IN ('win','trifecta')
       AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=b.id))
+      OR EXISTS(SELECT 1 FROM experimental_paper_bets eb
+        JOIN experimental_paper_decisions ed ON ed.id=eb.decision_id AND ed.experiment_key='boat-trifecta-small-sample-v1'
+        WHERE eb.race_id=current.id AND eb.data_origin='real')
       OR (json_extract(gate.data,'$.labelOnly')=1 AND json_extract(gate.data,'$.labelArchiveId') IS NOT NULL
         AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=current.id AND b.data_origin='real' AND b.status='open')
         AND current.betting_cutoff_source='boatrace-racelist-cutoff-v1'

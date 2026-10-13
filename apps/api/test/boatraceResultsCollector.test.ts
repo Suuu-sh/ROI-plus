@@ -55,6 +55,21 @@ describe('purchased real boat hourly results',()=>{
     expect(await settleOpen(DB)).toBe(1);
     expect(sqlite.prepare('SELECT status,profit,odds_at_bet FROM bets').get()).toMatchObject({status:'won',profit:330,odds_at_bet:null});
   });
+  it('collects official results for an experimental-only purchase',async()=>{
+    const raceId=seed();sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
+    const modelId='fixture-model',hash='a'.repeat(64);
+    sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
+      VALUES(?,'candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
+      .run(modelId,hash,hash,hash,'2026-10-11T01:00:00Z',JSON.stringify({schema:'edgelab-experimental-trifecta-artifact-v1',modelId,trainingMode:'experimental',experimentalOnly:true,files:{[`${modelId}.pkl`]:{sha256:hash}}}),JSON.stringify({experimentalOnly:true,trainingMode:'experimental',status:'candidate',boatFeatureSchemaVersion:'boat-prerace-v2-no-weather-experimental-v1',ticketBetType:'trifecta',ticketArtifactSha256:hash}),'2026-10-11T01:00:00Z');
+    sqlite.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,sizing_method,snapshot_json)
+      VALUES('experimental-result-decision','boat-trifecta-small-sample-v1',?,?,'2026-10-11T02:00:00Z','placed',100,'fractional-kelly-portfolio','{}')`).run(raceId,modelId);
+    sqlite.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+      VALUES('experimental-result-ticket','experimental-result-decision',?,?,'1-2-3',100,0.1,0.01,20,1,'2026-10-11T02:00:00Z','open','real')`).run(raceId,modelId);
+    expect(await selectResultsTargets(DB,now)).toEqual([expect.objectContaining({id:raceId})]);
+    expect(await collectResults(DB,now,{fetch:fetchPage})).toMatchObject({status:'success',verified:1});
+    expect(sqlite.prepare("SELECT payout FROM payouts WHERE race_id=? AND bet_type='trifecta'").get(raceId)).toMatchObject({payout:3770});
+    expect(await selectResultsTargets(DB,new Date(now.getTime()+3600000))).toEqual([]);
+  });
   it('records five ranked finishers and settles a capsize ticket only with official no-refund evidence',async()=>{
     const raceId=seed();sqlite.prepare("UPDATE bets SET selection='3' WHERE id=?").run(`${raceId}-bet`);
     sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES(?,?,'boat','win','6',100,'manual','INSUFFICIENT_DATA','2026-10-11T02:01:00Z','open','real')").run(`${raceId}-terminal-bet`,raceId);

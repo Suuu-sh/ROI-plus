@@ -111,6 +111,7 @@ export interface ExperimentalBet {
   venueName: string | null
   raceNo: number
   raceDate: string
+  officialSelection: string | null
 }
 
 export interface ExperimentalPerformance {

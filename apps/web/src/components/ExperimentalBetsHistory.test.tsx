@@ -16,6 +16,7 @@ describe('ExperimentalBetsHistory', () => {
       predictedProb: 0.12, probabilityStd: 0.02, oddsAtBet: 9.5, expectedRoi: 0.14, modelId: 'experimental-model',
       placedAt: '2026-10-13T03:00:00.000Z', status: 'open', payout: null, profit: null, settledAt: null,
       dataOrigin: 'real', venueName: '平和島', raceNo: 12, raceDate: '2026-10-13',
+      officialSelection: null,
     }
     experimentalBets.mockResolvedValue([bet])
 
@@ -26,6 +27,7 @@ describe('ExperimentalBetsHistory', () => {
     expect(screen.getByText('実験')).toBeTruthy()
     expect(screen.getByText('三連単 1-2-3')).toBeTruthy()
     expect(screen.getByText('¥100')).toBeTruthy()
+    expect(screen.getByText('公式結果 未取得')).toBeTruthy()
     expect(screen.getByText(/通常の購入履歴・残高・成績とは別/)).toBeTruthy()
   })
 
@@ -36,6 +38,7 @@ describe('ExperimentalBetsHistory', () => {
       predictedProb: 0.12, probabilityStd: 0.02, oddsAtBet: 9.5, expectedRoi: 0.14, modelId: 'experimental-model',
       placedAt: '2026-10-13T03:00:00.000Z', status: 'void', repairReason: 'invalid_stake_unit', payout: 22, profit: 0, settledAt: '2026-10-13T04:00:00.000Z',
       dataOrigin: 'real', venueName: '平和島', raceNo: 12, raceDate: '2026-10-13',
+      officialSelection: '4-1-3',
     }
     experimentalBets.mockResolvedValue([bet])
 
@@ -46,5 +49,6 @@ describe('ExperimentalBetsHistory', () => {
     expect(screen.getByText('無効化した旧記録額')).toBeTruthy()
     expect(screen.queryByText('invalid_stake_unit')).toBeNull()
     expect(screen.getByText('¥22')).toBeTruthy()
+    expect(screen.getByText('公式結果 三連単 4-1-3')).toBeTruthy()
   })
 })
