@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Bar, BarChart, CartesianGrid, Legend, Line, ComposedChart, ReferenceLine, ResponsiveContainer, Scatter, Tooltip, XAxis, YAxis } from 'recharts'
 import type { Breakdown } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
@@ -7,7 +8,7 @@ import { odds, pct, signedYen, tone, yen } from '../lib/format'
 import { t } from '../i18n'
 import { BetsTable } from '../components/BetsTable'
 import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
-import { Empty, ErrorState, Loading, Section, SportIcon } from '../components/ui'
+import { CountUp, Empty, ErrorState, Loading, Section, SportIcon } from '../components/ui'
 
 const axis = { fontSize: 11, fill: 'rgb(var(--faint))' }
 const tip = { contentStyle: { background: 'rgb(var(--surface))', border: '1px solid rgb(var(--line))', borderRadius: 8, fontSize: 12 } }
@@ -22,8 +23,8 @@ export function PerformancePage() {
   return (
     <div className="space-y-5">
       <div>
-        <div className="flex flex-wrap items-center justify-between gap-2"><h1 className="text-xl font-semibold tracking-tight">成績</h1><button className="btn-ghost h-8 text-xs" onClick={q.reload} disabled={q.loading}>更新</button></div>
-        <p className="mt-1 text-sm text-muted">回収率だけでなく、予測確率の校正と期待値帯ごとの実績で評価します。</p>
+        <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="kicker">PERFORMANCE</div><h1 className="draw-underline mt-1 inline-block text-2xl font-black tracking-tight">成績</h1></div><button className="btn-ghost h-8 text-xs" onClick={q.reload} disabled={q.loading}>更新</button></div>
+        <p className="mt-3 text-sm text-muted">回収率だけでなく、予測確率の校正と期待値帯ごとの実績で評価します。</p>
       </div>
 
       <ProfitabilityNotice
@@ -59,9 +60,9 @@ export function PerformancePage() {
         {(['horse', 'boat'] as const).map((s) => {
           const r = bd.bySport.find((x) => x.sport === s)
           return (
-            <div key={s} className="card p-4">
-              <div className={`flex items-center gap-2 text-sm font-semibold ${s === 'horse' ? 'text-horse' : 'text-boat'}`}><SportIcon sport={s} />{t().sport[s]}の回収率</div>
-              <div className={`num mt-2 text-3xl font-semibold ${r?.roi == null ? '' : r.roi >= 1 ? 'text-pos' : 'text-neg'}`}>{pct(r?.roi)}</div>
+            <div key={s} className={`card lift border-t-4 p-4 ${s === 'horse' ? 'border-t-horse' : 'border-t-boat'}`}>
+              <div className={`flex items-center gap-2 text-sm font-bold ${s === 'horse' ? 'text-horse' : 'text-boat'}`}><SportIcon sport={s} />{t().sport[s]}の回収率</div>
+              <div className={`figure mt-3 text-[44px] ${r?.roi == null ? '' : r.roi >= 1 ? 'text-pos' : 'text-neg'}`}><CountUp value={pct(r?.roi)} /></div>
               <div className="num mt-1 flex gap-4 text-xs text-muted">
                 <span>確定購入 {r?.bets ?? 0}</span><span>的中率 {pct(r?.hitRate)}</span>
                 <span className={tone(r?.profit)}>損益 {signedYen(r?.profit ?? 0)}</span>
@@ -104,15 +105,27 @@ export function PerformancePage() {
         </div>
       </Section>
 
-      <Section title="仮想購入履歴"><BetsTable bets={bets} /></Section>
+      <Section title="仮想購入履歴" right={<span className="num text-xs text-muted">{bets.length.toLocaleString()}点</span>}><PagedBets bets={bets} /></Section>
     </div>
   )
+}
+
+const BET_PAGE = 50
+
+function PagedBets({ bets }: { bets: Parameters<typeof BetsTable>[0]['bets'] }) {
+  const [limit, setLimit] = useState(BET_PAGE)
+  return <>
+    <BetsTable bets={bets} limit={limit} />
+    {bets.length > limit && <div className="border-t border-line p-3 text-center">
+      <button className="btn-ghost h-9 text-xs" onClick={() => setLimit((n) => n + BET_PAGE)}>さらに表示（残り {(bets.length - limit).toLocaleString()}点）</button>
+    </div>}
+  </>
 }
 
 function ComparisonMetric({ title, value }: { title: string; value: { stake: number; payout: number; profit: number; roi: number | null } }) {
   return <div className="bg-surface p-4">
     <div className="text-sm font-medium">{title}</div>
-    <div className={`num mt-2 text-2xl font-semibold ${value.profit >= 0 ? 'text-pos' : 'text-neg'}`}>{signedYen(value.profit)}</div>
+    <div className={`figure mt-2 text-[32px] ${value.profit >= 0 ? 'text-pos' : 'text-neg'}`}><CountUp value={signedYen(value.profit)} /></div>
     <div className="num mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
       <span>購入額 {yen(value.stake)}</span><span>払戻 {yen(value.payout)}</span><span>回収率 {pct(value.roi)}</span>
     </div>
@@ -175,8 +188,8 @@ function MonthlyChart({ data }: { data: Breakdown['byMonth'] }) {
           <ReferenceLine y={0} stroke="rgb(var(--faint))" />
           <Tooltip {...tip} formatter={(v, n) => [signedYen(Number(v)), n === 'horse' ? '競馬' : 'ボート']} cursor={{ fill: 'rgb(var(--raised))' }} />
           <Legend formatter={(v) => (v === 'horse' ? '競馬' : 'ボート')} wrapperStyle={{ fontSize: 12 }} />
-          <Bar dataKey="horse" fill="rgb(var(--horse))" radius={[3, 3, 0, 0]} maxBarSize={28} />
-          <Bar dataKey="boat" fill="rgb(var(--boat))" radius={[3, 3, 0, 0]} maxBarSize={28} />
+          <Bar dataKey="horse" fill="rgb(var(--horse))" radius={[2, 2, 0, 0]} maxBarSize={28} animationDuration={1100} />
+          <Bar dataKey="boat" fill="rgb(var(--boat))" radius={[2, 2, 0, 0]} animationDuration={1100} animationBegin={150} maxBarSize={28} />
         </BarChart>
       </ResponsiveContainer>
     </div>

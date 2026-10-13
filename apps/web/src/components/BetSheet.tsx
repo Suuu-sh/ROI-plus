@@ -102,12 +102,12 @@ export function BetSheet({ race, entry, ticket, onClose, onPlaced }: {
   const risky = choice.edge === 'INSUFFICIENT_DATA' || choice.edge === 'NEGATIVE_EDGE'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center" onClick={(event) => { if (event.target === event.currentTarget) close() }}>
-      <div role="dialog" aria-modal="true" aria-label={ticket ? '仮想購入' : '仮想購入の組み立て'} className={`max-h-[92vh] w-full overflow-y-auto rounded-t-2xl border border-line bg-surface p-5 shadow-xl sm:rounded-2xl ${ticket ? 'max-w-md' : 'max-w-2xl'}`} onClick={(e) => e.stopPropagation()}>
+    <div className="anim-fade fixed inset-0 z-50 flex items-end justify-center bg-black/50 backdrop-blur-[2px] sm:items-center" onClick={(event) => { if (event.target === event.currentTarget) close() }}>
+      <div role="dialog" aria-modal="true" aria-label={ticket ? '仮想購入' : '仮想購入の組み立て'} className={`anim-sheet max-h-[92vh] w-full overflow-y-auto rounded-t-2xl border-2 border-ink border-t-[6px] bg-surface p-5 shadow-[6px_6px_0_rgb(var(--ink)/0.9)] sm:rounded-xl ${ticket ? 'max-w-md' : 'max-w-2xl'}`} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="label">仮想購入・{betTypeLabel[ticket?.betType ?? 'win']}</div>
-            <div className="mt-1 text-lg font-semibold">{ticket ? ticket.selection : `${race.venueName} ${race.raceNo}R`}</div>
+            <div className="mt-1 text-xl font-black">{ticket ? ticket.selection : `${race.venueName} ${race.raceNo}R`}</div>
             <p className="mt-1 text-xs text-muted">{ticket ? `${race.venueName} ${race.raceNo}R` : `候補を最大${MAX_SELECTIONS}件選び、各金額を円単位で指定します。候補順位は購入時点のサーバー判定で記録します。`}</p>
           </div>
           {ticket && <EdgeBadge edge={ticket.edge} />}
@@ -120,7 +120,7 @@ export function BetSheet({ race, entry, ticket, onClose, onPlaced }: {
             <div><dt className="text-[11px] text-muted">取得オッズ</dt><dd className="num font-semibold">{odds(ticket.odds)}</dd><dd className="mt-0.5 text-[10px] text-faint">{ticket.oddsCapturedAt ? `${dateTime(ticket.oddsCapturedAt)} 取得` : '取得時刻不明'}</dd></div>
             <div><dt className="text-[11px] text-muted">期待収益率</dt><dd className={`num font-semibold ${tone(ticket.expectedRoi)}`}>{signedPct(ticket.expectedRoi)}</dd></div>
           </dl>
-          <div className="mt-4 flex items-center justify-between"><span className="text-sm text-muted">金額</span><div className="flex items-center gap-2"><button className="btn-ghost h-9 w-9 px-0" onClick={() => updateTicketUnits(Math.max(1, units - 1))} disabled={busy} aria-label="減らす">−</button><span className="num w-20 text-center text-lg font-semibold">{yen(ticketStake)}</span><button className="btn-ghost h-9 w-9 px-0" onClick={() => updateTicketUnits(Math.min(100, units + 1))} disabled={busy} aria-label="増やす">＋</button></div></div>
+          <div className="mt-4 flex items-center justify-between"><span className="text-sm text-muted">金額</span><div className="flex items-center gap-2"><button className="btn-ghost h-9 w-9 px-0" onClick={() => updateTicketUnits(Math.max(1, units - 1))} disabled={busy} aria-label="減らす">−</button><span key={ticketStake} className="figure anim-pop w-24 text-center text-2xl">{yen(ticketStake)}</span><button className="btn-ghost h-9 w-9 px-0" onClick={() => updateTicketUnits(Math.min(100, units + 1))} disabled={busy} aria-label="増やす">＋</button></div></div>
           <div className="mt-2 flex justify-end gap-1.5">{[1, 5, 10].map((n) => <button key={n} onClick={() => updateTicketUnits(n)} disabled={busy} className={`rounded-md border px-2 py-0.5 text-xs disabled:opacity-40 ${units === n ? 'border-ink text-ink' : 'border-line text-muted'}`}>{yen(n * UNIT)}</button>)}</div>
           <div className="mt-3 text-right text-xs text-muted">期待払戻 <span className="num text-ink">{yen(ticketExpectedReturn)}</span>{ticketExpectedReturn != null && <span className={`num ml-1 ${tone(ticketExpectedReturn - ticketStake)}`}>({signedYen(ticketExpectedReturn - ticketStake)})</span>}</div>
           {risky && <p className="mt-3 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">この買い目は購入候補外です。検証目的の手動購入として記録されます。</p>}

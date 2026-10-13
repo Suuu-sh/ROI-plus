@@ -19,8 +19,8 @@ export function DataPage() {
     <div className="space-y-5">
       <div className="flex items-end justify-between">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">データ収集</h1>
-          <p className="mt-1 text-sm text-muted">利用規約で許可された無料ソースのみ。取得できない値は欠損として扱い、補完しません。</p>
+          <div><div className="kicker">DATA PIPELINE</div><h1 className="draw-underline mt-1 inline-block text-2xl font-black tracking-tight">データ収集</h1></div>
+          <p className="mt-3 text-sm text-muted">利用規約で許可された無料ソースのみ。取得できない値は欠損として扱い、補完しません。</p>
         </div>
         <button className="btn-ghost h-8 text-xs" onClick={q.reload}>更新</button>
       </div>
