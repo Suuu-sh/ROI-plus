@@ -43,3 +43,9 @@
 - オプション `sync_validation` は認証済みモデルレジストリを読み、検証済みcandidateのmetricsだけを更新する。JSON/pickle artifact本体は変更しない。`promotionEligible=false` はそのまま維持し、通常昇格とは別の `initialBaselineEligible` evidenceを記録するだけで、昇格は明示的な人手承認が必要。
 - workflow は検証レポートと同一のJSON/pickle candidate artifact bundleを90日間保存する。承認後にActions cacheが失効している場合は、Daily workflowを手動実行し `validated_model_run_id` に検証workflowのrun IDを指定して正確なartifact pairを復元する。日次推論はregistryに登録されたsafe schema markerとpickle SHAが一致しない限りfail closedし、候補や旧artifactへ自動フォールバックしない。artifact retention/cacheともに失効した場合は再検証可能な正確なartifact pairを再取得するまで推論を再開しない。
 - Daily は当日と前日のKファイルを毎回強制再取得する。Kは開催中に更新され得るため、通常のB・過去日のキャッシュ方針は変えず、更新されたKが有効なLZHかつ同日レース結果としてparseできた場合だけatomic replaceする。404、取得/parse失敗、要求budget不足は古いraw cacheと正規化済み行を保持し、collection runを `partial` / `failed` として記録する。強制再取得もネットワーク要求budgetに計上する。
+
+## 学習データ保持方針（2026-10-13合意）
+
+- 学習用の元データは、まず3か月程度の保持を目標として運用し、2027-01-13頃に必要な学習期間と実際の保存容量を見直す。容量は未測定であり、現在の保存構成が3か月の保持を保証するものではない。
+- 学習期間と保存期間は別に判断する。モデル学習・評価に不要になったことだけを理由に、購入記録やモデル評価の根拠となるデータを削除しない。購入・モデル評価根拠は安易に削除せず、削除を検討する場合は学習検証に不要であること、必要な証拠を除外しないこと、復元確認済みバックアップがあること、明示承認があることを事前に満たす。
+- 途中オッズの30日保持と品質除外ログの1時間保持は現行方針を維持する。これ以外に自動削除を追加しない。既存の無期限アーカイブ等に「3か月経過後」の削除処理は追加しない。
