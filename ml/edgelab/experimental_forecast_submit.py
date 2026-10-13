@@ -55,8 +55,10 @@ def _http_response_diagnostics(exc: urllib.error.HTTPError, request_url: str) ->
         content_type = str(headers.get("Content-Type", "")).lower() if headers else ""
         mitigated = str(headers.get("cf-mitigated", "")).strip().lower() == "challenge" if headers else False
         server = str(headers.get("Server", "")).lower() if headers else ""
+        api_revision_marker = (headers.get("X-ROI-API-Revision") == "experimental-paper-v1"
+                               if headers else False)
     except Exception:
-        content_type, mitigated, server = "", False, ""
+        content_type, mitigated, server, api_revision_marker = "", False, "", False
     is_html = "text/html" in content_type or body.lstrip().lower().startswith((b"<!doctype html", b"<html"))
     if is_html:
         lower_body = body[:8192].lower()
@@ -73,6 +75,7 @@ def _http_response_diagnostics(exc: urllib.error.HTTPError, request_url: str) ->
         edge_challenge = mitigated
         kind = "json_api_error" if isinstance(parsed, dict) else "non_json_error"
     summary: dict[str, Any] = {"responseKind": kind, "edgeMitigatedChallenge": edge_challenge}
+    summary["originApiMarkerPresent"] = api_revision_marker
     expected_suffix = "/api/ingest/experimental-trifecta/forecast"
     try:
         request_parts = urlsplit(request_url)

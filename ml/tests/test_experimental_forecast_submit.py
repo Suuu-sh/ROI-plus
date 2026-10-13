@@ -160,3 +160,19 @@ def test_submit_forecasts_reports_only_boolean_redirect_path_comparison():
     assert result["responsePathMatchesRequest"] is False
     rendered = json.dumps(result)
     assert "edge.example" not in rendered and "secret" not in rendered
+
+
+def test_submit_forecasts_reports_only_exact_origin_api_marker_boolean():
+    def response_for(marker):
+        headers = {"Content-Type": "application/json"}
+        if marker is not None:
+            headers["X-ROI-API-Revision"] = marker
+
+        def opener(*_args, **_kwargs):
+            raise HTTPError("https://api.example/api/ingest/experimental-trifecta/forecast",
+                            403, "private", headers, BytesIO(b'{"error":"forbidden"}'))
+        return submit_forecasts(_envelope(count=1), base_url="https://api.example", token="test", opener=opener)
+
+    assert response_for("experimental-paper-v1")["originApiMarkerPresent"] is True
+    assert response_for("other-private-marker")["originApiMarkerPresent"] is False
+    assert response_for(None)["originApiMarkerPresent"] is False
