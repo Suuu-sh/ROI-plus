@@ -157,10 +157,11 @@ export interface CollectionStatus {
   qualityExclusions?: { at: string; source: string; count: number; reason: string }[];
   tableCounts: Record<string, number>;
   d1WriteBudget: {
+    enabled?: boolean;
     date: string; limit: number; essentialLimit: number; optionalLimit: number; oddsLimit: number;
     reserved: number | null; essentialReserved: number | null; optionalReserved: number | null; oddsReserved: number | null;
     remaining: number | null; essentialRemaining: number | null; optionalRemaining: number | null;
-    state: 'known' | 'exhausted' | 'missing' | 'invalid';
+    state: 'known' | 'exhausted' | 'missing' | 'invalid' | 'disabled';
   };
   freeTier: { d1RowsApprox: number; d1RowsNote: string };
 }

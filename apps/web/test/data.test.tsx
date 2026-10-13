@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { DataPage } from '../src/pages/Data'
 import { api } from '../src/lib/api'
 
@@ -12,5 +12,28 @@ describe('data collection status', () => {
     expect(ui.getByText('HTTP 503').className).toContain('text-neg')
     expect(ui.container.textContent).toContain('1 レース試行。通信失敗ではありません。')
     ui.unmount();mock.mockRestore()
+  })
+
+  it('explains disabled app reservations without presenting null remaining values as zero', async () => {
+    const mock = vi.spyOn(api, 'collection').mockResolvedValue({
+      sources: [], errors: [], qualityExclusions: [], tableCounts: {},
+      d1WriteBudget: {
+        enabled: false, state: 'disabled', date: '2026-10-13', limit: 0,
+        essentialLimit: 0, optionalLimit: 0, oddsLimit: 0, reserved: null,
+        essentialReserved: null, optionalReserved: null, oddsReserved: null,
+        collectionReserved: null, collectionRemaining: null, remaining: null,
+        essentialRemaining: null, optionalRemaining: null,
+      },
+      freeTier: { d1RowsApprox: 0, d1RowsNote: 'test' },
+    })
+    const ui = render(<DataPage />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'D1 日次書込予約（Worker 内推定）' })).toBeTruthy())
+    const section = screen.getByRole('heading', { name: 'D1 日次書込予約（Worker 内推定）' }).closest('section')!
+    await waitFor(() => expect(section.textContent).toContain('アプリ内の日次書込予算制限は無効です。'))
+    expect(section.textContent).toContain('Cloudflare D1 自体の利用上限・実使用量は別管理')
+    expect(section.textContent).not.toContain('unit')
+    expect(section.textContent).not.toContain('残り')
+    expect(section.textContent).not.toContain('不明')
+    ui.unmount(); mock.mockRestore()
   })
 })

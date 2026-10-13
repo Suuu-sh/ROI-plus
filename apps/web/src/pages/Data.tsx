@@ -33,14 +33,23 @@ export function DataPage() {
       </div>
 
       <Section title="D1 日次書込予約（Worker 内推定）">
-        <div className="grid gap-3 p-4 sm:grid-cols-2">
-          <BudgetKpi label="保護枠の残り" used={d.d1WriteBudget.essentialReserved} remaining={d.d1WriteBudget.essentialRemaining} limit={d.d1WriteBudget.essentialLimit} />
-          <BudgetKpi label="任意処理枠の残り" used={d.d1WriteBudget.optionalReserved} remaining={d.d1WriteBudget.optionalRemaining} limit={d.d1WriteBudget.optionalLimit} />
-        </div>
-        <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">
-          {d.d1WriteBudget.date} UTC の予約推定値です。Cloudflare アカウント全体の実使用量・quota 残量ではありません。
-          {d.d1WriteBudget.state === 'missing' || d.d1WriteBudget.state === 'invalid' ? ' 予約状態を確認できないため、残量は不明です。' : ''}
-        </p>
+        {d.d1WriteBudget.state === 'disabled' || d.d1WriteBudget.enabled === false ? (
+          <p className="p-4 text-sm leading-relaxed text-muted">
+            アプリ内の日次書込予算制限は無効です。予約・残量の推定値は表示していません。
+            Cloudflare D1 自体の利用上限・実使用量は別管理で、この画面からは分かりません。
+          </p>
+        ) : (
+          <>
+            <div className="grid gap-3 p-4 sm:grid-cols-2">
+              <BudgetKpi label="保護枠の残り" used={d.d1WriteBudget.essentialReserved} remaining={d.d1WriteBudget.essentialRemaining} limit={d.d1WriteBudget.essentialLimit} />
+              <BudgetKpi label="任意処理枠の残り" used={d.d1WriteBudget.optionalReserved} remaining={d.d1WriteBudget.optionalRemaining} limit={d.d1WriteBudget.optionalLimit} />
+            </div>
+            <p className="border-t border-line px-4 py-3 text-[11px] leading-relaxed text-faint">
+              {d.d1WriteBudget.date} UTC の予約推定値です。Cloudflare アカウント全体の実使用量・quota 残量ではありません。
+              {d.d1WriteBudget.state === 'missing' || d.d1WriteBudget.state === 'invalid' ? ' 予約状態を確認できないため、残量は不明です。' : ''}
+            </p>
+          </>
+        )}
       </Section>
 
       <Section title="取得状況">
