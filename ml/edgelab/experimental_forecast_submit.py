@@ -5,9 +5,13 @@ import json
 import urllib.error
 import urllib.request
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 
 _SAFE_API_ERRORS = {
+    "forbidden": "access_forbidden",
+    "unauthorized": "unauthorized",
+    "official result-worker evidence is server-owned": "server_owned_evidence_denied",
     "experimental forecast envelope must contain exactly one race": "one_race_required",
     "experimental model or artifact SHA is not registered": "model_not_registered_or_sha_mismatch",
     "experimental forecast timestamp or row count is invalid": "invalid_timestamp_or_row_count",
@@ -37,10 +41,10 @@ def _api_diagnostic(body: bytes) -> str | None:
     if isinstance(code, str) and code in _SAFE_API_CODES:
         return code
     message = payload.get("error")
-    return _SAFE_API_ERRORS.get(message) if isinstance(message, str) else None
+    return _SAFE_API_ERRORS.get(message.casefold()) if isinstance(message, str) else None
 
 
-def _http_response_diagnostics(exc: urllib.error.HTTPError) -> dict[str, Any]:
+def _http_response_diagnostics(exc: urllib.error.HTTPError, request_url: str) -> dict[str, Any]:
     """Summarize a bounded denial response without exposing its body or headers."""
     try:
         body = exc.read(8193)
@@ -69,6 +73,27 @@ def _http_response_diagnostics(exc: urllib.error.HTTPError) -> dict[str, Any]:
         edge_challenge = mitigated
         kind = "json_api_error" if isinstance(parsed, dict) else "non_json_error"
     summary: dict[str, Any] = {"responseKind": kind, "edgeMitigatedChallenge": edge_challenge}
+    expected_suffix = "/api/ingest/experimental-trifecta/forecast"
+    try:
+        request_parts = urlsplit(request_url)
+        response_url = exc.geturl() or request_url
+        response_parts = urlsplit(response_url)
+        request_identity = (request_parts.scheme.lower(), request_parts.netloc.lower(), request_parts.path)
+        response_identity = (response_parts.scheme.lower(), response_parts.netloc.lower(), response_parts.path)
+        if request_parts.path == expected_suffix:
+            path_kind = "standard_endpoint_path"
+        elif request_parts.path.endswith(expected_suffix):
+            path_kind = "prefixed_base_path"
+        else:
+            path_kind = "unexpected_path"
+        summary.update({"requestPathKind": path_kind,
+                        "responseRedirected": request_identity != response_identity,
+                        "responseSameOrigin": (request_parts.scheme.lower(), request_parts.netloc.lower()) ==
+                                              (response_parts.scheme.lower(), response_parts.netloc.lower()),
+                        "responsePathMatchesRequest": request_parts.path == response_parts.path})
+    except (TypeError, ValueError):
+        summary.update({"requestPathKind": "unavailable", "responseRedirected": None,
+                        "responseSameOrigin": None, "responsePathMatchesRequest": None})
     api_reason = _api_diagnostic(body)
     if api_reason:
         summary["apiReason"] = api_reason
@@ -129,7 +154,7 @@ def submit_forecasts(envelope: dict[str, Any], *, base_url: str, token: str,
                         "http_5xx" if 500 <= status <= 599 else "http_other")
             result = _failure_result(stored, len(races), reason="api_unavailable_or_rejected",
                                      category=category)
-            result.update(_http_response_diagnostics(exc))
+            result.update(_http_response_diagnostics(exc, request.full_url))
             return result
         except (urllib.error.URLError, TimeoutError, OSError):
             return _failure_result(stored, len(races), reason="api_unavailable_or_rejected",

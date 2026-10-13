@@ -124,3 +124,39 @@ def test_submit_forecasts_classifies_edge_challenge_without_echoing_html_or_head
     assert result["edgeMitigatedChallenge"] is True
     rendered = json.dumps(result)
     assert "private" not in rendered and "cf-chl" not in rendered and "cf-ray" not in rendered
+
+
+def test_submit_forecasts_maps_forbidden_and_reports_only_safe_path_metadata():
+    request_path = "https://api.example/api/ingest/experimental-trifecta/forecast"
+    response_url = request_path + "?token=response-secret"
+    body = json.dumps({"error": "Forbidden", "private": "body-secret"}).encode()
+
+    def opener(request, **_kwargs):
+        assert request.full_url == request_path
+        raise HTTPError(response_url, 403, "private", {"Content-Type": "application/json"}, BytesIO(body))
+
+    result = submit_forecasts(_envelope(count=1), base_url="https://api.example",
+                              token="auth-secret", opener=opener)
+    assert result["apiReason"] == "access_forbidden"
+    assert result["requestPathKind"] == "standard_endpoint_path"
+    assert result["responseRedirected"] is False
+    assert result["responseSameOrigin"] is True
+    assert result["responsePathMatchesRequest"] is True
+    rendered = json.dumps(result)
+    assert "secret" not in rendered and "private" not in rendered
+
+
+def test_submit_forecasts_reports_only_boolean_redirect_path_comparison():
+    final_url = "https://edge.example/challenge?token=secret"
+
+    def opener(*_args, **_kwargs):
+        raise HTTPError(final_url, 403, "forbidden", {"Content-Type": "application/json"},
+                        BytesIO(b'{"error":"unauthorized"}'))
+
+    result = submit_forecasts(_envelope(count=1), base_url="https://api.example", token="secret", opener=opener)
+    assert result["requestPathKind"] == "standard_endpoint_path"
+    assert result["responseRedirected"] is True
+    assert result["responseSameOrigin"] is False
+    assert result["responsePathMatchesRequest"] is False
+    rendered = json.dumps(result)
+    assert "edge.example" not in rendered and "secret" not in rendered
