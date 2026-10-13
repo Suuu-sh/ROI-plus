@@ -52,7 +52,7 @@ GitHub Actions / ローカル Python (ml/)
 
 `GET /api/bets` は購入時の情報を変更せず、未精算購入に限り `resultWaitReason` を返す。理由はレース状態・発走時刻、同じ出所の出走数と結果数（重複・出走外の結果も確認）、1着結果とその払戻、および精算状態から導く。区分は発走前、公式結果未取得、払戻未取得、結果収集失敗/一部失敗の記録あり、精算待ち、状況不明、中止、失格、欠場。失敗記録は当該レースの欠損原因を証明しない。結果収集の試行・成功時刻は、実データのボートで対象日と `mbrace-boat` ソースが一致する場合だけ返す（試行は開始、成功は完了時刻。未来時刻の記録は除外）。他の競技・サンプルには公式結果の収集状況を推定しない。サンプル購入は「サンプル（公式結果ではありません）」と明示し、公式結果待ちと混同しない。
 
-Experimental T-60 三連単の置かれた券は別テーブル `experimental_paper_bets` に保存され、通常の `/api/bets`・損益集計・残高には含めない。券単位の参照は `GET /api/bets/experimental` を使う。この API は固定 experiment の placed ticket のみ（実データのボートに限定、最大500件、新しい順）を明示的な `recordKind: 'experimental_paper'` として返し、棄権判断は返さない。`dataOrigin: 'real'` は実データ由来を示すだけで実購入ではなく、通常履歴とも分離した仮想実験の記録である。応答は `private, no-store` で、通常履歴の短期 read cache を通らない。
+Experimental T-60 三連単の置かれた券は別テーブル `experimental_paper_bets` に保存され、通常の `/api/bets`・損益集計・残高には含めない。各券の仮想購入額は100円以上かつ100円単位で、Kelly予算が100円に届かない判断は購入せず見送る。旧実装が作成した条件外の未精算券は `experimental_paper_bet_reconciliations` に原記録を残したまま無効化・返金し、精算と実験成績から除外する。券単位の参照は `GET /api/bets/experimental` を使う。この API は固定 experiment の placed ticket のみ（実データのボートに限定、最大500件、新しい順）を明示的な `recordKind: 'experimental_paper'` として返し、棄権判断は返さない。無効化した旧券は監査用に `status: 'void'` と返す。`dataOrigin: 'real'` は実データ由来を示すだけで実購入ではなく、通常履歴とも分離した仮想実験の記録である。応答は `private, no-store` で、通常履歴の短期 read cache を通らない。
 
 ## AI・データフロー
 

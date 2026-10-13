@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sizeExperimentalPortfolio } from '../src/services/experimentalSizing.js';
+import { sizeExperimentalPortfolio, sizeExperimentalPortfolioResult } from '../src/services/experimentalSizing.js';
 
 describe('sizeExperimentalPortfolio', () => {
   it('uses uncertainty-adjusted edge and stays inside per-race virtual bankroll bounds', () => {
@@ -11,7 +11,7 @@ describe('sizeExperimentalPortfolio', () => {
     expect(sized.length).toBeGreaterThan(0);
     expect(sized.some(x => x.selection === '1-2-5')).toBe(false);
     expect(sized.reduce((sum, x) => sum + x.stake, 0)).toBeLessThanOrEqual(1_000);
-    expect(sized.every(x => x.stake > 0 && x.expectedRoi > 0)).toBe(true);
+    expect(sized.every(x => x.stake >= 100 && x.stake % 100 === 0 && x.expectedRoi > 0)).toBe(true);
   });
 
   it('does not stake when edge, balance, or input integrity is insufficient', () => {
@@ -29,5 +29,14 @@ describe('sizeExperimentalPortfolio', () => {
       { selection: '1-2-4', probability: 0.08, probStd: 0.01, odds: 3 },
     ], 200);
     expect(sized.reduce((sum, x) => sum + x.stake, 0)).toBeLessThanOrEqual(200);
+    expect(sized.every(x => x.stake >= 100 && x.stake % 100 === 0)).toBe(true);
+  });
+
+  it('abstains when the portfolio budget cannot fund a 100-yen ticket', () => {
+    const result = sizeExperimentalPortfolioResult([
+      { selection: '1-2-3', probability: 0.3, probStd: 0, odds: 5 },
+    ], 704);
+    // Existing fractional-Kelly sizing would allocate 22 yen here.
+    expect(result).toEqual({ stakes: [], abstentionReason: 'minimum_virtual_stake_not_reached' });
   });
 });

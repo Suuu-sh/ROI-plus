@@ -61,6 +61,38 @@ const addPaperTrifecta=(raceId='boat-20990101-99-01',modelId='boat-trifecta-vali
  return {...fixture,decisionAt};
 };
 describe('EdgeLab API',()=>{
+ it('reconciles open invalid experimental stakes once and rejects future invalid rows',()=>{
+  const migrationDb=new Sqlite(':memory:');
+  try{
+   migrationDb.exec(`CREATE TABLE experimental_paper_decisions(id TEXT PRIMARY KEY,experiment_key TEXT,outcome TEXT);
+    CREATE TABLE experimental_paper_bets(id TEXT PRIMARY KEY,decision_id TEXT,race_id TEXT,stake INTEGER,data_origin TEXT,status TEXT);
+    CREATE TABLE experimental_bankroll(experiment_key TEXT PRIMARY KEY,available_balance INTEGER,updated_at TEXT);
+    INSERT INTO experimental_paper_decisions VALUES('placed','boat-trifecta-small-sample-v1','placed');
+    INSERT INTO experimental_paper_bets VALUES('invalid-22','placed','boat-live',22,'real','open');
+    INSERT INTO experimental_paper_bets VALUES('invalid-80','placed','boat-live',80,'real','open');
+    INSERT INTO experimental_paper_bets VALUES('valid-100','placed','boat-live',100,'real','open');
+    INSERT INTO experimental_paper_bets VALUES('settled-invalid','placed','boat-old',99,'real','lost');
+    INSERT INTO experimental_bankroll VALUES('boat-trifecta-small-sample-v1',100000,'before');`);
+   const migration=readFileSync(resolve(root,'db/migrations/0013_reconcile_invalid_experimental_stakes.sql'),'utf8');
+   migrationDb.exec(migration);
+   expect(migrationDb.prepare('SELECT bet_id,original_stake,refund_amount,repair_reason FROM experimental_paper_bet_reconciliations ORDER BY bet_id').all()).toEqual([
+    {bet_id:'invalid-22',original_stake:22,refund_amount:22,repair_reason:'invalid_stake_unit'},
+    {bet_id:'invalid-80',original_stake:80,refund_amount:80,repair_reason:'invalid_stake_unit'},
+   ]);
+   expect(migrationDb.prepare('SELECT available_balance FROM experimental_bankroll').get()).toMatchObject({available_balance:100102});
+   expect(migrationDb.prepare("SELECT status,stake FROM experimental_paper_bets WHERE id='invalid-22'").get()).toMatchObject({status:'open',stake:22});
+   expect(migrationDb.prepare("SELECT COUNT(*) n FROM experimental_paper_bet_reconciliations WHERE refund_applied_at IS NULL").get()).toMatchObject({n:0});
+
+   // Retrying the data-repair DML is a no-op after the refund marker is set.
+   const repairStart=migration.indexOf('-- The nullable refund marker');
+   const repairEnd=migration.indexOf('CREATE TRIGGER trg_experimental_paper_bets_valid_stake_insert');
+   migrationDb.exec(migration.slice(repairStart,repairEnd));
+   expect(migrationDb.prepare('SELECT available_balance FROM experimental_bankroll').get()).toMatchObject({available_balance:100102});
+   expect(()=>migrationDb.prepare("INSERT INTO experimental_paper_bets VALUES('future-22','placed','boat-new',22,'real','open')").run()).toThrow(/must be at least 100 yen/);
+   expect(()=>migrationDb.prepare("UPDATE experimental_paper_bets SET stake=99 WHERE id='valid-100'").run()).toThrow(/must be at least 100 yen/);
+  }finally{migrationDb.close();}
+ });
+
  it('health and date-filtered sample races respond',async()=>{
   expect((await app.request('/api/health',{},env())).status).toBe(200);
   // サンプルは生成日を「今日」として作られるため、シード内の最新日付を使う（実行日に依存させない）
@@ -1198,9 +1230,10 @@ it('keeps the experimental trifecta model and performance ledger separate from n
 });
 
 it('lists placed experimental paper tickets separately from ordinary bet history and metrics',async()=>{
- const placedRace='boat-20990101-99-41',abstainedRace='boat-20990101-99-42',modelId='boat-trifecta-history-fixture',artifactSha='a'.repeat(64);
+ const placedRace='boat-20990101-99-41',abstainedRace='boat-20990101-99-42',voidRace='boat-20990101-99-43',modelId='boat-trifecta-history-fixture',artifactSha='a'.repeat(64);
  addValidatedTrifectaFixture(placedRace,'history-normal-fixture');
  addValidatedTrifectaFixture(abstainedRace,'history-abstained-fixture');
+ addValidatedTrifectaFixture(voidRace,'history-void-fixture');
  const artifactManifest={schema:'edgelab-experimental-trifecta-artifact-v1',modelId,trainingMode:'experimental',experimentalOnly:true,
   files:{[`${modelId}.pkl`]:{sha256:artifactSha}}};
  const metadata={experimentalOnly:true,trainingMode:'experimental',status:'candidate',
@@ -1208,33 +1241,45 @@ it('lists placed experimental paper tickets separately from ordinary bet history
  sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
   VALUES(?,'candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
   .run(modelId,artifactSha,'b'.repeat(64),'c'.repeat(64),jstIso(Date.now()-60_000),JSON.stringify(artifactManifest),JSON.stringify(metadata),jstIso());
- const placedDecision='history-placed-decision',abstainedDecision='history-abstained-decision',placedAt=jstIso(Date.now()-2_000),settledAt=jstIso(Date.now()-1_000);
+ const placedDecision='history-placed-decision',abstainedDecision='history-abstained-decision',voidDecision='history-void-decision',placedAt=jstIso(Date.now()-2_000),voidPlacedAt=jstIso(Date.now()-1_000),settledAt=jstIso(Date.now()-500);
  sqlite.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,sizing_method,snapshot_json)
-  VALUES(?,'boat-trifecta-small-sample-v1',?,?,?,'placed',150,'fractional-kelly-portfolio','{}'),
-        (?,'boat-trifecta-small-sample-v1',?,?,?,'abstained',0,'fractional-kelly-portfolio','{}')`)
-  .run(placedDecision,placedRace,modelId,placedAt,abstainedDecision,abstainedRace,modelId,placedAt);
+  VALUES(?,'boat-trifecta-small-sample-v1',?,?,?,'placed',200,'fractional-kelly-portfolio','{}'),
+        (?,'boat-trifecta-small-sample-v1',?,?,?,'abstained',0,'fractional-kelly-portfolio','{}'),
+        (?,'boat-trifecta-small-sample-v1',?,?,?,'placed',100,'fractional-kelly-portfolio','{}')`)
+  .run(placedDecision,placedRace,modelId,placedAt,abstainedDecision,abstainedRace,modelId,placedAt,voidDecision,voidRace,modelId,voidPlacedAt);
  const insertTicket=sqlite.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,payout,profit,settled_at,data_origin)
   VALUES(?,?,?,?,?,?,?,0.01,20,1,?,?,?, ?,?,'real')`);
  insertTicket.run('history-exp-1',placedDecision,placedRace,modelId,'1-2-3',100,0.2,placedAt,'won',500,400,settledAt);
- insertTicket.run('history-exp-2',placedDecision,placedRace,modelId,'1-3-2',50,0.1,placedAt,'open',null,null,null);
+ insertTicket.run('history-exp-2',placedDecision,placedRace,modelId,'1-3-2',100,0.1,placedAt,'open',null,null,null);
+ insertTicket.run('history-exp-void',voidDecision,voidRace,modelId,'2-3-4',100,0.05,voidPlacedAt,'open',null,null,null);
+ sqlite.prepare(`INSERT INTO experimental_paper_bet_reconciliations(bet_id,experiment_key,original_stake,refund_amount,repair_reason,repaired_at,refund_applied_at)
+  VALUES(?,'boat-trifecta-small-sample-v1',100,100,'invalid_stake_unit',?,?)`)
+  .run('history-exp-2',settledAt,settledAt);
+ sqlite.prepare(`INSERT INTO experimental_paper_bet_reconciliations(bet_id,experiment_key,original_stake,refund_amount,repair_reason,repaired_at,refund_applied_at)
+  VALUES(?,'boat-trifecta-small-sample-v1',100,100,'invalid_stake_unit',?,?)`).run('history-exp-void',settledAt,settledAt);
  const normalBefore=Number(((await (await app.request('/api/performance/overview',{},env())).json()) as any).betCount);
 
  const response=await app.request('/api/bets/experimental',{},env());
  expect(response.status).toBe(200);expect(response.headers.get('cache-control')).toBe('private, no-store');
  const rows=await response.json() as any[];
- expect(rows).toHaveLength(2);
- expect(rows.map(row=>row.id)).toEqual(['history-exp-2','history-exp-1']);
- expect(rows[0]).toEqual({id:'history-exp-2',recordKind:'experimental_paper',experimentKey:'boat-trifecta-small-sample-v1',decisionId:placedDecision,
-  raceId:placedRace,sport:'boat',betType:'trifecta',selection:'1-3-2',stake:50,predictedProb:0.1,probabilityStd:0.01,oddsAtBet:20,expectedRoi:1,
-  modelId,placedAt,status:'open',payout:null,profit:null,settledAt:null,dataOrigin:'real',venueName:'Ticket fixture',raceNo:41,raceDate:'2099-01-01'});
- expect(rows[1]).toMatchObject({id:'history-exp-1',recordKind:'experimental_paper',status:'won',payout:500,profit:400,settledAt,
+ expect(rows).toHaveLength(3);
+ expect(rows[0]).toMatchObject({id:'history-exp-void',recordKind:'experimental_paper',decisionId:voidDecision,status:'void',payout:100,profit:0,repairReason:'invalid_stake_unit'});
+ expect(rows.find(row=>row.id==='history-exp-2')).toEqual({id:'history-exp-2',recordKind:'experimental_paper',experimentKey:'boat-trifecta-small-sample-v1',decisionId:placedDecision,
+  raceId:placedRace,sport:'boat',betType:'trifecta',selection:'1-3-2',stake:100,predictedProb:0.1,probabilityStd:0.01,oddsAtBet:20,expectedRoi:1,
+  modelId,placedAt,status:'void',payout:100,profit:0,settledAt,repairReason:'invalid_stake_unit',dataOrigin:'real',venueName:'Ticket fixture',raceNo:41,raceDate:'2099-01-01'});
+ expect(rows.find(row=>row.id==='history-exp-1')).toMatchObject({id:'history-exp-1',recordKind:'experimental_paper',status:'won',payout:500,profit:400,settledAt,
   raceId:placedRace,raceNo:41,raceDate:'2099-01-01'});
- expect(rows[0]).not.toHaveProperty('edgeLabel');expect(rows[0]).not.toHaveProperty('finalOdds');
+ expect(rows.find(row=>row.id==='history-exp-2')).not.toHaveProperty('edgeLabel');expect(rows.find(row=>row.id==='history-exp-2')).not.toHaveProperty('finalOdds');
  expect(rows.some(row=>row.raceId===abstainedRace)).toBe(false);
  const ordinary=await app.request('/api/bets?origin=all',{},env());
  expect((await ordinary.json() as any[]).some(row=>String(row.id).startsWith('history-exp-'))).toBe(false);
  const normalAfter=Number(((await (await app.request('/api/performance/overview',{},env())).json()) as any).betCount);
  expect(normalAfter).toBe(normalBefore);
+ const experimentalPerformance=await app.request('/api/performance/experimental',{},env());
+ const experimentBody=await experimentalPerformance.json() as any;
+ expect(experimentBody.metrics).toMatchObject({races:1,bets:1,stake:100,payout:500,profit:400});
+ expect(experimentBody.decisions.find((row:any)=>row.raceId===placedRace)).toMatchObject({outcome:'placed',stake:100,probability:0.2});
+ expect(experimentBody.decisions.find((row:any)=>row.raceId===voidRace)).toMatchObject({outcome:'void',reason:'invalid_stake_unit',stake:0,probability:null,odds:null});
 });
 
 it('settles only fully evidenced experimental trifecta outcomes and credits the separate bankroll',async()=>{
@@ -1250,19 +1295,21 @@ it('settles only fully evidenced experimental trifecta outcomes and credits the 
  sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
   VALUES(?,'candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
   .run(modelId,artifactSha,'b'.repeat(64),'a'.repeat(64),trainedAt,JSON.stringify(manifest),JSON.stringify(metadata),jstIso());
- sqlite.prepare('UPDATE experimental_bankroll SET available_balance=99850 WHERE experiment_key=?').run('boat-trifecta-small-sample-v1');
+ sqlite.prepare('UPDATE experimental_bankroll SET available_balance=99800 WHERE experiment_key=?').run('boat-trifecta-small-sample-v1');
  sqlite.prepare(`INSERT INTO results(race_id,finish_order,number,data_origin) VALUES(?,?,?,'real')`).run(raceId,1,1);
  for(let n=2;n<=6;n++)sqlite.prepare(`INSERT INTO results(race_id,finish_order,number,data_origin) VALUES(?,?,?,'real')`).run(raceId,n,n);
  sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin) VALUES(?,'trifecta','1-2-3',1000,'real')").run(raceId);
  const decisionId='exp-settlement-decision';sqlite.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,sizing_method,snapshot_json)
-  VALUES(?,'boat-trifecta-small-sample-v1',?,?,?,'placed',150,'fractional-kelly-portfolio','{}')`).run(decisionId,raceId,modelId,jstIso());
+  VALUES(?,'boat-trifecta-small-sample-v1',?,?,?,'placed',200,'fractional-kelly-portfolio','{}')`).run(decisionId,raceId,modelId,jstIso());
  const bet=sqlite.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
   VALUES(?,?,?,?,?, ?,0.2,0.01,20,1,?,'open','real')`);
- bet.run('exp-win',decisionId,raceId,modelId,'1-2-3',100,jstIso());bet.run('exp-loss',decisionId,raceId,modelId,'4-5-6',50,jstIso());
- expect(await settleOpen(DB)).toBe(2);
+ bet.run('exp-win',decisionId,raceId,modelId,'1-2-3',100,jstIso());bet.run('exp-loss',decisionId,raceId,modelId,'4-5-6',100,jstIso());
+ sqlite.prepare(`INSERT INTO experimental_paper_bet_reconciliations(bet_id,experiment_key,original_stake,refund_amount,repair_reason,repaired_at,refund_applied_at)
+  VALUES(?,'boat-trifecta-small-sample-v1',100,100,'invalid_stake_unit',?,?)`).run('exp-loss',jstIso(),jstIso());
+ expect(await settleOpen(DB)).toBe(1);
  expect(sqlite.prepare('SELECT status,payout,profit FROM experimental_paper_bets WHERE id=?').get('exp-win')).toMatchObject({status:'won',payout:1000,profit:900});
- expect(sqlite.prepare('SELECT status,payout,profit FROM experimental_paper_bets WHERE id=?').get('exp-loss')).toMatchObject({status:'lost',payout:0,profit:-50});
- expect(sqlite.prepare('SELECT available_balance FROM experimental_bankroll WHERE experiment_key=?').get('boat-trifecta-small-sample-v1')).toMatchObject({available_balance:100850});
+ expect(sqlite.prepare('SELECT status,payout,profit FROM experimental_paper_bets WHERE id=?').get('exp-loss')).toMatchObject({status:'open',payout:null,profit:null});
+ expect(sqlite.prepare('SELECT available_balance FROM experimental_bankroll WHERE experiment_key=?').get('boat-trifecta-small-sample-v1')).toMatchObject({available_balance:100800});
 });
 
 it('admits an experimental portfolio only with live-cutoff archive and full source odds',async()=>{
@@ -1318,6 +1365,16 @@ it('admits an experimental portfolio only with live-cutoff archive and full sour
  expect(await experimentalPaperDecision(DB,at+1_000)).toMatchObject({evaluated:1,placedRaces:0});
  expect(sqlite.prepare('SELECT COUNT(*) n FROM experimental_paper_decisions WHERE race_id=?').get(raceId)).toMatchObject({n:0});
  vi.restoreAllMocks();
+ // This fixture yields an approximately 22-yen portfolio budget at this
+ // balance; the decision must abstain rather than place an invalid ticket.
+ sqlite.prepare('UPDATE experimental_bankroll SET available_balance=535 WHERE experiment_key=?').run('boat-trifecta-small-sample-v1');
+ const belowMinimum=await experimentalPaperDecision(DB,at+1_000);
+ expect(belowMinimum).toMatchObject({evaluated:1,placedRaces:0,placedBets:0,abstainedByReason:{minimum_virtual_stake_not_reached:1}});
+ expect(sqlite.prepare('SELECT total_stake,outcome,reason FROM experimental_paper_decisions WHERE race_id=?').get(raceId))
+  .toMatchObject({total_stake:0,outcome:'abstained',reason:'minimum_virtual_stake_not_reached'});
+ expect(sqlite.prepare('SELECT COUNT(*) n FROM experimental_paper_bets WHERE race_id=?').get(raceId)).toMatchObject({n:0});
+ sqlite.prepare('DELETE FROM experimental_paper_decisions WHERE race_id=?').run(raceId);
+ sqlite.prepare('UPDATE experimental_bankroll SET available_balance=100000 WHERE experiment_key=?').run('boat-trifecta-small-sample-v1');
  const report=await experimentalPaperDecision(DB,at+1_000);
  expect(report).toMatchObject({evaluated:1,placedRaces:1});
  const result:any=sqlite.prepare('SELECT total_stake FROM experimental_paper_decisions WHERE race_id=?').get(raceId);
@@ -1325,6 +1382,8 @@ it('admits an experimental portfolio only with live-cutoff archive and full sour
  expect(sqlite.prepare('SELECT available_balance FROM experimental_bankroll WHERE experiment_key=?').get('boat-trifecta-small-sample-v1')).toMatchObject({available_balance:100000-Number(result.total_stake)});
  expect(sqlite.prepare('SELECT COUNT(*) n FROM experimental_ticket_predictions WHERE race_id=?').get(raceId)).toMatchObject({n:120});
  expect(sqlite.prepare('SELECT SUM(stake) stake FROM experimental_paper_bets WHERE race_id=?').get(raceId)).toMatchObject({stake:result.total_stake});
+ const placedStakes=sqlite.prepare('SELECT stake FROM experimental_paper_bets WHERE race_id=?').all(raceId) as Array<{stake:number}>;
+ expect(placedStakes.every(x=>x.stake>=100&&x.stake%100===0)).toBe(true);
  const repeated=await app.request('/api/ingest/experimental-trifecta/forecast',{method:'POST',headers:{Authorization:'Bearer test-token','content-type':'application/json'},body:JSON.stringify(forecast)},env());
  expect((await repeated.json() as any).stored).toHaveLength(1);
  expect(await experimentalPaperDecision(DB,at+1_000)).toMatchObject({evaluated:0,placedRaces:0});

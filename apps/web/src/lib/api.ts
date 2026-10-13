@@ -102,7 +102,8 @@ export interface ExperimentalBet {
   expectedRoi: number | null
   modelId: string
   placedAt: string
-  status: 'open' | 'won' | 'lost'
+  status: 'open' | 'won' | 'lost' | 'void'
+  repairReason?: 'invalid_stake_unit' | string | null
   payout: number | null
   profit: number | null
   settledAt: string | null
@@ -119,7 +120,7 @@ export interface ExperimentalPerformance {
   bankroll: { initial: 100000; available: number }
   metrics: { races: number; bets: number; stake: number; payout: number; profit: number; roi: number | null }
   decisions: ExperimentalDecision[]
-  sizing: { method: 'fractional-kelly-portfolio'; perRaceCombinedCap: 1000; dailyCap: null; balanceGuard: 'nonnegative-virtual-balance' }
+  sizing: { method: 'fractional-kelly-portfolio'; minimumTicketStake?: 100; stakeUnit?: 100; perRaceCombinedCap: 1000; dailyCap: null; balanceGuard: 'nonnegative-virtual-balance' }
 }
 
 export interface ExperimentalDecision {
@@ -127,7 +128,7 @@ export interface ExperimentalDecision {
   raceDate: string
   raceNo: number
   venueName: string | null
-  outcome: 'placed' | 'abstained'
+  outcome: 'placed' | 'abstained' | 'void'
   reason: string | null
   stake: number
   modelId: string

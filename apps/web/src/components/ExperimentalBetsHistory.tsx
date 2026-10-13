@@ -4,7 +4,7 @@ import { useAsync } from '../lib/useAsync'
 import { dateTime, pct, signedYen, yen } from '../lib/format'
 import { Empty, ErrorState, Loading, Section } from './ui'
 
-const statusLabel = { open: '精算待ち', won: '的中', lost: '不的中' } as const
+const statusLabel = { open: '精算待ち', won: '的中', lost: '不的中', void: '無効（返金）' } as const
 
 /** Ticket-level records from the isolated experimental ledger; never included in normal bets or metrics. */
 export function ExperimentalBetsHistory({ compact = false }: { compact?: boolean }) {
@@ -31,6 +31,7 @@ export function ExperimentalBetsHistory({ compact = false }: { compact?: boolean
             </div>
             <span className={`text-xs ${bet.status === 'won' ? 'text-pos' : bet.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{statusLabel[bet.status]}</span>
           </div>
+          {bet.status === 'void' && <p className="mt-2 text-xs text-muted">返金済み{bet.repairReason ? ` · ${repairReasonLabel(bet.repairReason)}` : ''}</p>}
           <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-4">
             <Metric label="購入額" value={yen(bet.stake)} />
             <Metric label="購入時オッズ" value={bet.oddsAtBet == null ? '—' : bet.oddsAtBet.toFixed(2)} />
@@ -42,6 +43,11 @@ export function ExperimentalBetsHistory({ compact = false }: { compact?: boolean
       </div>}
     </div>
   </Section>
+}
+
+function repairReasonLabel(reason: string) {
+  if (reason === 'invalid_stake_unit') return '購入額が100円単位の条件を満たさないため'
+  return '旧記録の購入条件を満たさないため'
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

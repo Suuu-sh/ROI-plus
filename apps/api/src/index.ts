@@ -9,7 +9,7 @@ import { collectBoatraceCaptureArchives } from './services/collectBoatraceCaptur
 import { collectResults, resultUrl, RESULTS_SOURCE } from './services/collectBoatraceResults.js';
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
-import { sizeExperimentalPortfolio } from './services/experimentalSizing.js';
+import { sizeExperimentalPortfolioResult } from './services/experimentalSizing.js';
 import { splitRowsForD1 } from './services/d1Batch.js';
 import { boatArchiveEvidenceValid } from './services/boatArchiveEvidence.js';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
@@ -477,6 +477,7 @@ async function settleOpen(db: Db) {
 async function settleExperimentalOpen(db: Db) {
  const open=await all<any>(db,`SELECT b.* FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id
    WHERE b.status='open' AND r.status='finished' AND r.data_origin='real'
+   AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id)
    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
    ORDER BY b.placed_at,b.id LIMIT 4`);
  let settled=0;
@@ -550,14 +551,15 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now()) {
    const oddsBySelection=new Map(odds.map((x:any)=>[x.selection,Number(x.odds)]));
    const tickets=!reason?predictions.map((p:any)=>({selection:p.selection,probability:Number(p.probability),probStd:Number(p.prob_std),odds:Number(oddsBySelection.get(p.selection))})):[];
    const balance=await first<any>(db,"SELECT available_balance FROM experimental_bankroll WHERE experiment_key='boat-trifecta-small-sample-v1'");
-   const stakes=reason?[]:sizeExperimentalPortfolio(tickets,Number(balance?.available_balance??0));
+   const sizing=reason?{stakes:[],abstentionReason:null}:sizeExperimentalPortfolioResult(tickets,Number(balance?.available_balance??0));
+   const stakes=sizing.stakes;
    const totalStake=stakes.reduce((sum,x)=>sum+x.stake,0),outcome=totalStake?'placed':'abstained';
-   const abstentionReason=reason??(Number(balance?.available_balance??0)<=0?'virtual_balance_unavailable':'no_conservative_positive_edge');
+   const abstentionReason=reason??sizing.abstentionReason??'no_conservative_positive_edge';
    const decisionId=crypto.randomUUID();
    const snapshot={phase:'experimental_t60',cutoffAt:race.betting_cutoff_at,cutoffSource:race.betting_cutoff_source,cutoffObservedAt:race.betting_cutoff_observed_at,targetAt,predictedAt:predictionAt,
      captureArchiveId:archiveRow?.id??null,sourceHashes:archive?{beforeinfo:archive.beforeinfo.sha256,racelist:archive.raceList.sha256,odds:archive.trifectaOdds.sha256}:null,
      predictionCount:predictions.length,predictionDigest:predictions.length?await sha256Json(predictions):null,
-     sizing:{method:'fractional-kelly-portfolio',fraction:0.25,uncertaintyMultiplier:1.96,perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'},tickets:stakes};
+     sizing:{method:'fractional-kelly-portfolio',fraction:0.25,uncertaintyMultiplier:1.96,minimumTicketStake:100,stakeUnit:100,perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'},tickets:stakes};
    if(!db.batch)return report;
    if(!await reserveWorkerWrites(db,predictions.length+stakes.length+3))continue;
    const commitAt=Date.now();
@@ -1240,19 +1242,24 @@ app.get('/bets/quarantine-summary',async c=>{const sport=c.req.query('sport'),or
 app.get('/bets/experimental',async c=>{
  const experimentKey='boat-trifecta-small-sample-v1';
  const rows=await all<any>(c.env.DB,`SELECT b.id,b.decision_id,b.race_id,b.selection,b.stake,b.probability,b.prob_std,b.odds_at_bet,b.expected_roi,
-   b.model_id,b.placed_at,b.status,b.payout,b.profit,b.settled_at,d.experiment_key,v.name venue_name,r.race_no,r.race_date
+   b.model_id,b.placed_at,b.status,b.payout,b.profit,b.settled_at,d.experiment_key,v.name venue_name,r.race_no,r.race_date,
+   q.repair_reason,q.repaired_at
    FROM experimental_paper_bets b
    JOIN experimental_paper_decisions d ON d.id=b.decision_id AND d.experiment_key=? AND d.outcome='placed'
    JOIN races r ON r.id=b.race_id AND r.sport='boat' AND r.data_origin='real'
    JOIN venues v ON v.id=r.venue_id AND v.sport='boat'
+   LEFT JOIN experimental_paper_bet_reconciliations q ON q.bet_id=b.id
    WHERE b.data_origin='real'
    ORDER BY julianday(b.placed_at) DESC,b.id DESC LIMIT 500`,experimentKey);
  c.header('Cache-Control','private, no-store');
  return c.json(rows.map(row=>({id:row.id,recordKind:'experimental_paper',experimentKey:row.experiment_key,decisionId:row.decision_id,
    raceId:row.race_id,sport:'boat',betType:'trifecta',selection:row.selection,stake:Number(row.stake),predictedProb:Number(row.probability),
    probabilityStd:Number(row.prob_std),oddsAtBet:Number(row.odds_at_bet),expectedRoi:Number(row.expected_roi),modelId:row.model_id,
-   placedAt:row.placed_at,status:row.status,payout:row.payout==null?null:Number(row.payout),profit:row.profit==null?null:Number(row.profit),
-   settledAt:row.settled_at??null,dataOrigin:'real',venueName:row.venue_name,raceNo:Number(row.race_no),raceDate:row.race_date})));
+   placedAt:row.placed_at,status:row.repair_reason?'void':row.status,
+   payout:row.repair_reason?Number(row.stake):(row.payout==null?null:Number(row.payout)),
+   profit:row.repair_reason?0:(row.profit==null?null:Number(row.profit)),
+   settledAt:row.repair_reason?row.repaired_at:(row.settled_at??null),repairReason:row.repair_reason??null,
+   dataOrigin:'real',venueName:row.venue_name,raceNo:Number(row.race_no),raceDate:row.race_date})));
 });
 app.get('/paper/decisions',async c=>{
  const date=c.req.query('date')??jstRaceDate();
@@ -1438,12 +1445,19 @@ app.get('/performance/experimental',async c=>{
    COALESCE(SUM(CASE WHEN status IN ('won','lost') THEN stake ELSE 0 END),0) settled_stake,
    COALESCE(SUM(CASE WHEN status='won' THEN payout ELSE 0 END),0) payout,
    COALESCE(SUM(CASE WHEN status IN ('won','lost') THEN profit ELSE 0 END),0) profit
-   FROM experimental_paper_bets`);
- const rows=await all<any>(db,`SELECT d.race_id,r.race_date,r.race_no,v.name venue_name,d.outcome,d.reason,d.total_stake stake,d.model_id,d.decision_at decided_at,
-   (SELECT probability FROM experimental_paper_bets b WHERE b.decision_id=d.id ORDER BY b.stake DESC,b.selection LIMIT 1) probability,
-   (SELECT odds_at_bet FROM experimental_paper_bets b WHERE b.decision_id=d.id ORDER BY b.stake DESC,b.selection LIMIT 1) odds,
-   (SELECT prob_std FROM experimental_paper_bets b WHERE b.decision_id=d.id ORDER BY b.stake DESC,b.selection LIMIT 1) uncertainty,
-   (SELECT expected_roi FROM experimental_paper_bets b WHERE b.decision_id=d.id ORDER BY b.stake DESC,b.selection LIMIT 1) expected_roi
+   FROM experimental_paper_bets b
+   WHERE NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id)`);
+ const rows=await all<any>(db,`SELECT d.race_id,r.race_date,r.race_no,v.name venue_name,
+   CASE WHEN d.outcome='placed' AND EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q JOIN experimental_paper_bets qb ON qb.id=q.bet_id WHERE qb.decision_id=d.id)
+     AND NOT EXISTS(SELECT 1 FROM experimental_paper_bets vb WHERE vb.decision_id=d.id AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations vq WHERE vq.bet_id=vb.id)) THEN 'void' ELSE d.outcome END outcome,
+   CASE WHEN d.outcome='placed' AND EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q JOIN experimental_paper_bets qb ON qb.id=q.bet_id WHERE qb.decision_id=d.id)
+     AND NOT EXISTS(SELECT 1 FROM experimental_paper_bets vb WHERE vb.decision_id=d.id AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations vq WHERE vq.bet_id=vb.id)) THEN 'invalid_stake_unit' ELSE d.reason END reason,
+   CASE WHEN d.outcome='placed' THEN COALESCE((SELECT SUM(vb.stake) FROM experimental_paper_bets vb WHERE vb.decision_id=d.id AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations vq WHERE vq.bet_id=vb.id)),0)
+     ELSE d.total_stake END stake,d.model_id,d.decision_at decided_at,
+   (SELECT probability FROM experimental_paper_bets b WHERE b.decision_id=d.id AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id) ORDER BY b.stake DESC,b.selection LIMIT 1) probability,
+   (SELECT odds_at_bet FROM experimental_paper_bets b WHERE b.decision_id=d.id AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id) ORDER BY b.stake DESC,b.selection LIMIT 1) odds,
+   (SELECT prob_std FROM experimental_paper_bets b WHERE b.decision_id=d.id AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id) ORDER BY b.stake DESC,b.selection LIMIT 1) uncertainty,
+   (SELECT expected_roi FROM experimental_paper_bets b WHERE b.decision_id=d.id AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id) ORDER BY b.stake DESC,b.selection LIMIT 1) expected_roi
    FROM experimental_paper_decisions d JOIN races r ON r.id=d.race_id JOIN venues v ON v.id=r.venue_id
    ORDER BY d.decision_at DESC,d.id DESC LIMIT 100`);
  const n=metric??{races:0,bets:0,stake:0,payout:0,profit:0};
@@ -1451,7 +1465,7 @@ app.get('/performance/experimental',async c=>{
    bankroll:{initial:Number(balance?.initial_balance??100000),available:Number(balance?.available_balance??100000)},
    metrics:{races:Number(n.races),bets:Number(n.bets),stake:Number(n.stake),payout:Number(n.payout),profit:Number(n.profit),roi:Number(n.settled_stake)>0?Number(n.payout)/Number(n.settled_stake):null},
    decisions:rows.map((x:any)=>({raceId:x.race_id,raceDate:x.race_date,raceNo:Number(x.race_no),venueName:x.venue_name??null,outcome:x.outcome,reason:x.reason??null,stake:Number(x.stake),modelId:x.model_id,decidedAt:x.decided_at,probability:x.probability==null?null:Number(x.probability),odds:x.odds==null?null:Number(x.odds),uncertainty:x.uncertainty==null?null:Number(x.uncertainty),expectedRoi:x.expected_roi==null?null:Number(x.expected_roi)})),
-   sizing:{method:'fractional-kelly-portfolio',perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'}});
+   sizing:{method:'fractional-kelly-portfolio',minimumTicketStake:100,stakeUnit:100,perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'}});
 });
 app.get('/performance/breakdown',async c=>{const db=c.env.DB,origin=originFilter(c.req.query('origin'));
  const O=`(? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet('b')}`;

@@ -5,6 +5,17 @@ import { Empty, ErrorState, Loading, Section } from './ui'
 
 const caveat = '小標本の実験です。通常の件数基準を満たさず、天候データが欠ける場合があります。精度・収益性は未検証です。'
 
+function decisionLabel(outcome: 'placed' | 'abstained' | 'void', reason: string | null) {
+  if (outcome === 'placed') return '購入'
+  if (outcome === 'void') return `無効（返金）${reason ? ` · ${reasonLabel(reason)}` : ''}`
+  return `見送り${reason ? ` · ${reasonLabel(reason)}` : ''}`
+}
+
+function reasonLabel(reason: string) {
+  if (reason === 'invalid_stake_unit') return '購入額が100円単位の条件を満たさないため'
+  return reason
+}
+
 export function ExperimentalPerformance({ compact = false }: { compact?: boolean }) {
   const q = useAsync(() => api.experimentalPerformance(), [])
   if (q.error) return <Section title="三連単モデル実験"><div className="p-4"><ErrorState error={q.error} onRetry={q.reload} /></div></Section>
@@ -20,7 +31,7 @@ export function ExperimentalPerformance({ compact = false }: { compact?: boolean
         <Metric label="実験回収率" value={pct(data.metrics.roi)} />
         <Metric label="判断 / 購入" value={`${data.decisions.length} / ${data.metrics.bets}`} sub={`購入額 ${yen(data.metrics.stake)}`} />
       </div>
-      <p className="text-xs text-muted">1レース合計の購入額上限 {yen(data.sizing.perRaceCombinedCap)} · 日次固定上限なし · 仮想残高は非負に制限</p>
+      <p className="text-xs text-muted">1券あたり{yen(data.sizing.minimumTicketStake ?? 100)}以上・{yen(data.sizing.stakeUnit ?? 100)}単位 · 1レース合計の購入額上限 {yen(data.sizing.perRaceCombinedCap)} · 日次固定上限なし · 仮想残高は非負に制限</p>
       {!compact && <>
         <div className="border-t border-line pt-3">
           <h3 className="mb-2 text-sm font-medium">実験判断履歴</h3>
@@ -29,7 +40,7 @@ export function ExperimentalPerformance({ compact = false }: { compact?: boolean
               <thead className="text-muted"><tr><th className="py-2 pr-3">レース</th><th className="py-2 pr-3">判断</th><th className="py-2 pr-3">購入額</th><th className="py-2 pr-3">確率</th><th className="py-2 pr-3">オッズ</th><th className="py-2 pr-3">期待ROI</th><th className="py-2">判断時刻</th></tr></thead>
               <tbody className="divide-y divide-line">{data.decisions.map((decision, i) => <tr key={`${decision.raceId}-${decision.decidedAt}-${i}`}>
                 <td className="py-2 pr-3">{decision.raceDate} · {decision.venueName ?? decision.raceId} {decision.raceNo}R</td>
-                <td className="py-2 pr-3">{decision.outcome === 'placed' ? '購入' : `見送り${decision.reason ? ` · ${decision.reason}` : ''}`}</td>
+                <td className="py-2 pr-3">{decisionLabel(decision.outcome, decision.reason)}</td>
                 <td className="num py-2 pr-3">{yen(decision.stake)}</td>
                 <td className="num py-2 pr-3">{pct(decision.probability)}</td>
                 <td className="num py-2 pr-3">{decision.odds == null ? '—' : decision.odds.toFixed(2)}</td>

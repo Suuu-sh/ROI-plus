@@ -1,0 +1,68 @@
+name: Apply approved experimental stake reconciliation
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact reviewed source commit SHA for migration 0013
+        required: true
+        type: string
+      confirmation:
+        description: Type APPLY EXPERIMENTAL STAKE UNITS 0013
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: roi-plus-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Apply only experimental stake reconciliation 0013
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate reviewed source and explicit approval
+        env:
+          APPROVED_SOURCE_SHA: ${{ inputs.approved_sha }}
+          EXPERIMENTAL_MIGRATION_CONFIRMATION: ${{ inputs.confirmation }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$APPROVED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$APPROVED_SOURCE_SHA" = "$GITHUB_SHA"
+          test "$EXPERIMENTAL_MIGRATION_CONFIRMATION" = "APPLY EXPERIMENTAL STAKE UNITS 0013"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify exact migration, source SHA, and remote ledger
+        run: node scripts/apply-experimental-stake-reconciliation.mjs --check
+        env:
+          APPROVED_SOURCE_SHA: ${{ inputs.approved_sha }}
+          EXPERIMENTAL_MIGRATION_CONFIRMATION: ${{ inputs.confirmation }}
+          GITHUB_SHA: ${{ github.sha }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Apply only the explicitly reviewed 0013 migration
+        run: node scripts/apply-experimental-stake-reconciliation.mjs
+        env:
+          APPROVED_SOURCE_SHA: ${{ inputs.approved_sha }}
+          EXPERIMENTAL_MIGRATION_CONFIRMATION: ${{ inputs.confirmation }}
+          GITHUB_SHA: ${{ github.sha }}
+          CI: true
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Verify remote migration ledger readiness
+        run: node scripts/check-d1-migrations-ready.mjs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
