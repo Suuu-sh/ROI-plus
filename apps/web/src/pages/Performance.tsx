@@ -14,7 +14,7 @@ const tip = { contentStyle: { background: 'rgb(var(--surface))', border: '1px so
 
 export function PerformancePage() {
   const { origin } = useOrigin()
-  const q = useAsync(() => Promise.all([api.breakdown(origin), api.bets(origin), origin === 'all' ? Promise.resolve(null) : api.rankComparison(origin)]), [origin])
+  const q = useAsync(() => Promise.all([api.breakdown(origin), api.bets(origin), origin === 'all' ? Promise.resolve(null) : api.rankComparison(origin)]), [origin], () => Promise.all([api.breakdown(origin), api.bets(origin, undefined, true), origin === 'all' ? Promise.resolve(null) : api.rankComparison(origin)]))
   if (q.error) return <div className="card"><ErrorState error={q.error} onRetry={q.reload} /></div>
   if (!q.data) return <div className="card"><Loading rows={6} /></div>
   const [bd, bets, rankComparison] = q.data
@@ -22,7 +22,7 @@ export function PerformancePage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight">成績</h1>
+        <div className="flex flex-wrap items-center justify-between gap-2"><h1 className="text-xl font-semibold tracking-tight">成績</h1><button className="btn-ghost h-8 text-xs" onClick={q.reload} disabled={q.loading}>更新</button></div>
         <p className="mt-1 text-sm text-muted">回収率だけでなく、予測確率の校正と期待値帯ごとの実績で評価します。</p>
       </div>
 

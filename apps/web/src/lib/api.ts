@@ -12,10 +12,17 @@ export class ApiError extends Error {
 }
 
 const pendingReads = new Map<string, Promise<unknown>>()
+const READ_FRESH_WINDOW_MS = 10_000
+let readFreshUntil = 0
+
+export function markReadCacheFresh() {
+  readFreshUntil = Date.now() + READ_FRESH_WINDOW_MS
+}
 
 // Share concurrent reads (including StrictMode effects), never cache settled purchase data.
 function req<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.method && init.method !== 'GET') return fetchJson<T>(path, init)
+  if (new Headers(init?.headers).get('X-ROI-Cache-Bypass') === '1') return fetchJson<T>(path, init)
   const existing = pendingReads.get(path)
   if (existing) return existing as Promise<T>
   const request = fetchJson<T>(path, init).finally(() => {
@@ -53,12 +60,18 @@ export const api = {
   race: (id: string) => req<RaceDetail>(`/races/${encodeURIComponent(id)}`),
   rankings: (sport: Sport, date: string, origin: OriginFilter) =>
     req<RankingCandidate[]>(`/rankings${qs({ sport, date, origin })}`),
-  placeBet: (b: { raceId: string; betType: BetType; selection: string; stake: number; requestId: string }) =>
-    req<Bet>('/bets', { method: 'POST', body: JSON.stringify(b) }),
-  placeBetBatch: (b: { raceId: string; betType: 'win'; requestId: string; selections: { selection: string; stake: number }[] }) =>
-    req<{ groupId: string; bets: Bet[] }>('/bets', { method: 'POST', body: JSON.stringify(b) }),
-  bets: (origin: OriginFilter, sport?: Sport) => req<Bet[]>(`/bets${qs({ sport, origin })}`),
-  overview: (origin: OriginFilter, sport?: Sport) => req<Overview>(`/performance/overview${qs({ sport, origin })}`),
+  placeBet: async (b: { raceId: string; betType: BetType; selection: string; stake: number; requestId: string }) => {
+    const result = await req<Bet>('/bets', { method: 'POST', body: JSON.stringify(b) })
+    markReadCacheFresh()
+    return result
+  },
+  placeBetBatch: async (b: { raceId: string; betType: 'win'; requestId: string; selections: { selection: string; stake: number }[] }) => {
+    const result = await req<{ groupId: string; bets: Bet[] }>('/bets', { method: 'POST', body: JSON.stringify(b) })
+    markReadCacheFresh()
+    return result
+  },
+  bets: (origin: OriginFilter, sport?: Sport, fresh = false) => req<Bet[]>(`/bets${qs({ sport, origin })}`, fresh || Date.now() < readFreshUntil ? { headers: { 'X-ROI-Cache-Bypass': '1' } } : undefined),
+  overview: (origin: OriginFilter, sport?: Sport, fresh = false) => req<Overview>(`/performance/overview${qs({ sport, origin })}`, fresh || Date.now() < readFreshUntil ? { headers: { 'X-ROI-Cache-Bypass': '1' } } : undefined),
   breakdown: (origin: OriginFilter) => req<Breakdown>(`/performance/breakdown${qs({ origin })}`),
   rankComparison: (origin: OriginFilter) => req<RankComparison>(`/performance/rank-comparison${qs({ origin })}`),
   experimentalPerformance: () => req<ExperimentalPerformance>('/performance/experimental'),

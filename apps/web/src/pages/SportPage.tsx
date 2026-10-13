@@ -24,7 +24,7 @@ export function SportPage({ sport }: { sport: Sport }) {
   const [date, setDate] = useState(todayJst)
   const [performanceVersion, setPerformanceVersion] = useState(0)
   const [researchOpen, setResearchOpen] = useState(Boolean(raceId))
-  const bets = useAsync(() => api.bets(origin, sport), [sport, origin])
+  const bets = useAsync(() => api.bets(origin, sport), [sport, origin], () => api.bets(origin, sport, true))
   useEffect(() => { if (raceId) setResearchOpen(true) }, [raceId])
 
   const accent = sport === 'horse' ? 'text-horse' : 'text-boat'
@@ -51,7 +51,7 @@ export function SportPage({ sport }: { sport: Sport }) {
         date={sport === 'boat' ? undefined : date}
         loading={bets.loading}
         error={bets.error}
-        onRetry={bets.reload}
+        onRetry={() => { bets.reload(); setPerformanceVersion((v) => v + 1) }}
       />
 
       {(sport !== 'boat' || raceId) && <details className="card group" open={researchOpen || undefined} onToggle={(event) => setResearchOpen(event.currentTarget.open)}>
@@ -63,7 +63,7 @@ export function SportPage({ sport }: { sport: Sport }) {
 }
 
 function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeof useOrigin>['origin']; sport: Sport; version: number }) {
-  const q = useAsync(() => api.overview(origin, sport), [origin, sport, version])
+  const q = useAsync(() => api.overview(origin, sport, version > 0), [origin, sport, version], () => api.overview(origin, sport, true))
   if (q.error) return <Section className="w-full min-w-0" title="仮想運用成績"><ErrorState error={q.error} onRetry={q.reload} /></Section>
   if (!q.data) return <Section className="w-full min-w-0" title="仮想運用成績"><Loading rows={2} /></Section>
   const ov = q.data
@@ -144,6 +144,7 @@ export function PurchasedRaces({ bets, date, loading, error, onRetry }: {
   const grouped = new Map<string, Bet[]>()
   for (const bet of date ? filterBetsByDate(bets ?? [], date) : bets ?? []) grouped.set(bet.raceId, [...(grouped.get(bet.raceId) ?? []), bet])
   return <section className="w-full min-w-0">
+      <div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">仮想購入履歴</h2><button className="btn-ghost h-8 text-xs" onClick={onRetry} disabled={loading}>更新</button></div>
       {error ? <ErrorState error={error} onRetry={onRetry} /> : loading && !bets ? <Loading rows={2} /> : grouped.size === 0 ? <Empty>{date ? 'この日付の仮想購入はありません。' : '仮想購入はまだありません。'}</Empty> :
         <PurchaseRail key={`${date ?? 'all'}:${[...grouped.keys()].join(',')}`} groups={[...grouped.values()]} />}
   </section>

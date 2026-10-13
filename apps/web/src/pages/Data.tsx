@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { api } from '../lib/api'
+import { api, markReadCacheFresh } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
 import { dateTime, freshness, pct } from '../lib/format'
 import { Empty, ErrorState, Kpi, Loading, Section, SportDot } from '../components/ui'
@@ -167,6 +167,7 @@ async function collectAndSettleResults(setState: (state: ManualResultsState) => 
       setState({ phase: 'failed', message: collectionSummary(collection, null) + ' 精算結果を確認できませんでした。' })
       return
     }
+    markReadCacheFresh()
     setState({ phase: 'complete', collection, settled: payload.settled, message: collectionSummary(collection, payload.settled) })
   } catch (error) {
     setState({ phase: 'failed', message: collectionSummary(collection, null) + (error instanceof SessionExpiredError ? ' ログイン状態を確認してください。' : ' 精算結果を確認できませんでした。') })
