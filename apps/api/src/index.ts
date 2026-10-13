@@ -1,3 +1,4 @@
+import { fetchPurchaseOdds, purchaseOddsContext, type PurchaseOdds, type PurchaseOddsContext } from './services/purchaseOdds.js';
 import { finalTrifectaOdds } from './services/finalTrifectaOdds.js';
 import { collectionIssues } from './services/collectionIssues.js';
 import { Hono } from 'hono';
@@ -58,7 +59,7 @@ const app = new Hono<Ctx>().basePath('/api');
 // Register first so it also marks CORS, proxy-guard, auth, and cache responses.
 app.use('*', async (c, next) => {
   await next();
-  c.header('X-ROI-API-Revision', 'experimental-paper-v1');
+  c.header('X-ROI-API-Revision', 'fresh-t60-purchase-odds-v1');
 });
 app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization','X-ROI-Cache-Bypass'], exposeHeaders: ['X-ROI-Read-Cache'] }));
 // 本番では閲覧系 API を、Cloudflare Access で保護された画面 Worker（Service Binding）経由に限定する。
@@ -515,7 +516,7 @@ async function settleExperimentalOpen(db: Db) {
  }
  return settled;
 }
-async function experimentalPaperDecision(db: Db, decisionAt=Date.now()) {
+async function experimentalPaperDecision(db: Db, decisionAt=Date.now(), oddsContext:PurchaseOddsContext=purchaseOddsContext()) {
  const report={evaluated:0,placedRaces:0,placedBets:0,abstainedByReason:{} as Record<string,number>};
  const model=await first<any>(db,"SELECT * FROM experimental_models WHERE status IN ('candidate','experimental') ORDER BY registered_at DESC,id DESC LIMIT 1");
  if(!model)return report;
@@ -538,7 +539,7 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now()) {
    const predictionAt=latest?.predicted_at??null;
    let predictions:any[]=predictionAt?await all<any>(db,`SELECT selection,probability,prob_std,predicted_at FROM experimental_ticket_predictions WHERE race_id=? AND model_id=? AND data_origin='real' AND predicted_at=?`,race.id,model.id,predictionAt):[];
    const lanes=await all<any>(db,"SELECT number,features_json FROM entries WHERE race_id=? AND data_origin='real' ORDER BY number",race.id),numbers=lanes.map(x=>Number(x.number));
-   let reason:string|null=null,archiveRow:any=null,archive:any=null,odds:any[]=[];
+   let reason:string|null=null,archiveRow:any=null,archive:any=null,odds:any[]=[],purchaseOdds:PurchaseOdds|null=null;
    if(numbers.length!==6||numbers.some((x,i)=>x!==i+1))reason='official_entries_incomplete';
    else if(predictions.length!==120||predictions.some((p:any)=>!Number.isFinite(p.probability)||!Number.isFinite(p.prob_std)||p.prob_std<0)
        ||!isCompleteTicketDistribution('trifecta',numbers,predictions.map((p:any)=>p.selection),predictions.map((p:any)=>Number(p.probability))))reason='experimental_forecast_missing_or_invalid';
@@ -552,7 +553,11 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now()) {
      if(!experimentalArchiveEvidenceValid(archive,race,lanes)||archive.trifectaOdds.capturedAt!==archiveRow.captured_at
         ||Date.parse(archive.beforeinfo.capturedAt)>decisionAt||Date.parse(archive.raceList.capturedAt)>decisionAt
         ||Date.parse(archive.trifectaOdds.capturedAt)>decisionAt)reason='official_archive_identity_or_odds_invalid';
-     else odds=archive.trifectaOdds.odds;
+     else {
+       purchaseOdds=await fetchPurchaseOdds(race,oddsContext);
+       if(!purchaseOdds)reason='purchase_odds_fetch_failed_or_window_elapsed';
+       else odds=purchaseOdds.odds;
+     }
    }
    const oddsBySelection=new Map(odds.map((x:any)=>[x.selection,Number(x.odds)]));
    const tickets=!reason?predictions.map((p:any)=>({selection:p.selection,probability:Number(p.probability),probStd:Number(p.prob_std),odds:Number(oddsBySelection.get(p.selection))})):[];
@@ -563,19 +568,22 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now()) {
    const abstentionReason=reason??sizing.abstentionReason??'no_conservative_positive_edge';
    const decisionId=crypto.randomUUID();
    const snapshot={phase:'experimental_t60',cutoffAt:race.betting_cutoff_at,cutoffSource:race.betting_cutoff_source,cutoffObservedAt:race.betting_cutoff_observed_at,targetAt,predictedAt:predictionAt,
-     captureArchiveId:archiveRow?.id??null,sourceHashes:archive?{beforeinfo:archive.beforeinfo.sha256,racelist:archive.raceList.sha256,odds:archive.trifectaOdds.sha256}:null,
+     purchaseOdds,captureArchiveId:archiveRow?.id??null,sourceHashes:archive?{beforeinfo:archive.beforeinfo.sha256,racelist:archive.raceList.sha256,odds:purchaseOdds?.sha256??null}:null,
      predictionCount:predictions.length,predictionDigest:predictions.length?await sha256Json(predictions):null,
      sizing:{method:'fractional-kelly-portfolio',fraction:0.25,uncertaintyMultiplier:1.96,minimumTicketStake:100,stakeUnit:100,perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'},tickets:stakes};
    if(!db.batch)return report;
    if(!await reserveWorkerWrites(db,predictions.length+stakes.length+3))continue;
    const commitAt=Date.now();
    if(!primaryPaperTiming(race.betting_cutoff_at,commitAt,race.betting_cutoff_source,race.betting_cutoff_observed_at).eligible)continue;
-   if(totalStake>0&&(!archive||commitAt-Date.parse(archiveRow?.captured_at??'')>5*60_000
+   if(totalStake>0&&(!purchaseOdds||Date.parse(purchaseOdds.capturedAt)>commitAt||!archive||commitAt-Date.parse(archiveRow?.captured_at??'')>5*60_000
       ||Date.parse(archive?.beforeinfo?.capturedAt??'')>commitAt||Date.parse(archive?.raceList?.capturedAt??'')>commitAt
       ||Date.parse(archive?.trifectaOdds?.capturedAt??'')>commitAt))continue;
    const committedAt=isoJstAt(commitAt);
    const statements:Statement[]=[];
-   if(totalStake>0)statements.push(db.prepare(`UPDATE experimental_bankroll SET available_balance=available_balance-?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND available_balance>=? AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)`).bind(totalStake,committedAt,totalStake,race.id));
+   if(totalStake>0)statements.push(db.prepare(`UPDATE experimental_bankroll SET available_balance=available_balance-?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND available_balance>=? AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)
+      AND EXISTS(SELECT 1 FROM races r WHERE r.id=? AND r.status='scheduled' AND r.betting_cutoff_at=? AND r.betting_cutoff_source=?
+        AND ABS((julianday(r.betting_cutoff_at)-julianday('now'))*86400-60)<=10
+        AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id))`).bind(totalStake,committedAt,totalStake,race.id,race.id,race.betting_cutoff_at,TRUSTED_CUTOFF_SOURCE));
    statements.push(totalStake>0
      ?db.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,capture_archive_id,decision_at,outcome,reason,total_stake,sizing_method,snapshot_json)
        SELECT ?,'boat-trifecta-small-sample-v1',?,?,?,?,'placed',NULL,?,'fractional-kelly-portfolio',? WHERE changes()>0 AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)`).bind(decisionId,race.id,model.id,archiveRow.id,committedAt,totalStake,JSON.stringify(snapshot),race.id)
@@ -650,7 +658,7 @@ type AutoBetTimingReport = {
   unrecordedAbstentionCount: number;
   comparisons: typeof PAPER_COMPARISON_PHASES;
 };
-async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now()) {
+async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now(), oddsContext:PurchaseOddsContext=purchaseOddsContext()) {
   const report: AutoBetTimingReport = { phase: PRIMARY_PAPER_PHASE, targetOffsetSeconds: 60, toleranceSeconds: 10,
     acceptedSecondsBeforeCutoff: { min: 50, max: 70 },
     evaluatedRaceCount: 0, purchasedRaceCount: 0, boughtBetCount: 0, abstainedByReason: {}, unrecordedAbstentionCount: 0,
@@ -724,7 +732,10 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
   const grouped = new Map<string, any[]>();
   const candidatesByRace = new Map<string, any[]>();
   for (const race of dueRaces) {
-    const candidates = await ticketCandidatesForRace(db, race, maxStd, inputAsOfAt, race.betting_cutoff_at);
+    if(!await first<any>(db,"SELECT id FROM ticket_predictions WHERE race_id=? AND data_origin='real' LIMIT 1",race.id)){candidatesByRace.set(race.id,[]);continue;}
+    const market=await fetchPurchaseOdds(race,oddsContext);
+    if(!market){await noteAbstention(race,'purchase_odds_fetch_failed_or_window_elapsed');continue;}
+    const candidates = await ticketCandidatesForRace(db, race, maxStd, inputAsOfAt, race.betting_cutoff_at,market);
     candidatesByRace.set(race.id, candidates.map(t=>({...t,prob_std:t.probStd,odds_captured_at:t.oddsCapturedAt})));
     for (const t of candidates) {
       if (!t.buyEligible || t.expectedRoi < minRoi) continue;
@@ -735,12 +746,13 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
   }
   let n=0;
   for (const race of dueRaces) {
+    if(!candidatesByRace.has(race.id))continue;
     const rows=grouped.get(race.id)??[];
     const ranked=rows.filter(row=>row.bet_type==='trifecta')
       .map(row=>({...row,edgeData:candidate(Number(row.probability),Number(row.odds),Number(row.prob_std),'active',maxStd)}))
       .filter(row=>validProbability(row.probability) && validUncertainty(row.prob_std) && Number.isFinite(Number(row.odds)) && Number(row.odds)>0
         && Number.isFinite(Date.parse(row.predicted_at)) && Date.parse(row.predicted_at)<=inputAsOfAt
-        && Number.isFinite(Date.parse(row.odds_captured_at)) && Date.parse(row.odds_captured_at)<=inputAsOfAt
+        && Number.isFinite(Date.parse(row.odds_captured_at)) && Date.parse(row.odds_captured_at)<=Date.now()
         && row.edgeData.expectedRoi!==null && Number.isFinite(row.edgeData.expectedRoi))
       .sort((a,b)=>b.edgeData.expectedRoi-a.edgeData.expectedRoi || (String(a.selection)<String(b.selection)?-1:String(a.selection)>String(b.selection)?1:0));
     const eligible=ranked.filter(row=>row.edgeData.expectedRoi>=minRoi && ['HIGH_EDGE','POSITIVE_EDGE'].includes(row.edgeData.edge));
@@ -779,7 +791,7 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
           AND ABS((julianday(rr.betting_cutoff_at)-julianday(?))*86400-60)<=10
           AND ABS((julianday(rr.betting_cutoff_at)-julianday('now'))*86400-60)<=10)
       ON CONFLICT(race_id,bet_type,selection) WHERE mode='auto' DO NOTHING`).bind(groupId,JSON.stringify(payload),totalStake,race.id,race.id,race.id,race.betting_cutoff_at,TRUSTED_CUTOFF_SOURCE,race.betting_cutoff_observed_at,inputAsOfAtIso,isoJstAt(inputAsOfAt - BOATRACE_CUTOFF_MAX_AGE_MS),isoJstAt(committedAt));
-    const snapshotJson=JSON.stringify({phase:PRIMARY_PAPER_PHASE,cutoffAt:race.betting_cutoff_at,cutoffSource:race.betting_cutoff_source,cutoffObservedAt:race.betting_cutoff_observed_at,targetAt:isoJstAt(Date.parse(race.betting_cutoff_at)-PRIMARY_PAPER_OFFSET_MS),inputAsOfAt:inputAsOfAtIso,
+    const snapshotJson=JSON.stringify({phase:PRIMARY_PAPER_PHASE,cutoffAt:race.betting_cutoff_at,cutoffSource:race.betting_cutoff_source,cutoffObservedAt:race.betting_cutoff_observed_at,targetAt:isoJstAt(Date.parse(race.betting_cutoff_at)-PRIMARY_PAPER_OFFSET_MS),inputAsOfAt:inputAsOfAtIso,purchaseOdds:await oddsContext.cache.get(race.id),
       selections:selected.map(row=>({betType:'trifecta',selection:row.selection,probability:Number(row.probability),probStd:Number(row.prob_std),odds:Number(row.odds),oddsCapturedAt:row.odds_captured_at,predictedAt:row.predicted_at,modelId:row.model_id}))});
     const decisionInsert=db.prepare(`INSERT INTO paper_decisions(race_id,phase,cutoff_at,target_at,cutoff_observed_at,input_as_of_at,decided_at,outcome,reason,bet_group_id,snapshot_json,cutoff_source)
       SELECT ?,? ,?,?,?,?,(SELECT MIN(placed_at) FROM bets WHERE bet_group_id=? AND mode='auto' AND decision_phase='primary_t60'),'placed',NULL,?,?,?
@@ -1178,7 +1190,7 @@ function officialTrifectaUrl(sourceUrl: unknown, race: any): boolean {
 function experimentalArchiveEvidenceValid(archive: any, race: any, entries: any[]) {
  return boatArchiveEvidenceValid(archive,race,entries);
 }
-async function ticketCandidatesForRace(db: Db, race: any, maxStd: number, decisionAt = Date.now(), cutoffAtOverride?: string | null): Promise<TicketCandidate[]> {
+async function ticketCandidatesForRace(db: Db, race: any, maxStd: number, decisionAt = Date.now(), cutoffAtOverride?: string | null, purchaseMarket?:PurchaseOdds): Promise<TicketCandidate[]> {
   // Initial support is exact-order trifecta only. Other ticket types stay absent
   // until a compatible model and audited odds source are registered.
   if (await first<any>(db,'SELECT race_id FROM data_repair_quarantined_races WHERE race_id=?',race.id)) return [];
@@ -1201,9 +1213,9 @@ async function ticketCandidatesForRace(db: Db, race: any, maxStd: number, decisi
     if (predictions.some((p: any) => p.feature_schema_version !== TICKET_MODEL_SCHEMA || p.artifact_sha256 !== metrics.ticketArtifactSha256 || p.prob_std === null || p.prob_std === undefined)) continue;
     if (predictions.some((p: any) => p.probability === null || p.probability === undefined || !Number.isFinite(p.probability))) continue;
     if (!isCompleteTicketDistribution('trifecta', numbers, predictions.map((p: any) => p.selection), predictions.map((p: any) => Number(p.probability)))) continue;
-    const latestOdds = await first<any>(db, `SELECT captured_at,source_url,source_sha256 FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND source_sha256 IS NOT NULL AND julianday(captured_at)>=julianday(?) AND julianday(captured_at)<=julianday(?) AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1`, race.id, freshAfter, decisionAtIso, cutoffAt);
+    const latestOdds = purchaseMarket ? {captured_at:purchaseMarket.capturedAt,source_url:purchaseMarket.url,source_sha256:purchaseMarket.sha256} : await first<any>(db, `SELECT captured_at,source_url,source_sha256 FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND source_sha256 IS NOT NULL AND julianday(captured_at)>=julianday(?) AND julianday(captured_at)<=julianday(?) AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1`, race.id, freshAfter, decisionAtIso, cutoffAt);
     if (!latestOdds || !SHA256.test(latestOdds.source_sha256) || !officialTrifectaUrl(latestOdds.source_url, race)) continue;
-    const oddsRows = await all<any>(db, `SELECT selection,odds FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND captured_at=? AND source_url=? AND source_sha256=?`, race.id, latestOdds.captured_at, latestOdds.source_url, latestOdds.source_sha256);
+    const oddsRows = purchaseMarket ? purchaseMarket.odds : await all<any>(db, `SELECT selection,odds FROM odds_snapshots WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND source='boatrace-trifecta-official-v1' AND quality_status='verified-complete-v1' AND captured_at=? AND source_url=? AND source_sha256=?`, race.id, latestOdds.captured_at, latestOdds.source_url, latestOdds.source_sha256);
     if (oddsRows.some((o: any) => o.odds === null || !Number.isFinite(o.odds) || o.odds <= 0)
         || !isCompleteTicketDistribution('trifecta', numbers, oddsRows.map((x: any) => x.selection), oddsRows.map(() => 1 / oddsRows.length))) continue;
     const oddsBySelection = new Map(oddsRows.map((o: any) => [o.selection, Number(o.odds)]));
@@ -1732,17 +1744,19 @@ app.post('/admin/settle',async c=>{
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env) => {
   if (event.cron !== '* * * * *') return;
   const requestBudget={used:0,max:49};
+  const oddsContext=purchaseOddsContext(requestBudget);
+  oddsContext.enabled=env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true';
   const paperEnabled=env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true';
   if (paperEnabled) {
     // Every existing minute tick evaluates the bounded T-60 window before
     // collector work and before the special :05 early return.
-    const paper=await autoBetWithReport(env.DB,true);
+    const paper=await autoBetWithReport(env.DB,true,Date.now(),oddsContext);
     console.info(JSON.stringify({event:'paper-decision-timing',...paper.report}));
   }
   // Experimental trifecta decisions use a minute-resolution T-60 window and
   // therefore run on every tick, independently from normal auto-bet settings.
   // This is before the hourly :05 early return and before ten-minute maintenance.
-  const experimental=await experimentalPaperDecision(env.DB,Date.now());
+  const experimental=await experimentalPaperDecision(env.DB,Date.now(),oddsContext);
   console.info(JSON.stringify({event:'experimental-paper-decision',...experimental}));
   const paperBoundary = Math.floor(event.scheduledTime / 60_000) % 10 === 0;
   // Reserve minute :05 for the hourly result pass. This is not a ten-minute

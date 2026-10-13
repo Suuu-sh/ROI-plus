@@ -266,7 +266,7 @@ async function fetchSource(url: string, budget: SharedCaptureRequestBudget, requ
   return { text, sha256: await sha256(bytes), capturedAt: jstIso(clock()) };
 }
 
-async function readBoundedBody(response: FetchResponse): Promise<Uint8Array> {
+export async function readBoundedBody(response: FetchResponse): Promise<Uint8Array> {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     await response.body?.cancel().catch(() => undefined);

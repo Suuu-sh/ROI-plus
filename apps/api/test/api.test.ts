@@ -17,15 +17,30 @@ const setPaperCutoff=(raceId:string,decisionAt:number)=>sqlite.prepare('UPDATE r
 const canonicalJson=(value:any):string=>Array.isArray(value)?`[${value.map(canonicalJson).join(',')}]`:value&&typeof value==='object'?`{${Object.keys(value).sort().map(k=>`${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`:JSON.stringify(value)??'null';
 const sha256Json=(value:unknown)=>createHash('sha256').update(canonicalJson(value),'utf8').digest('hex');
 const sha256Text=(value:string)=>createHash('sha256').update(value,'utf8').digest('hex');
+const purchasePage=(url:string,oddsBySelection:Map<string,number>)=>{
+ const u=new URL(url),firsts=[1,2,3,4,5,6],rows:string[]=[];
+ for(let group=0;group<5;group++)for(let row=0;row<4;row++)rows.push(`<tr>${firsts.map(a=>{
+  const b=firsts.filter(n=>n!==a)[group],c=firsts.filter(n=>n!==a&&n!==b)[row];
+  return `${row===0?`<td rowspan="4">${b}</td>`:''}<td>${c}</td><td>${oddsBySelection.get(`${a}-${b}-${c}`)??200}</td>`;
+ }).join('')}</tr>`);
+ return `<div class="tab3"><a href="/owpc/pc/race/racelist?rno=${u.searchParams.get('rno')}&amp;jcd=${u.searchParams.get('jcd')}&amp;hd=${u.searchParams.get('hd')}">出走表</a><a href="/owpc/pc/race/raceresult?rno=${u.searchParams.get('rno')}&amp;jcd=${u.searchParams.get('jcd')}&amp;hd=${u.searchParams.get('hd')}">結果</a></div><p>オッズ更新時間 12:00</p><span>3連単オッズ</span><table><thead><tr>${firsts.map(n=>`<th>${n}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
+};
 beforeEach(()=>{
  sqlite=new Sqlite(':memory:'); DB=new D1SqliteAdapter(sqlite);
  for (const f of readdirSync(resolve(root,'db/migrations')).filter(f=>f.endsWith('.sql')).sort()) sqlite.exec(readFileSync(resolve(root,'db/migrations',f),'utf8'));
  sqlite.prepare("INSERT INTO settings(key,value) VALUES('roi_d1_write_budget_utc',?)").run(JSON.stringify({date:new Date().toISOString().slice(0,10),reserved:0,oddsReserved:0}));
  sqlite.exec(readFileSync(resolve(root,'db/seed/sample.sql'),'utf8'));
+ // Synthetic official HTTP market; never issue real requests from decision tests.
+ vi.stubGlobal('fetch',vi.fn(async(url:string)=>{
+  const u=new URL(url),race=sqlite.prepare('SELECT id FROM races WHERE venue_id=? AND race_no=? AND race_date=? LIMIT 1').get(u.searchParams.get('jcd'),Number(u.searchParams.get('rno')),u.searchParams.get('hd')?.replace(/(\d{4})(\d{2})(\d{2})/,'$1-$2-$3')) as any;
+  const rows=race?sqlite.prepare("SELECT selection,odds,captured_at FROM odds_snapshots WHERE race_id=? AND bet_type='trifecta'").all(race.id) as any[]:[];
+  if(rows.length&&Date.now()-Date.parse(rows[0].captured_at)>10*60_000)return new Response('',{status:503});
+  return new Response(purchasePage(url,new Map(rows.map(x=>[x.selection,x.odds]))));
+ }));
  sqlite.prepare("UPDATE models SET metrics_json=json_set(CASE WHEN json_valid(metrics_json) THEN metrics_json ELSE '{}' END,'$.boatVenueSchemaVersion','boat-venue-v2','$.correctedTrainingDataSha256',?,'$.boatArtifactSha256',?) WHERE id='boat-active'").run('f'.repeat(64),'a'.repeat(64));
  sqlite.prepare("UPDATE races SET post_time=? WHERE data_origin='sample' AND status='scheduled'").run(jstIso(Date.now()+60*60_000));
 });
-afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();sqlite.close();});
+afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();vi.useRealTimers();sqlite.close();});
 const addBetInputs=(raceId:string,prefix:string)=>{
  const entry=sqlite.prepare('SELECT number FROM entries WHERE race_id=? ORDER BY number LIMIT 1').get(raceId) as {number:number};
  sqlite.prepare("INSERT INTO odds_snapshots(id,race_id,bet_type,selection,odds,captured_at,source,data_origin) VALUES(?,?,'win',?,10,?,'test','sample')").run(`${prefix}-odds`,raceId,String(entry.number),jstIso(Date.now()-5000));
@@ -139,7 +154,7 @@ describe('EdgeLab API',()=>{
   const race={id:'boat-20990101-99-01',sport:'boat',venue_id:'venue-99',race_date:'2099-01-01',race_no:1,status:'scheduled',data_origin:'real',updated_at:'2099-01-01T00:00:00Z'};
   const body=JSON.stringify([race]);
   const unauthorized=await app.request('/api/ingest/races',{method:'POST',headers:{'content-type':'application/json'},body},{DB,INGEST_TOKEN:'test-token'});
-  expect(unauthorized.status).toBe(401); expect(unauthorized.headers.get('X-ROI-API-Revision')).toBe('experimental-paper-v1');
+  expect(unauthorized.status).toBe(401); expect(unauthorized.headers.get('X-ROI-API-Revision')).toBe('fresh-t60-purchase-odds-v1');
   expect(await unauthorized.json()).toMatchObject({error:'unauthorized'});
   const req=()=>app.request('/api/ingest/races',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body},env());
   expect((await req()).status).toBe(200); expect((await req()).status).toBe(200);
@@ -440,6 +455,30 @@ describe('EdgeLab API',()=>{
   expect(await autoBet(DB,true,decisionAt)).toBe(0);
   setStart(jstDate(new Date(decisionAt)));
   expect(await autoBet(DB,true,decisionAt)).toBeGreaterThan(0);
+ });
+ it('uses newly fetched T-60 purchase odds, never the saved market, and freezes prediction time',async()=>{
+  const {raceId,decisionAt}=addPaperTrifecta();
+  const predictedAt=(sqlite.prepare('SELECT predicted_at FROM ticket_predictions WHERE race_id=? LIMIT 1').get(raceId) as any).predicted_at;
+  vi.stubGlobal('fetch',vi.fn(async(url:string)=>new Response(purchasePage(url,new Map([['1-2-3',240]])))));
+  expect(await autoBet(DB,true,decisionAt)).toBe(1);
+  const bet:any=sqlite.prepare("SELECT odds_at_bet,odds_captured_at,predicted_at_at_bet FROM bets WHERE race_id=? AND mode='auto'").get(raceId);
+  expect(bet.odds_at_bet).toBe(240);expect(bet.predicted_at_at_bet).toBe(predictedAt);
+  expect(Date.parse(bet.odds_captured_at)).toBeGreaterThanOrEqual(decisionAt);
+  const snapshot=JSON.parse((sqlite.prepare('SELECT snapshot_json FROM paper_decisions WHERE race_id=?').get(raceId) as any).snapshot_json);
+  expect(snapshot.purchaseOdds).toMatchObject({qualityStatus:'verified-complete-v1',capturedAt:bet.odds_captured_at});
+  expect(snapshot.purchaseOdds.sha256).toMatch(/^[a-f0-9]{64}$/);
+ });
+ it('fails closed on fresh purchase fetch failure despite a qualifying saved market',async()=>{
+  const {raceId,decisionAt}=addPaperTrifecta();
+  vi.stubGlobal('fetch',vi.fn(async()=>new Response('',{status:503})));
+  expect(await autoBet(DB,true,decisionAt)).toBe(0);
+  expect(sqlite.prepare('SELECT outcome,reason FROM paper_decisions WHERE race_id=?').get(raceId)).toMatchObject({outcome:'abstained',reason:'purchase_odds_fetch_failed_or_window_elapsed'});
+ });
+ it('never purchases when the fresh HTTP market finishes after the T-60 window',async()=>{
+  const {raceId,decisionAt}=addPaperTrifecta();
+  vi.stubGlobal('fetch',vi.fn(async(url:string)=>{vi.spyOn(Date,'now').mockReturnValue(decisionAt+11_001);return new Response(purchasePage(url,new Map()));}));
+  expect(await autoBet(DB,true,decisionAt)).toBe(0);
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM bets WHERE race_id=? AND mode='auto'").get(raceId)).toMatchObject({n:0});
  });
  it('splits a bounded auto race budget across ranked picks and records one complete group',async()=>{
   const {raceId,decisionAt}=addPaperTrifecta('boat-20990101-99-02','boat-trifecta-multi');
@@ -763,11 +802,11 @@ describe('EdgeLab API',()=>{
   expect(await autoBet(DB,true,decisionAt)).toBe(1);
   const automatic=sqlite.prepare("SELECT id,bet_type,odds_captured_at FROM bets WHERE race_id=? AND mode='auto'").get(raceId) as any;
   expect(automatic.bet_type).toBe('trifecta'); // conservative ROI beats the concurrent win candidate
-  expect(automatic.odds_captured_at).toBe(oddsCapturedAt);
+  expect(Date.parse(automatic.odds_captured_at)).toBeGreaterThan(Date.parse(oddsCapturedAt));
   const listed=await app.request('/api/bets?origin=real',{},env());
   const bets=await listed.json() as any[];
   expect(bets.find(x=>x.id===manual.id)).toMatchObject({oddsCapturedAt});
-  expect(bets.find(x=>x.id===automatic.id)).toMatchObject({oddsCapturedAt});
+  expect(bets.find(x=>x.id===automatic.id)).toMatchObject({oddsCapturedAt:automatic.odds_captured_at});
  });
  it('holds trifecta settlement until complete results and the exact winning trifecta payout exist; rejects unvalidated promotion',async()=>{
   const {raceId}=addValidatedTrifectaFixture();
@@ -961,10 +1000,10 @@ describe('EdgeLab API',()=>{
  it('requires the proxy header for read APIs when PROXY_TOKEN is set',async()=>{
   const e={...env(),PROXY_TOKEN:'p'};
   const forbidden=await app.request('/api/models',{},e);
-  expect(forbidden.status).toBe(403); expect(forbidden.headers.get('X-ROI-API-Revision')).toBe('experimental-paper-v1');
+  expect(forbidden.status).toBe(403); expect(forbidden.headers.get('X-ROI-API-Revision')).toBe('fresh-t60-purchase-odds-v1');
   expect(await forbidden.json()).toMatchObject({error:'forbidden'});
   const allowed=await app.request('/api/models',{headers:{'X-ROI-Proxy':'p'}},e);
-  expect(allowed.status).toBe(200); expect(allowed.headers.get('X-ROI-API-Revision')).toBe('experimental-paper-v1');
+  expect(allowed.status).toBe(200); expect(allowed.headers.get('X-ROI-API-Revision')).toBe('fresh-t60-purchase-odds-v1');
   expect((await app.request('/api/health',{},e)).status).toBe(200);
   expect((await app.request('/api/ingest/venues',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:'[]'},e)).status).toBe(200);
  });
@@ -990,7 +1029,7 @@ describe('EdgeLab API',()=>{
   const afterFirst=prepareCount;
   const hit=await app.request('/api/models?view=a',{headers},e);
   expect(hit.status).toBe(200); expect(hit.headers.get('Cache-Control')).toBe('private, no-store'); expect(hit.headers.get('X-ROI-Read-Cache')).toBe('HIT');
-  expect(hit.headers.get('X-ROI-API-Revision')).toBe('experimental-paper-v1');
+  expect(hit.headers.get('X-ROI-API-Revision')).toBe('fresh-t60-purchase-odds-v1');
   expect(prepareCount).toBe(afterFirst);
   expect((await app.request('/api/models?view=a',{},e)).status).toBe(403); // warm cache never bypasses auth
   expect((await app.request('/api/models?view=b',{headers},e)).status).toBe(200);
