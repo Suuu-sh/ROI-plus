@@ -1020,6 +1020,11 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
             "coverage": coverage}
 
 
+def _within_experimental_worker_window(as_of: datetime, t60: datetime) -> bool:
+    """Match the Worker query's inclusive target-5m through target window."""
+    return t60 - timedelta(minutes=5) <= as_of <= t60
+
+
 def experimental_ticket_predictions(store: Mapping[str, Any], *, artifact: Mapping[str, Any],
                                     model_id: str, cutoff: str, artifact_sha256: str,
                                     race_date: str | None = None) -> dict[str, Any]:
@@ -1087,7 +1092,10 @@ def experimental_ticket_predictions(store: Mapping[str, Any], *, artifact: Mappi
         cutoff_observed = cutoff_observed.astimezone(timezone.utc)
         entries = entries_by_race.get(race_id, [])
         complete, source_proven, _ = _entry_coverage(entries, as_of)
-        if (post <= as_of or as_of > t60 or cutoff_observed > as_of or cutoff_observed > t60
+        # Do not generate an earlier snapshot that ingest could persist but
+        # the Worker decision query would never consider.
+        if (post <= as_of or not _within_experimental_worker_window(as_of, t60)
+                or cutoff_observed > as_of or cutoff_observed > t60
                 or not complete or not source_proven or not _has_complete_market(store, race, as_of)):
             continue
         fresh_lanes: set[int] = set()

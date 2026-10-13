@@ -1142,6 +1142,19 @@ describe('collection status quality compatibility',()=>{
   expect(sqlite.prepare('SELECT race_id,outcome,reason FROM experimental_paper_decisions ORDER BY race_id').all()).toEqual(ticks.map((_,i)=>({
    race_id:`boat-${raceDate.replaceAll('-','')}-99-${String(i+1).padStart(2,'0')}`,outcome:'abstained',reason:'experimental_forecast_missing_or_invalid'})));
  });
+ it('resolves the exact latest experimental decision model through an authenticated no-store endpoint',async()=>{
+  const register=(id:string,status:string,registeredAt:string,sha:string)=>sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
+   VALUES(?,?,'edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
+   .run(id,status,sha,'b'.repeat(64),'c'.repeat(64),jstIso(Date.now()-60_000),'{}','{}',registeredAt);
+  const registeredAt=jstIso();
+  register('boat-trifecta-exp-noweather-a','candidate',registeredAt,'a'.repeat(64));
+  register('boat-trifecta-exp-noweather-z','experimental',registeredAt,'d'.repeat(64));
+  expect((await app.request('/api/ingest/experimental-trifecta/forecast-model',{},env())).status).toBe(401);
+  const response=await app.request('/api/ingest/experimental-trifecta/forecast-model',{headers:{Authorization:'Bearer test-token'}},env());
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(await response.json()).toEqual({model:{modelId:'boat-trifecta-exp-noweather-z',artifactSha256:'d'.repeat(64)}});
+ });
 });
 
 
@@ -1230,7 +1243,7 @@ it('admits an experimental portfolio only with live-cutoff archive and full sour
  // A later capture must not replace the source snapshot that existed at prediction time.
  const laterArchive={...archive,capturedAt:jstIso(at+2_000)};
  sqlite.prepare("INSERT INTO boatrace_prerace_capture_archives(id,race_id,race_date,captured_at,archive_json,data_origin) VALUES(?,?,?,?,?,'real')").run(`${raceId}:capture:${at+2_000}`,raceId,raceDate,jstIso(at+2_000),JSON.stringify(laterArchive));
- const artifactSha='4'.repeat(64),trainedAt=jstIso(at-120_000),raceSetSha='5'.repeat(64);
+ const artifactSha='4'.repeat(64),trainedAt=jstIso(at-600_000),raceSetSha='5'.repeat(64);
  const metadata={id:modelId,status:'candidate',trainingMode:'experimental',experimentalOnly:true,sport:'boat',betType:'trifecta',featureColumns:['lane_exhibition_time'],
   boatFeatureSchemaVersion:'boat-prerace-v2-no-weather-experimental-v1',ticketModelSchemaVersion:'ticket-selection-v1',ticketPredictionSemantics:'exact-selection-probability-v1',ticketBetType:'trifecta',ticketArtifactSha256:artifactSha,trainedAt,
   trainingEvidence:{sourceArrivalVerifiedRaceCount:1,verifiedT60CutoffRaceCount:1,sixFreshExhibitionRaceCount:1,complete120T60OddsRaceCount:1,consistentPayoutRaceCount:1,raceIdSetSha256:raceSetSha},
@@ -1242,9 +1255,23 @@ it('admits an experimental portfolio only with live-cutoff archive and full sour
  expect(registration.status).toBe(200);
  const forecast={schema:'edgelab-experimental-trifecta-forecast-v1',modelId,artifactSha256:artifactSha,trainingMode:'experimental',experimentalOnly:true,ticketModelSchemaVersion:'ticket-selection-v1',ticketPredictionSemantics:'exact-selection-probability-v1',boatFeatureSchemaVersion:metadata.boatFeatureSchemaVersion,
   races:[{raceId,predictedAt:jstIso(at),predictions:selections.map(selection=>({selection,probability:1/120,prob_std:0.001}))}]};
+ const tooEarly={...forecast,races:[{...forecast.races[0],predictedAt:jstIso(at-5*60_000-1)}]};
+ const tooEarlyResponse=await app.request('/api/ingest/experimental-trifecta/forecast',{method:'POST',headers:{Authorization:'Bearer test-token','content-type':'application/json'},body:JSON.stringify(tooEarly)},env());
+ expect(tooEarlyResponse.status).toBe(400);
+ expect(await tooEarlyResponse.json()).toMatchObject({error:'experimental forecast is outside a verified pre-cutoff prediction window'});
  const decision=await app.request('/api/ingest/experimental-trifecta/forecast',{method:'POST',headers:{Authorization:'Bearer test-token','content-type':'application/json'},body:JSON.stringify(forecast)},env());
  expect(decision.status).toBe(200);expect(await decision.json()).toMatchObject({stored:[{raceId,modelId,predictionCount:120}],decision:'worker T-60 timing gate'});
  expect(sqlite.prepare('SELECT COUNT(*) n FROM experimental_paper_bets WHERE race_id=?').get(raceId)).toMatchObject({n:0});
+ sqlite.prepare('DELETE FROM experimental_ticket_predictions WHERE race_id=?').run(raceId);
+ const outsideDecisionWindow=jstIso(at-5*60_000-1);
+ for(const selection of selections)sqlite.prepare(`INSERT INTO experimental_ticket_predictions(id,race_id,model_id,selection,probability,prob_std,predicted_at,feature_schema_version,artifact_sha256,data_origin)
+  VALUES(?,?,?,?,?, ?,?,'ticket-selection-v1',?,'real')`).run(`stale-${selection}`,raceId,modelId,selection,1/120,0.001,outsideDecisionWindow,artifactSha);
+ const staleReport=await experimentalPaperDecision(DB,at+1_000);
+ expect(staleReport).toMatchObject({evaluated:1,placedRaces:0,abstainedByReason:{experimental_forecast_missing_or_invalid:1}});
+ sqlite.prepare('DELETE FROM experimental_paper_decisions WHERE race_id=?').run(raceId);
+ sqlite.prepare('DELETE FROM experimental_ticket_predictions WHERE race_id=?').run(raceId);
+ const restored=await app.request('/api/ingest/experimental-trifecta/forecast',{method:'POST',headers:{Authorization:'Bearer test-token','content-type':'application/json'},body:JSON.stringify(forecast)},env());
+ expect(restored.status).toBe(200);
  const multiRace={...forecast,races:[...forecast.races,...forecast.races]};
  expect((await app.request('/api/ingest/experimental-trifecta/forecast',{method:'POST',headers:{Authorization:'Bearer test-token','content-type':'application/json'},body:JSON.stringify(multiRace)},env())).status).toBe(400);
  vi.spyOn(Date,'now').mockReturnValue(at+11_001);

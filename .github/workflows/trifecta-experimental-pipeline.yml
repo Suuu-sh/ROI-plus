@@ -196,7 +196,7 @@ jobs:
           print('Experimental model registered in the isolated experiment registry.')
           PY
       - name: Refresh current-day PIT archives immediately before forecast
-        if: success() && (steps.mode.outputs.value == 'train_and_forecast' || steps.mode.outputs.value == 'forecast_only') && steps.model.outputs.model_id != ''
+        if: success() && github.event_name == 'workflow_dispatch' && (steps.mode.outputs.value == 'train_and_forecast' || steps.mode.outputs.value == 'forecast_only') && steps.model.outputs.model_id != ''
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: https://roi-plus-api.suuu-sh.workers.dev
@@ -219,7 +219,7 @@ jobs:
           print(json.dumps(report, ensure_ascii=False, sort_keys=True))
           PY
       - name: Generate and submit only a current actual-time T-60 forecast
-        if: success() && (steps.mode.outputs.value == 'train_and_forecast' || steps.mode.outputs.value == 'forecast_only') && steps.model.outputs.model_id != ''
+        if: success() && github.event_name == 'workflow_dispatch' && (steps.mode.outputs.value == 'train_and_forecast' || steps.mode.outputs.value == 'forecast_only') && steps.model.outputs.model_id != ''
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: https://roi-plus-api.suuu-sh.workers.dev

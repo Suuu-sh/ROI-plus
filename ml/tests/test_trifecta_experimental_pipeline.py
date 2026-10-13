@@ -297,5 +297,19 @@ def test_experimental_workflow_schedules_learning_only_and_gates_registry_foreca
     assert "steps.mode.outputs.value == 'train_and_forecast'" in workflow
     assert "steps.mode.outputs.value == 'forecast_only'" in workflow
     assert "steps.mode.outputs.value != 'learning_only'" in workflow
+    assert workflow.count("github.event_name == 'workflow_dispatch'") == 2
     assert "EDGELAB_API_URL: https://roi-plus-api.suuu-sh.workers.dev" in workflow
     assert "secrets.EDGELAB_API_URL" not in workflow
+
+
+def test_separate_five_minute_experimental_forecast_workflow_is_read_only_to_learning_state():
+    workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/trifecta-experimental-forecast.yml").read_text()
+    assert "cron: '2-59/5 * * * *'" in workflow
+    assert "group: boat-experimental-forecast" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "actions/cache/restore@v4" in workflow
+    assert "actions/cache/save@v4" not in workflow
+    assert "python -m edgelab.experimental_forecast_job" in workflow
+    assert "INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}" in workflow
+    assert "train-trifecta-experimental" not in workflow
+    assert "Register only" not in workflow

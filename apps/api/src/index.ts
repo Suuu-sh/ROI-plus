@@ -1355,6 +1355,13 @@ app.post('/ingest/experimental-trifecta/model',async c=>{
    modelId,pkl.sha256,manifestSha,metadataSha,metadata.trainedAt,JSON.stringify(manifest),body.metadataJson,now());
  return c.json({modelId,status:'candidate',idempotent:false});
 });
+app.get('/ingest/experimental-trifecta/forecast-model',async c=>{
+ if(!auth(c))return jsonError(c,'unauthorized',401);
+ // Match experimentalPaperDecision's selection exactly: latest registered
+ // candidate/experimental row wins, with no fallback if its artifact is bad.
+ const model=await first<any>(c.env.DB,"SELECT id,status,artifact_sha256 FROM experimental_models WHERE status IN ('candidate','experimental') ORDER BY registered_at DESC,id DESC LIMIT 1");
+ return c.json({model:model?{modelId:model.id,artifactSha256:model.artifact_sha256}:null},200,{'Cache-Control':'private, no-store'});
+});
 app.post('/ingest/experimental-trifecta/forecast',async c=>{
  if(!auth(c))return jsonError(c,'unauthorized',401);
  if(Number(c.req.header('Content-Length')??0)>512_000)return jsonError(c,'experimental forecast exceeds the request size limit',413);
@@ -1374,7 +1381,8 @@ app.post('/ingest/experimental-trifecta/forecast',async c=>{
    if(!race||race.sport!=='boat'||race.status!=='scheduled'||race.data_origin!=='real'||race.race_date!==jstRaceDate(new Date(decisionAt)))return jsonError(c,'experimental forecast race is not an eligible real race');
    const cutoffMs=Date.parse(race.betting_cutoff_at),observedMs=Date.parse(race.betting_cutoff_observed_at),forecastMs=Date.parse(forecast.predictedAt),targetMs=cutoffMs-PRIMARY_PAPER_OFFSET_MS;
    if(race.betting_cutoff_source!==TRUSTED_CUTOFF_SOURCE||!Number.isFinite(cutoffMs)||!Number.isFinite(observedMs)||observedMs>decisionAt+5_000
-      ||decisionAt-observedMs>BOATRACE_CUTOFF_MAX_AGE_MS||decisionAt>targetMs+PRIMARY_PAPER_TOLERANCE_MS||forecastMs>targetMs)
+      ||decisionAt-observedMs>BOATRACE_CUTOFF_MAX_AGE_MS||decisionAt>targetMs+PRIMARY_PAPER_TOLERANCE_MS
+      ||forecastMs>targetMs||forecastMs<targetMs-5*60_000)
       return jsonError(c,'experimental forecast is outside a verified pre-cutoff prediction window');
    // Resolve the latest archive available at the model's actual prediction
    // time. A newer capture must not invalidate a valid point-in-time snapshot.

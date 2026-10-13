@@ -8,7 +8,8 @@ from edgelab.models.trifecta import (_captured_odds, _fit, _complete_race,
                                      _proper_ticket_metrics, active_ticket_predictions,
                                      _consistent_payout,
                                      _select_runtime_like_tickets, _replay,
-                                     REPLAY_SELECTION_POLICY)
+                                     REPLAY_SELECTION_POLICY,
+                                     _within_experimental_worker_window)
 from edgelab.features.boat import (BASE_FEATURE_COLUMNS,
     TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
     TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
@@ -100,6 +101,16 @@ def test_experimental_forecast_is_separate_empty_envelope_without_eligible_live_
     assert report["schema"] == "edgelab-experimental-trifecta-forecast-v1"
     assert report["trainingMode"] == "experimental" and report["experimentalOnly"] is True
     assert report["races"] == []
+
+
+def test_experimental_forecast_window_matches_target_minus_five_minutes_to_target():
+    from datetime import datetime, timedelta, timezone
+
+    t60 = datetime(2026, 10, 13, 4, 0, tzinfo=timezone.utc)
+    assert _within_experimental_worker_window(t60 - timedelta(minutes=5), t60)
+    assert _within_experimental_worker_window(t60, t60)
+    assert not _within_experimental_worker_window(t60 - timedelta(minutes=5, seconds=1), t60)
+    assert not _within_experimental_worker_window(t60 + timedelta(seconds=1), t60)
 
 
 def test_ordered_trifecta_probabilities_are_full_exact_order_distribution():
