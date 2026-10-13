@@ -6,6 +6,7 @@ import { useAsync } from '../lib/useAsync'
 import { odds, pct, signedYen, tone, yen } from '../lib/format'
 import { t } from '../i18n'
 import { BetsTable } from '../components/BetsTable'
+import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
 import { Empty, ErrorState, Loading, Section, SportIcon } from '../components/ui'
 
 const axis = { fontSize: 11, fill: 'rgb(var(--faint))' }
@@ -29,6 +30,8 @@ export function PerformancePage() {
         origin={origin}
         settledBets={bets.filter((bet) => bet.status === 'won' || bet.status === 'lost').length}
       />
+
+      <ExperimentalPerformance />
 
       <Section title="候補1位のみ vs 複数購入" right={<span className="text-xs text-muted">同一レース・同一購入総額で比較</span>}>
         {origin === 'all' ? <div className="px-4 py-4 text-sm text-muted">比較対象を混ぜないため、「実データ」または「サンプル」を選択してください。</div>

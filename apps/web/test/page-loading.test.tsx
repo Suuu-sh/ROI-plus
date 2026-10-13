@@ -15,6 +15,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 function mockReads(purchasedBets: Bet[] = []) {
   const fetcher = vi.fn(async (url: string) => {
     if (url === '/api/races/detail-race') return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
+    if (url === '/api/performance/experimental') return new Response(JSON.stringify({ experimentKey: 'boat-trifecta-small-sample-v1', state: 'unavailable', model: null, bankroll: { initial: 100000, available: 100000 }, metrics: { races: 0, bets: 0, stake: 0, payout: 0, profit: 0, roi: null }, decisions: [], sizing: { method: 'fractional-kelly-portfolio', perRaceCombinedCap: 1000, dailyCap: null, balanceGuard: 'nonnegative-virtual-balance' } }), { headers: { 'content-type': 'application/json' } })
     if (url.startsWith('/api/bets')) return new Response(JSON.stringify(purchasedBets), { headers: { 'content-type': 'application/json' } })
     return new Response(JSON.stringify(url.includes('/performance/overview') ? url.includes('sport=boat') ? boatOverview : overview : []), { headers: { 'content-type': 'application/json' } })
   })
@@ -93,9 +94,10 @@ it('board shows operational performance and only races with recorded purchases',
   await screen.findByRole('heading', { name: '購入したレース' })
   expect(screen.getByRole('heading', { name: '運用成績' })).toBeTruthy()
   expect(screen.queryByText('競馬 vs ボートレースを比較')).toBeNull()
-  expect(fetcher).toHaveBeenCalledTimes(2)
+  await screen.findByText('実験用仮想残高')
+  expect(fetcher).toHaveBeenCalledTimes(3)
   expect(fetcher.mock.calls.some(([url]) => /\/models|\/races\?|\/rankings|\/collection/.test(url))).toBe(false)
-  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets?origin=all', '/api/performance/overview?origin=all'])
+  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets?origin=all', '/api/performance/experimental', '/api/performance/overview?origin=all'])
 })
 it('board lists a bought race and links only that race to its detail', async () => {
   const bet: Bet = { id: 'bought-1', raceId: 'boat-20261011-18-07', sport: 'boat', betType: 'trifecta', selection: '1-2-3', stake: 100,

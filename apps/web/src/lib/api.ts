@@ -61,6 +61,7 @@ export const api = {
   overview: (origin: OriginFilter, sport?: Sport) => req<Overview>(`/performance/overview${qs({ sport, origin })}`),
   breakdown: (origin: OriginFilter) => req<Breakdown>(`/performance/breakdown${qs({ origin })}`),
   rankComparison: (origin: OriginFilter) => req<RankComparison>(`/performance/rank-comparison${qs({ origin })}`),
+  experimentalPerformance: () => req<ExperimentalPerformance>('/performance/experimental'),
   models: () => req<ModelInfo[]>('/models'),
   promote: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/promote`, { method: 'POST' }),
   promoteInitialBaseline: (id: string, validationFingerprint: string) =>
@@ -69,6 +70,32 @@ export const api = {
     }),
   rollback: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/rollback`, { method: 'POST' }),
   collection: () => req<CollectionStatus>('/collection/status'),
+}
+
+export interface ExperimentalPerformance {
+  experimentKey: 'boat-trifecta-small-sample-v1'
+  state: 'unavailable' | 'ready'
+  model: { id: string; status: 'candidate' | 'experimental'; artifactSha256: string; schemaVersion: string; trainedAt: string } | null
+  bankroll: { initial: 100000; available: number }
+  metrics: { races: number; bets: number; stake: number; payout: number; profit: number; roi: number | null }
+  decisions: ExperimentalDecision[]
+  sizing: { method: 'fractional-kelly-portfolio'; perRaceCombinedCap: 1000; dailyCap: null; balanceGuard: 'nonnegative-virtual-balance' }
+}
+
+export interface ExperimentalDecision {
+  raceId: string
+  raceDate: string
+  raceNo: number
+  venueName: string | null
+  outcome: 'placed' | 'abstained'
+  reason: string | null
+  stake: number
+  modelId: string
+  decidedAt: string
+  probability: number | null
+  odds: number | null
+  uncertainty: number | null
+  expectedRoi: number | null
 }
 
 export interface RankComparison {
