@@ -143,7 +143,8 @@ def submit_forecasts(envelope: dict[str, Any], *, base_url: str, token: str,
                           allow_nan=False).encode("utf-8")
         request = urllib.request.Request(base + "/api/ingest/experimental-trifecta/forecast",
             data=body, method="POST", headers={"Authorization": "Bearer " + token,
-            "Content-Type": "application/json", "Accept": "application/json"})
+            "Content-Type": "application/json", "Accept": "application/json",
+            "User-Agent": "ROIPlus-Forecast/1.0"})
         try:
             with opener(request, timeout=30) as response:
                 response_body = response.read(16_385)

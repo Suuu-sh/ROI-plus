@@ -35,7 +35,8 @@ def test_submit_forecasts_uses_one_race_per_api_request_and_preserves_metadata()
 
     def opener(request, timeout):
         payload = json.loads(request.data)
-        requests.append((payload, timeout, request.get_header("Authorization")))
+        requests.append((payload, timeout, request.get_header("Authorization"),
+                         request.get_header("User-agent")))
         race = payload["races"][0]
         return _Response({"stored": [{"raceId": race["raceId"], "modelId": payload["modelId"],
                                       "predictionCount": 120}]})
@@ -43,12 +44,13 @@ def test_submit_forecasts_uses_one_race_per_api_request_and_preserves_metadata()
     result = submit_forecasts(_envelope(), base_url="https://api.example/", token="test-only", opener=opener)
     assert result["status"] == "forecast_stored"
     assert result["storedRaceCount"] == 3
-    assert [payload["races"][0]["raceId"] for payload, _, _ in requests] == ["race-0", "race-1", "race-2"]
+    assert [payload["races"][0]["raceId"] for payload, _, _, _ in requests] == ["race-0", "race-1", "race-2"]
     assert all(len(payload["races"]) == 1 and len(payload["races"][0]["predictions"]) == 120
-               for payload, _, _ in requests)
+               for payload, _, _, _ in requests)
     assert all(payload["artifactSha256"] == "a" * 64 and timeout == 30
-               for payload, timeout, _ in requests)
-    assert all(auth == "Bearer test-only" for _, _, auth in requests)
+               for payload, timeout, _, _ in requests)
+    assert all(auth == "Bearer test-only" for _, _, auth, _ in requests)
+    assert all(user_agent == "ROIPlus-Forecast/1.0" for _, _, _, user_agent in requests)
 
 
 def test_submit_forecasts_reports_partial_storage_after_later_failure_without_retry():
