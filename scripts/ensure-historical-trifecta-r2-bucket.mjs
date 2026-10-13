@@ -3,17 +3,31 @@ import { pathToFileURL } from 'node:url'
 
 export const bucketName = 'roi-plus-trifecta-archive'
 
+const stripAnsi = output => output.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
+const parseJsonWithBanner = output => {
+  const candidates = [output.trim()]
+  for (const [open, close] of [['[', ']'], ['{', '}']]) {
+    const start = output.indexOf(open), end = output.lastIndexOf(close)
+    if (start >= 0 && end > start) candidates.push(output.slice(start, end + 1))
+  }
+  for (const candidate of candidates) {
+    try { return JSON.parse(candidate) } catch { /* Try another bounded JSON candidate. */ }
+  }
+  return null
+}
+
 export const bucketExists = output => {
+  const clean = stripAnsi(output)
   try {
-    const parsed = JSON.parse(output)
+    const parsed = parseJsonWithBanner(clean) ?? JSON.parse(clean)
     const rows = Array.isArray(parsed) ? parsed : [parsed, ...(Array.isArray(parsed?.result) ? parsed.result : [])]
     if (rows.some(row => row?.name === bucketName)) return true
   } catch { /* Continue with Wrangler's human-readable output. */ }
-  return output.split(/\r?\n/).some(line => {
+  return clean.split(/\r?\n/).some(line => {
     const normalized = line.replace(/[|│┌┐└┘─]/g, ' ').trim()
-    return normalized === bucketName || normalized === `name: ${bucketName}`
-      || normalized === `name: '${bucketName}'` || normalized === `name: "${bucketName}"`
-      || normalized.split(/\s+/)[0] === bucketName
+    return new RegExp(`^name\\s*:\\s*['\"]?${bucketName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['\"]?$`, 'i').test(normalized)
+      || normalized === bucketName
+      || new RegExp(`^\\|?\\s*${bucketName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\|?$`, 'i').test(normalized)
   })
 }
 
@@ -32,29 +46,34 @@ const findEnabledValue = value => {
 }
 
 export const devUrlEnabled = output => {
+  const clean = stripAnsi(output)
   try {
-    const parsed = findEnabledValue(JSON.parse(output))
+    const parsed = findEnabledValue(parseJsonWithBanner(clean) ?? JSON.parse(clean))
     if (parsed !== null) return parsed
   } catch { /* Continue with stable status labels in Wrangler output. */ }
-  if (/public development url\s*:\s*(?:enabled|allowed)/i.test(output)
-    || /public access\s*:\s*(?:enabled|allowed)/i.test(output)
-    || /status\s*:\s*(?:enabled|allowed)/i.test(output)) return true
-  if (/public development url\s*:\s*(?:disabled|not enabled|not allowed)/i.test(output)
-    || /public access\s*:\s*(?:disabled|not allowed)/i.test(output)
-    || /status\s*:\s*(?:disabled|not enabled|not allowed)/i.test(output)
-    || /public development url is not enabled/i.test(output)) return false
+  if (/public development url\s*:\s*(?:enabled|allowed)/i.test(clean)
+    || /public access\s*:\s*(?:enabled|allowed)/i.test(clean)
+    || /public access is enabled at\s+['"]?https:\/\//i.test(clean)
+    || /status\s*:\s*(?:enabled|allowed)/i.test(clean)) return true
+  if (/public development url\s*:\s*(?:disabled|not enabled|not allowed)/i.test(clean)
+    || /public access\s*:\s*(?:disabled|not allowed)/i.test(clean)
+    || /public access via the r2\.dev url is disabled/i.test(clean)
+    || /status\s*:\s*(?:disabled|not enabled|not allowed)/i.test(clean)
+    || /public development url is not enabled/i.test(clean)) return false
   return null
 }
 
 export const noCustomDomains = output => {
+  const clean = stripAnsi(output)
   try {
-    const parsed = JSON.parse(output)
+    const parsed = parseJsonWithBanner(clean) ?? JSON.parse(clean)
     if (Array.isArray(parsed)) return parsed.length === 0
     if (Array.isArray(parsed?.result)) return parsed.result.length === 0
     if (Array.isArray(parsed?.domains)) return parsed.domains.length === 0
   } catch { /* Continue with documented command output. */ }
-  if (/no (?:custom )?domains? (?:are )?(?:configured|connected|found)/i.test(output)) return true
-  const lines = output.split(/\r?\n/).map(line => line.replace(/[|│┌┐└┘─]/g, ' ').trim()).filter(Boolean)
+  if (/there are no custom domains connected to this bucket/i.test(clean)
+    || /no (?:custom )?domains? (?:are )?(?:configured|connected|found)/i.test(clean)) return true
+  const lines = clean.split(/\r?\n/).map(line => line.replace(/[|│┌┐└┘─]/g, ' ').trim()).filter(Boolean)
   const domainRows = lines.filter(line => /(?:^|\s)(?:domain|hostname)\s*:/i.test(line)
     || /\b[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/.test(line))
   return domainRows.length === 0 && /(?:domain|hostname)/i.test(output)
@@ -69,6 +88,7 @@ export const ensurePrivateBucket = async run => {
       const error = new Error('R2 provisioning command failed')
       error.provisionStage = stage
       error.providerCode = Number.isInteger(cause?.providerCode) ? cause.providerCode : extractProviderCode(cause)
+      if (cause?.kind === 'bucket_already_exists') error.kind = cause.kind
       throw error
     }
   }
@@ -125,6 +145,10 @@ const runWrangler = args => {
   } catch (cause) {
     const error = new Error('Wrangler command failed')
     error.providerCode = extractProviderCode(cause)
+    const safeOutput = stripAnsi(`${cause?.stderr ?? ''}\n${cause?.stdout ?? ''}`)
+    if (args[1] === 'bucket' && args[2] === 'create' && /bucket (?:already exists|already in use)|already exists.*bucket/i.test(safeOutput)) {
+      error.kind = 'bucket_already_exists'
+    }
     throw error
   }
 }
@@ -138,7 +162,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const stage = /^[a-z-]{1,48}$/.test(error?.provisionStage ?? '') ? error.provisionStage : 'unknown'
     const code = Number.isInteger(error?.providerCode) && error.providerCode >= 100 && error.providerCode <= 999999
       ? ` Cloudflare error code ${error.providerCode}.` : ''
-    process.stderr.write(`Historical trifecta R2 bucket provisioning failed at ${stage}.${code}\n`)
+    const kind = error?.kind === 'bucket_already_exists' ? ' Bucket already exists.' : ''
+    process.stderr.write(`Historical trifecta R2 bucket provisioning failed at ${stage}.${kind}${code}\n`)
     process.exitCode = 1
   }
 }
