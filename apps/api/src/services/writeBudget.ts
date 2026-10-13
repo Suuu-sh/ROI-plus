@@ -143,22 +143,29 @@ export async function reserveWriteBudgets(db: Db, date: string, reservations: Ar
     const requestedEssential = reservations.filter(x => x.category === 'essential').reduce((sum,x) => sum+x.units,0);
     const requestedOptional = reservations.filter(x => x.category !== 'essential' && x.category !== 'collection').reduce((sum,x) => sum+x.units,0);
     const requestedOdds = reservations.filter(x => x.category === 'odds').reduce((sum,x) => sum+x.units,0);
-    // Account conservatively for each failed CAS attempt in the eventual
-    // successful reservation. These units are never refunded.
+    // Keep retry overhead in the same priority bucket as the admitted work so
+    // optional contention cannot consume protected essential capacity.
     const retryOverhead = conflicts * 8;
+    const retryCategory = requestedEssential > 0 ? 'essential'
+      : requestedCollection > 0 ? 'collection'
+      : requestedOdds > 0 && requestedOdds === requestedOptional ? 'odds' : 'optional';
+    const retryEssential = retryCategory === 'essential' ? retryOverhead : 0;
+    const retryCollection = retryCategory === 'collection' ? retryOverhead : 0;
+    const retryOptional = retryCategory === 'optional' || retryCategory === 'odds' ? retryOverhead : 0;
+    const retryOdds = retryCategory === 'odds' ? retryOverhead : 0;
     const requested = requestedEssential + requestedCollection + requestedOptional + retryOverhead;
-    const nextCollectionReserved = collectionReserved + requestedCollection;
+    const nextCollectionReserved = collectionReserved + requestedCollection + retryCollection;
     const nonLogEssentialReserved = essentialReserved - collectionReserved;
     const reserveStillProtected = nonLogEssentialReserved <= limits.essentialLimit - DAILY_COLLECTION_LOG_RESERVE
       ? Math.max(0, DAILY_COLLECTION_LOG_RESERVE - nextCollectionReserved) : 0;
     if (reserved + requested > limits.limit
-      || essentialReserved + requestedEssential + requestedCollection + retryOverhead > limits.essentialLimit
+      || essentialReserved + requestedEssential + requestedCollection + retryEssential + retryCollection > limits.essentialLimit
       || nextCollectionReserved > DAILY_COLLECTION_LOG_RESERVE
-      || nonLogEssentialReserved + requestedEssential + retryOverhead > limits.essentialLimit - reserveStillProtected
-      || optionalReserved + requestedOptional > limits.optionalLimit
-      || (requestedOdds > 0 && oddsReserved + requestedOdds > limits.oddsLimit)) return false;
-    const next = JSON.stringify({ date, reserved: reserved + requested, oddsReserved: oddsReserved + requestedOdds,
-      essentialReserved: essentialReserved + requestedEssential + requestedCollection + retryOverhead, optionalReserved: optionalReserved + requestedOptional,
+      || nonLogEssentialReserved + requestedEssential + retryEssential > limits.essentialLimit - reserveStillProtected
+      || optionalReserved + requestedOptional + retryOptional > limits.optionalLimit
+      || (requestedOdds > 0 && oddsReserved + requestedOdds + retryOdds > limits.oddsLimit)) return false;
+    const next = JSON.stringify({ date, reserved: reserved + requested, oddsReserved: oddsReserved + requestedOdds + retryOdds,
+      essentialReserved: essentialReserved + requestedEssential + requestedCollection + retryEssential + retryCollection, optionalReserved: optionalReserved + requestedOptional + retryOptional,
       collectionReserved: nextCollectionReserved, ...(allowance ? { allowance } : {}) });
     const result = await db.prepare(`UPDATE settings SET value=? WHERE key=? AND value=?`)
       .bind(next, D1_WRITE_BUDGET_KEY, row.value).run();

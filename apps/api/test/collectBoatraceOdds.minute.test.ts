@@ -125,7 +125,7 @@ describe('minute odds collection controls', () => {
     ]);
     expect(reserves.filter(Boolean)).toHaveLength(2);
     const stored = JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as { value: string }).value);
-    expect(stored).toEqual({ date: now.toISOString().slice(0, 10), reserved: 48, oddsReserved: 40, essentialReserved: 8, optionalReserved: 40, collectionReserved: 0 });
+    expect(stored).toEqual({ date: now.toISOString().slice(0, 10), reserved: 48, oddsReserved: 48, essentialReserved: 0, optionalReserved: 48, collectionReserved: 0 });
     sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({ date: now.toISOString().slice(0, 10), reserved: 9_920, oddsReserved: 9_920 }));
     expect(await reserveWriteBudget(DB, now.toISOString().slice(0, 10), 100, 'odds')).toBe(false);
     expect(await reserveWriteBudget(DB, now.toISOString().slice(0, 10), 1, 'ingest')).toBe(false);
@@ -184,6 +184,28 @@ describe('minute odds collection controls', () => {
     expect(await reserveWriteBudget(contendedDb, day, 20, 'essential')).toBe(false);
     expect(casAttempts).toBe(4);
     expect(await readWriteBudget(DB, day)).toMatchObject({reserved:0,essentialReserved:0,optionalReserved:0});
+  });
+
+  it.each(['optional', 'odds', 'collection'] as const)('charges %s retry overhead only to its own bucket', async (category) => {
+    const day = now.toISOString().slice(0, 10);
+    let lost = false;
+    const onceContendedDb = {
+      prepare(sql: string) {
+        const statement = DB.prepare(sql);
+        if (sql !== 'UPDATE settings SET value=? WHERE key=? AND value=?') return statement;
+        return {
+          bind(...values: unknown[]) { statement.bind(...values); return this; },
+          first: <T>() => statement.first<T>(),
+          all: <T>() => statement.all<T>(),
+          async run() { if (!lost) { lost=true; return {success:true,meta:{changes:0}}; } return statement.run(); },
+        };
+      },
+    } as any;
+    expect(await reserveWriteBudget(onceContendedDb, day, 3, category)).toBe(true);
+    const budget = await readWriteBudget(DB, day);
+    if (category === 'optional') expect(budget).toMatchObject({reserved:11,essentialReserved:0,optionalReserved:11,oddsReserved:0,collectionReserved:0});
+    if (category === 'odds') expect(budget).toMatchObject({reserved:11,essentialReserved:0,optionalReserved:11,oddsReserved:11,collectionReserved:0});
+    if (category === 'collection') expect(budget).toMatchObject({reserved:11,essentialReserved:11,optionalReserved:0,oddsReserved:0,collectionReserved:11});
   });
 
   it('protects the essential bucket from optional work and combines all optional caps', async () => {
