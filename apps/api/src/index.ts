@@ -819,12 +819,12 @@ async function autoBetWithReport(db: Db, enabled: boolean, decisionAt = Date.now
 async function autoBet(db: Db, enabled: boolean, decisionAt = Date.now()) {
   return (await autoBetWithReport(db, enabled, decisionAt)).bought;
 }
-async function collectScheduledOdds(db: Db, oddsEnabled: boolean, trifectaOddsEnabled: boolean, requestBudget={used:0,max:49}) {
+async function collectScheduledOdds(db: Db, oddsEnabled: boolean, trifectaOddsEnabled: boolean, requestBudget={used:0,max:49}, excludedRaceIds:string[]=[]) {
   if (trifectaOddsEnabled) {
     // Reserve a small bounded slice for the opt-in parser before legacy win
     // collection; both collectors share the existing per-run 49-fetch cap.
     requestBudget.max=Math.min(49,requestBudget.used+20);
-    await collectTrifectaOdds(db,new Date(),{maxRequests:10,requestBudget});
+    await collectTrifectaOdds(db,new Date(),{maxRequests:10,requestBudget,excludedRaceIds});
   }
   requestBudget.max=49;
   if (oddsEnabled) await collectOdds(db, new Date(),{requestBudget});
@@ -1793,7 +1793,7 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
     // unavailable live purchase path; win odds retain their existing behavior.
     const liveTrifecta=env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true'
       && !!await first<{id:string}>(env.DB,"SELECT id FROM models WHERE sport='boat' AND bet_type='trifecta' AND status='active' LIMIT 1");
-    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true',liveTrifecta,requestBudget).catch(() => undefined);
+    await collectScheduledOdds(env.DB, env.ENABLE_BOATRACE_ODDS_SCRAPE==='true',liveTrifecta,requestBudget,[...oddsContext.cache.keys()]).catch(() => undefined);
   }
   return;
 } };

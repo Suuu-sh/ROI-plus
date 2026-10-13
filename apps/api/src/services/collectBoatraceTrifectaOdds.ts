@@ -9,6 +9,7 @@ type FetchResponse = { ok: boolean; status: number; arrayBuffer(): Promise<Array
 export type SharedRequestBudget = { used: number; max: number };
 export type CollectTrifectaOptions = {
   maxRequests?: number;
+  excludedRaceIds?: string[];
   requestBudget?: SharedRequestBudget;
   sleep?: (ms: number) => Promise<void>;
   fetch?: (input: string, init?: RequestInit) => Promise<FetchResponse>;
@@ -39,6 +40,7 @@ export async function collectTrifectaOdds(db: Db, now: Date, opts: CollectTrifec
     "SELECT id,status,bet_type,metrics_json,trained_at FROM models WHERE sport='boat' AND bet_type='trifecta' AND status='active'");
   const targets: RaceTarget[] = [];
   for (const race of races) {
+    if(opts.excludedRaceIds?.includes(race.id))continue;
     const entries = await all<{number:number}>(db, "SELECT number FROM entries WHERE race_id=? AND data_origin='real' ORDER BY number", race.id);
     const numbers = entries.map(row => Number(row.number));
     if (numbers.length !== 6 || new Set(numbers).size !== 6 || numbers.some(n => !Number.isInteger(n) || n < 1 || n > 6)) continue;
