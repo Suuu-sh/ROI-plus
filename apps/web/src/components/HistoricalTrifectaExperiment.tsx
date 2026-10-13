@@ -12,7 +12,7 @@ export function HistoricalTrifectaExperiment({ compact = false }: { compact?: bo
   return <Section title="過去データ基礎モデル・未検証" right={<span className="text-xs text-muted">専用仮想実験</span>}>
     <div className="space-y-3 p-4">
       <p className="text-xs leading-relaxed text-muted">学習 {model.trainingRaces} / 校正 {model.validationRaces} / 検証 {model.testRaces} レース · 展示なし · 過去PIT/ROI未証明</p>
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className={`grid grid-cols-2 gap-3 ${compact ? '' : 'md:grid-cols-4'}`}>
         <Metric label="仮想残高" value={yen(summary.available_balance)} />
         <Metric label="累計購入額" value={yen(summary.total_stake)} />
         <Metric label="判断 / 購入" value={`${summary.decisions ?? 0} / ${summary.bets}`} />
