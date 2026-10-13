@@ -68,6 +68,12 @@ describe('EdgeLab API',()=>{
   const r=await app.request(`/api/races?sport=horse&date=${today}&origin=sample`,{},env());
   expect(r.status).toBe(200); const rows=await r.json() as any[]; expect(rows.length).toBeGreaterThanOrEqual(12); expect(rows.every(x=>x.dataOrigin==='sample')).toBe(true);
  });
+ it('keeps official result-worker provenance server-owned even from authenticated ingest',async()=>{
+  const response=await app.request('/api/ingest/collection-runs',{method:'POST',headers:{Authorization:'Bearer test-token','content-type':'application/json'},
+    body:JSON.stringify([{id:'boat-result:boat-20261013-09-01',source:'boatrace-results-worker-v1',sport:'boat',target_date:'2026-10-13',started_at:jstIso(),finished_at:jstIso(),status:'success',records:8,reason:JSON.stringify({quality:'verified-official-outcome-v2',url:'https://www.boatrace.jp/owpc/pc/race/raceresult',sha256:'a'.repeat(64),fetchedAt:jstIso(),results:[],payouts:[]})}])},env());
+  expect(response.status).toBe(403);
+  expect(await response.json()).toMatchObject({error:'official result-worker evidence is server-owned'});
+ });
  it('reads one bounded historical trifecta batch and odds snapshot without making candidates or writing',async()=>{
   const {raceId}=addValidatedTrifectaFixture();
   sqlite.prepare("UPDATE races SET status='finished',post_time=? WHERE id=?").run(jstIso(Date.now()-60_000),raceId);

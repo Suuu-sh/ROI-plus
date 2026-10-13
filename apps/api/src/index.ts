@@ -6,13 +6,12 @@ import { candidate, betId, payoutYen, settleValues, validateYenStake } from './s
 import { collectOdds } from './services/collectBoatraceOdds.js';
 import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
 import { collectBoatraceCaptureArchives } from './services/collectBoatraceCaptureArchives.js';
-import { beforeinfoUrl } from './services/boatraceBeforeinfo.js';
-import { raceListUrl } from './services/boatraceRaceList.js';
 import { collectResults, resultUrl, RESULTS_SOURCE } from './services/collectBoatraceResults.js';
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
 import { sizeExperimentalPortfolio } from './services/experimentalSizing.js';
 import { splitRowsForD1 } from './services/d1Batch.js';
+import { boatArchiveEvidenceValid } from './services/boatArchiveEvidence.js';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
@@ -186,6 +185,8 @@ async function ingest(c: any, name: string) {
   if (!auth(c)) return jsonError(c, 'unauthorized', 401);
   const config = ingestTables[name], rows = parseList(await c.req.json().catch(()=>null));
   if (!config || !rows || rows.length > 500 || rows.some(r => config.required.some(k => r[k] === undefined))) return jsonError(c, 'invalid payload (maximum 500 rows)');
+  if (name === 'collection-runs' && rows.some(r => r.source === RESULTS_SOURCE && typeof r.id === 'string' && r.id.startsWith('boat-result:')))
+    return jsonError(c, 'official result-worker evidence is server-owned', 403);
   if ((name === 'venues' && rows.length > 50) || (name === 'models' && rows.length > 20)) return jsonError(c, 'small reference/model batches only');
   const table = config.table, allowed = allowedColumns[table], updates = updateColumns[table];
   const db: Db = c.env.DB, statements: Statement[] = [];
@@ -1147,31 +1148,7 @@ function officialTrifectaUrl(sourceUrl: unknown, race: any): boolean {
   } catch { return false; }
 }
 function experimentalArchiveEvidenceValid(archive: any, race: any, entries: any[]) {
- if(!archive||archive.schema!=='boat-prerace-capture-v1'||archive.race?.id!==race.id||archive.race?.date!==race.race_date
-    ||archive.race?.venueCode!==race.venue_id||Number(archive.race?.raceNo)!==Number(race.race_no)
-    ||!Array.isArray(archive.race?.lanes)||archive.race.lanes.length!==6||archive.race.lanes.some((x:any,i:number)=>Number(x)!==i+1)
-    ||archive.raceList?.cutoffAt!==race.betting_cutoff_at
-    ||archive.raceList?.url!==raceListUrl(Number(race.race_no),String(race.venue_id),String(race.race_date))
-    ||!Array.isArray(archive.raceList?.entries)||archive.raceList.entries.length!==6
-    ||archive.beforeinfo?.url!==beforeinfoUrl(Number(race.race_no),String(race.venue_id),String(race.race_date))
-    ||!Array.isArray(archive.beforeinfo?.exhibitions)||archive.beforeinfo.exhibitions.length!==6
-    ||!Array.isArray(archive.trifectaOdds?.odds)||archive.trifectaOdds.qualityStatus!=='verified-complete-v1'
-    ||archive.trifectaOdds.final!==false||archive.trifectaOdds.odds.length!==120
-    ||!isSha256(archive.beforeinfo?.sha256)||!isSha256(archive.raceList?.sha256)||!isSha256(archive.trifectaOdds?.sha256)
-    ||!officialTrifectaUrl(archive.trifectaOdds?.url,race))return false;
- const savedRacers=new Map<number,string>();
- for(const row of entries){let racerId='';try{const f=JSON.parse(row.features_json??'{}');if(typeof f.racer_id==='string')racerId=f.racer_id;}catch{return false;}
-   if(!Number.isInteger(Number(row.number))||!/^\d{4,5}$/.test(racerId))return false;savedRacers.set(Number(row.number),racerId);}
- if(savedRacers.size!==6)return false;
- const officialRacers=new Map<number,string>();
- for(const row of archive.raceList.entries){if(!Number.isInteger(Number(row.lane))||typeof row.registrationNumber!=='string')return false;officialRacers.set(Number(row.lane),row.registrationNumber);}
- if(officialRacers.size!==6||[1,2,3,4,5,6].some(n=>savedRacers.get(n)!==officialRacers.get(n)))return false;
- const exhibitions=new Map<number,any>();
- for(const row of archive.beforeinfo.exhibitions){if(!Number.isInteger(Number(row.lane))||!Number.isFinite(row.exhibitionTime)||row.exhibitionTime<=0)return false;exhibitions.set(Number(row.lane),row);}
- if(exhibitions.size!==6||[1,2,3,4,5,6].some(n=>!exhibitions.has(n)))return false;
- const odds=archive.trifectaOdds.odds;
- return odds.every((x:any)=>x&&typeof x.selection==='string'&&Number.isFinite(x.odds)&&x.odds>1)
-   &&isCompleteTicketDistribution('trifecta',[1,2,3,4,5,6],odds.map((x:any)=>x.selection),odds.map(()=>1/odds.length));
+ return boatArchiveEvidenceValid(archive,race,entries);
 }
 async function ticketCandidatesForRace(db: Db, race: any, maxStd: number, decisionAt = Date.now(), cutoffAtOverride?: string | null): Promise<TicketCandidate[]> {
   // Initial support is exact-order trifecta only. Other ticket types stay absent
@@ -1600,14 +1577,66 @@ app.get('/ingest/prerace-capture-archives',async c=>{
  }));
  return c.json({schema:'boat-prerace-capture-export-v1',date,limit,archives,nextCursor:hasMore?page.at(-1)?.id??null:null});
 });
+app.get('/ingest/experimental-trifecta/training-results',async c=>{
+ if(!auth(c))return jsonError(c,'unauthorized',401);
+ const date=c.req.query('date')??'',cursor=c.req.query('cursor')??'',rawLimit=c.req.query('limit'),limit=rawLimit===undefined?5:Number(rawLimit);
+ const dateMatch=/^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+ const validDate=!!dateMatch&&new Date(Date.UTC(Number(dateMatch[1]),Number(dateMatch[2])-1,Number(dateMatch[3]))).toISOString().slice(0,10)===date;
+ const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+ if(!validDate||date!==today||!Number.isInteger(limit)||limit<1||limit>5)return jsonError(c,'current JST date and limit between 1 and 5 are required');
+ if(cursor&&!/^boat-\d{8}-\d{2}-\d{2}$/.test(cursor))return jsonError(c,'invalid result-label cursor');
+ const db=c.env.DB;
+ const candidates=await all<any>(db,`SELECT r.id,r.venue_id,r.race_no,r.race_date,r.post_time,r.betting_cutoff_at,r.betting_cutoff_source,cr.reason proof_json
+   FROM races r JOIN collection_runs cr ON cr.id='boat-result:'||r.id AND cr.source=? AND cr.status='success'
+   WHERE r.sport='boat' AND r.data_origin='real' AND r.race_date=? AND r.id>? AND r.post_time IS NOT NULL
+    AND json_valid(cr.reason) AND json_extract(cr.reason,'$.quality')='verified-official-outcome-v2'
+    AND EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives ar WHERE ar.race_id=r.id AND ar.data_origin='real'
+      AND julianday(ar.captured_at)<=julianday(r.betting_cutoff_at,'-60 seconds') AND json_valid(ar.archive_json)
+      AND json_extract(ar.archive_json,'$.schema')='boat-prerace-capture-v1')
+   ORDER BY r.id LIMIT ?`,RESULTS_SOURCE,date,cursor,limit+1);
+ const hasMore=candidates.length>limit,page=candidates.slice(0,limit),labels:any[]=[];
+ for(const race of page){
+   let proof:any;try{proof=JSON.parse(race.proof_json)}catch{continue;}
+   const fetchedAt=Date.parse(proof.fetchedAt),now=Date.now();
+   if(proof.raceId!==race.id||proof.url!==resultUrl(race)||proof.quality!=='verified-official-outcome-v2'
+      ||!isSha256(proof.sha256)||!Number.isFinite(fetchedAt)||fetchedAt<Date.parse(race.post_time)
+      ||fetchedAt<Date.parse(race.betting_cutoff_at)||fetchedAt>now||!Array.isArray(proof.results)||proof.results.length!==6
+      ||!Array.isArray(proof.payouts))continue;
+   const [results,payouts,entries,archiveRow]=await Promise.all([
+     all<any>(db,"SELECT number,finish_order FROM results WHERE race_id=? AND data_origin='real' ORDER BY finish_order,number",race.id),
+     all<any>(db,"SELECT bet_type,selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND payout>0",race.id),
+     all<any>(db,"SELECT number,features_json FROM entries WHERE race_id=? AND data_origin='real' ORDER BY number",race.id),
+     first<any>(db,"SELECT captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin='real' AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1",race.id,new Date(Date.parse(race.betting_cutoff_at)-60_000).toISOString()),
+   ]);
+   if(results.length!==6||new Set(results.map((x:any)=>Number(x.number))).size!==6
+      ||new Set(results.map((x:any)=>Number(x.finish_order))).size!==6
+      ||[1,2,3,4,5,6].some(n=>!results.some((x:any)=>Number(x.finish_order)===n))
+      ||new Set(proof.results.map((x:any)=>Number(x.number))).size!==6
+      ||new Set(proof.results.map((x:any)=>Number(x.finishOrder))).size!==6
+      ||proof.results.some((x:any)=>!results.some((y:any)=>Number(y.number)===Number(x.number)&&Number(y.finish_order)===Number(x.finishOrder)))
+      ||payouts.length!==1||proof.payouts.filter((x:any)=>x.betType==='trifecta').length!==1)continue;
+   const winningSelection=results.slice(0,3).map((x:any)=>String(x.number)).join('-'),payout=payouts[0];
+   if(payout.selection!==winningSelection||!Number.isSafeInteger(Number(payout.payout))||Number(payout.payout)<=0
+      ||!proof.payouts.some((x:any)=>x.betType==='trifecta'&&x.selection===payout.selection&&Number(x.payout)===Number(payout.payout)))continue;
+   if(!archiveRow||Date.parse(archiveRow.captured_at)>Date.parse(race.betting_cutoff_at)-60_000)continue;
+   let archive:any;try{archive=JSON.parse(archiveRow.archive_json)}catch{continue;}
+   if(archive.capturedAt!==archiveRow.captured_at||!boatArchiveEvidenceValid(archive,race,entries))continue;
+   labels.push({raceId:race.id,raceDate:race.race_date,venueId:race.venue_id,raceNo:Number(race.race_no),
+     results:results.map((x:any)=>({number:Number(x.number),finishOrder:Number(x.finish_order)})),
+     payouts:[{betType:'trifecta',selection:payout.selection,payout:Number(payout.payout)}],
+     source:{url:proof.url,sha256:proof.sha256,fetchedAt:proof.fetchedAt,quality:proof.quality}});
+ }
+ return c.json({schema:'boat-official-k-result-label-export-v1',date,limit,labels,nextCursor:hasMore?page.at(-1)?.id??null:null});
+});
 app.post('/admin/collect-boat-results',async c=>{
  if(!auth(c)&&!proxyAuth(c))return jsonError(c,'unauthorized',401);
  if(c.env.ENABLE_BOATRACE_RESULTS_SCRAPE!=='true')return c.json({error:'result collection disabled',code:'results_collection_disabled'},403);
- const body=await c.req.json().catch(()=>null) as {confirmed?:unknown}|null;
+ const body=await c.req.json().catch(()=>null) as {confirmed?:unknown;labelOnly?:unknown}|null;
  if(body?.confirmed!==true)return c.json({error:'explicit confirmation required',code:'confirmation_required'},400);
+ if(body.labelOnly!==undefined&&typeof body.labelOnly!=='boolean')return c.json({error:'labelOnly must be boolean',code:'invalid_mode'},400);
  try {
-   const result=await collectResults(c.env.DB,new Date(),{mode:'manual',requestBudget:{used:0,max:49}});
-   console.info(JSON.stringify({event:'boat-manual-results',status:result.status,targets:result.targets,verified:result.verified,records:result.records,attempted:result.attempted,reason:'reason' in result?result.reason:null,fetchFailures:'fetchFailures' in result?result.fetchFailures:[]}));
+   const result=await collectResults(c.env.DB,new Date(),{mode:'manual',labelOnly:body.labelOnly===true,maxAttempts:body.labelOnly===true?8:undefined,requestBudget:{used:0,max:49}});
+   console.info(JSON.stringify({event:body.labelOnly===true?'boat-manual-label-results':'boat-manual-results',status:result.status,targets:result.targets,verified:result.verified,records:result.records,attempted:result.attempted,reason:'reason' in result?result.reason:null,fetchFailures:'fetchFailures' in result?result.fetchFailures:[]}));
    return c.json(result);
  } catch {return c.json({error:'manual result pass failed',code:'manual_results_failed'},503);}
 });

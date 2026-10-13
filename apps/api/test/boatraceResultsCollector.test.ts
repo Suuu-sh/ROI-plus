@@ -6,6 +6,8 @@ import { afterEach,beforeEach,describe,expect,it,vi } from 'vitest';
 import { D1SqliteAdapter } from './d1-adapter.js';
 import { collectResults,selectResultsTargets,RESULTS_SOURCE } from '../src/services/collectBoatraceResults.js';
 import { boatraceResultPage } from './fixtures/boatraceResultPage.js';
+import { beforeinfoUrl } from '../src/services/boatraceBeforeinfo.js';
+import { raceListUrl } from '../src/services/boatraceRaceList.js';
 import worker,{app,settleOpen} from '../src/index.js';
 const root=resolve(import.meta.dirname,'../../..');
 const now=new Date('2026-10-11T04:00:00Z'),raceDate='2026-10-11';
@@ -21,6 +23,18 @@ function seed(raceNo=1,origin='real',status='open',postTime='2026-10-11T03:00:00
 }
 const page=(raceNo=1,venueCode='09')=>boatraceResultPage({raceDate,venueCode,raceNo});
 const fetchPage=async(input:string)=>{const url=new URL(input);return new Response(page(Number(url.searchParams.get('rno')),url.searchParams.get('jcd')??'09'),{headers:{'content-type':'text/html; charset=utf-8'}})};
+function seedT60Archive(raceNo=1){
+  const raceId=seed(raceNo);sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
+  const cutoff=new Date('2026-10-11T03:00:00Z').toISOString(),captured=new Date('2026-10-11T02:58:00Z').toISOString();
+  sqlite.prepare("UPDATE races SET betting_cutoff_at=?,betting_cutoff_source='boatrace-racelist-cutoff-v1',betting_cutoff_observed_at=? WHERE id=?").run(cutoff,new Date('2026-10-11T02:57:00Z').toISOString(),raceId);
+  const selections:string[]=[];for(let a=1;a<=6;a++)for(let b=1;b<=6;b++)for(let c=1;c<=6;c++)if(a!==b&&a!==c&&b!==c)selections.push(`${a}-${b}-${c}`);
+  const archive={schema:'boat-prerace-capture-v1',race:{id:raceId,date:raceDate,venueCode:'09',raceNo,lanes:[1,2,3,4,5,6]},capturedAt:captured,
+    beforeinfo:{url:beforeinfoUrl(raceNo,'09',raceDate),sha256:'1'.repeat(64),capturedAt:captured,exhibitions:Array.from({length:6},(_,i)=>({lane:i+1,exhibitionTime:6.8+i/10}))},
+    raceList:{url:raceListUrl(raceNo,'09',raceDate),sha256:'2'.repeat(64),capturedAt:captured,cutoffAt:cutoff,entries:Array.from({length:6},(_,i)=>({lane:i+1,registrationNumber:String(4001+i)}))},
+    trifectaOdds:{url:`https://www.boatrace.jp/owpc/pc/race/odds3t?hd=20261011&jcd=09&rno=${raceNo}`,sha256:'3'.repeat(64),capturedAt:captured,qualityStatus:'verified-complete-v1',final:false,odds:selections.map(selection=>({selection,odds:20}))}};
+  sqlite.prepare("INSERT INTO boatrace_prerace_capture_archives(id,race_id,race_date,captured_at,archive_json,data_origin) VALUES(?,?,?,?,?,'real')").run(`${raceId}:capture:${Date.parse(captured)}`,raceId,raceDate,captured,JSON.stringify(archive));
+  return raceId;
+}
 beforeEach(()=>{
   sqlite=new Sqlite(':memory:');DB=new D1SqliteAdapter(sqlite);
   for(const file of readdirSync(resolve(root,'db/migrations')).filter(x=>x.endsWith('.sql')).sort())sqlite.exec(readFileSync(resolve(root,'db/migrations',file),'utf8'));
@@ -262,6 +276,34 @@ describe('purchased real boat hourly results',()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);vi.stubGlobal('fetch',fetchPage);
     const response=await app.request('/api/admin/collect-boat-results',{method:'POST',headers:{'content-type':'application/json',Authorization:'Bearer test-ingest'},body:JSON.stringify({confirmed:true})},{DB,INGEST_TOKEN:'test-ingest',PROXY_TOKEN:'test-proxy',ENABLE_BOATRACE_RESULTS_SCRAPE:'true'});
     expect(response.status).toBe(200);expect(await response.json()).toMatchObject({verified:1,attempted:1});
+  });
+  it('collects and exports only source-proven numeric K labels for a prior T-60 archive',async()=>{
+    vi.useFakeTimers();vi.setSystemTime(now);const raceId=seedT60Archive();
+    vi.stubGlobal('fetch',fetchPage);
+    const trigger=await app.request('/api/admin/collect-boat-results',{method:'POST',headers:{Authorization:'Bearer test-token','content-type':'application/json'},body:JSON.stringify({confirmed:true,labelOnly:true})},{DB,INGEST_TOKEN:'test-token',ENABLE_BOATRACE_RESULTS_SCRAPE:'true'});
+    expect(trigger.status).toBe(200);
+    expect(await trigger.json()).toMatchObject({status:'success',verified:1,targets:1,attempted:1});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM bets WHERE race_id=?').get(raceId)).toMatchObject({n:0});
+    const unauth=await app.request(`/api/ingest/experimental-trifecta/training-results?date=${raceDate}`,{}, {DB});
+    expect(unauth.status).toBe(401);
+    const response=await app.request(`/api/ingest/experimental-trifecta/training-results?date=${raceDate}`,{headers:{Authorization:'Bearer test-token'}},{DB,INGEST_TOKEN:'test-token'});
+    expect(response.status).toBe(200);
+    const exported=await response.json() as any;
+    expect(exported).toMatchObject({schema:'boat-official-k-result-label-export-v1',date:raceDate,labels:[{
+      raceId,raceDate,venueId:'09',raceNo:1,source:{url:`https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=09&hd=20261011`,
+        sha256:createHash('sha256').update(page()).digest('hex'),fetchedAt:now.toISOString(),quality:'verified-official-outcome-v2'}
+    }]});
+    expect(exported.labels[0].results).toHaveLength(6);
+    expect(exported.labels[0].payouts).toHaveLength(1);
+    expect(Object.keys(exported.labels[0])).not.toContain('entries');
+    const terminalRace=seedT60Archive(2);
+    vi.setSystemTime(new Date(now.getTime()+61_000));
+    expect(await collectResults(DB,new Date(now.getTime()+61_000),{mode:'manual',labelOnly:true,maxAttempts:8,
+      fetch:async(input:string)=>new Response(boatraceResultPage({raceDate,venueCode:'09',raceNo:Number(new URL(input).searchParams.get('rno')),finishOrder:[1,2,5,3,4,'転']})),sleep:async()=>{}})).toMatchObject({status:'success',verified:1});
+    const strictExport=await app.request(`/api/ingest/experimental-trifecta/training-results?date=${raceDate}`,{headers:{Authorization:'Bearer test-token'}},{DB,INGEST_TOKEN:'test-token'});
+    expect((await strictExport.json() as any).labels.map((x:any)=>x.raceId)).toEqual([raceId]);
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(terminalRace)).toMatchObject({n:5});
+    expect(sqlite.prepare("SELECT features_json FROM entries WHERE race_id=? AND number=6").get(terminalRace)).toMatchObject({features_json:expect.not.stringContaining('finish_code')});
   });
   it('keeps the flag off by default and only collects at hourly boundaries',async()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);const fetcher=vi.fn(fetchPage);vi.stubGlobal('fetch',fetcher);
