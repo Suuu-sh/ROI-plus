@@ -16,7 +16,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from edgelab.importers.boatrace_capture_archive import import_capture_archives
-from edgelab.importers.experimental_result_labels import import_experimental_result_labels
+from edgelab.importers.experimental_result_labels import (experimental_training_store_projection,
+                                                           import_experimental_result_labels)
 from edgelab.storage import DEFAULT_STORE, load_rows, save_rows
 from edgelab.sync import (collect_experimental_training_results,
                           fetch_experimental_training_result_labels,
@@ -192,9 +193,13 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
     # history and today's not-yet-finished races are never given labels.
     complete_k_count = sum(1 for row in rows.get("results", []) if row.get("data_origin") == "real"
                            and row.get("finish_order") is not None)
-    training_rows = _stage_call("training_row_build", _make_training_rows, rows, "boat",
+    # Exported official K labels prove completion even if B-file rows retain
+    # their original scheduled state. Use an ephemeral race-status projection
+    # for training/coverage; never persist or rewrite race/feature records.
+    training_store = _stage_call("training_row_build", experimental_training_store_projection, rows)
+    training_rows = _stage_call("training_row_build", _make_training_rows, training_store, "boat",
         feature_schema=TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA, require_source_arrival=True)
-    coverage = _stage_call("coverage_audit", audit_trifecta_coverage, rows, training_rows)
+    coverage = _stage_call("coverage_audit", audit_trifecta_coverage, training_store, training_rows)
     report["coverage"] = {key: coverage.get(key) for key in (
         "finishedRealBoatRaces", "distinctRaceDates", "completeSixBoatResultRaces",
         "completeEvidenceRaces", "trainingRaceIdsPresentInStore", "counts", "exclusions")}
@@ -215,7 +220,7 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
         if existing or (Path(artifact_dir) / f"{model_id}.pkl").exists():
             report["training"]["status"] = "artifact_already_exists_for_cohort"
         else:
-            result = _stage_call("model_fit", train_trifecta_experimental, training_rows, rows,
+            result = _stage_call("model_fit", train_trifecta_experimental, training_rows, training_store,
                                  model_id=model_id, artifact_dir=artifact_dir)
             report["training"].update({key: result.get(key) for key in (
                 "status", "reason", "nTrainRaces", "trainFrom", "trainTo", "trainedAt",

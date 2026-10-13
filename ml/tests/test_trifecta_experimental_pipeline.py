@@ -112,7 +112,7 @@ def test_training_row_builder_supports_weatherless_experimental_schema_with_real
     store = {
         "races": [{"id": race_id, "sport": "boat", "data_origin": "real", "race_date": "2026-10-13",
                    "venue_id": "01", "race_no": 1,
-                   "status": "finished", "post_time": "2026-10-13T11:20:00+09:00",
+                   "status": "scheduled", "post_time": "2026-10-13T11:20:00+09:00",
                    "betting_cutoff_at": "2026-10-13T11:00:00+09:00",
                    "betting_cutoff_source": "boatrace-racelist-cutoff-v1",
                    "betting_cutoff_observed_at": "2026-10-13T10:50:00+09:00"}],
@@ -138,13 +138,23 @@ def test_training_row_builder_supports_weatherless_experimental_schema_with_real
     }
     features = [{"lane": lane, "exhibition_time": 6.0 + lane, "lane_wind_x": 99.0,
                  "lane_wave_height": 99.0} for lane in range(1, 7)]
+    from datetime import datetime, timezone
+    from edgelab.importers.experimental_result_labels import experimental_training_store_projection
+    projected = experimental_training_store_projection(store,
+        now=datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc))
     with patch("edgelab.features.boat.build_boat_prerace_v2_features", return_value=features):
-        rows = _make_training_rows(store, "boat", feature_schema=TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+        rows = _make_training_rows(projected, "boat", feature_schema=TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
                                    require_source_arrival=True)
     assert len(rows) == 6
     assert all(row["lane"] == row["number"] for row in rows)
     assert "lane_wind_x" not in rows[0] and "lane_wave_height" not in rows[0]
     assert "lane_wind_x" not in TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS
+    from edgelab.models.trifecta_coverage import audit_trifecta_coverage
+    coverage = audit_trifecta_coverage(projected, rows)
+    assert store["races"][0]["status"] == "scheduled"
+    assert projected["races"][0]["status"] == "finished"
+    assert coverage["finishedRealBoatRaces"] == 1
+    assert coverage["completeSixBoatResultRaces"] == 1
 
 
 def test_import_official_result_label_changes_only_targets_and_proves_source():

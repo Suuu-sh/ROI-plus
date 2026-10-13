@@ -211,3 +211,23 @@ def verified_experimental_result_race_ids(store: Mapping[str, Any], *, now: date
         if len(paid) == 1:
             allowed.add(race_id)
     return allowed
+
+
+def experimental_training_store_projection(store: Mapping[str, Any], *, now: datetime | None = None
+                                          ) -> dict[str, Any]:
+    """Project only source-verified result labels as finished for model/coverage code.
+
+    The normalized cache's scheduled status is intentionally left untouched:
+    the official result-label endpoint proves a race is complete, but importing
+    a label must not rewrite its source race record. This ephemeral projection
+    changes only status on copied race dictionaries for IDs with complete,
+    hash/time-verified six-boat results and matching trifecta payout.
+    """
+    completed_ids = verified_experimental_result_race_ids(store, now=now)
+    projected = dict(store)
+    projected["races"] = [
+        ({**race, "status": "finished", "status_evidence": "verified-official-k-result-label-v1"}
+         if str(race.get("id")) in completed_ids else dict(race))
+        for race in store.get("races", [])
+    ]
+    return projected
