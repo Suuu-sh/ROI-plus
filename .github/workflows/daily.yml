@@ -1,4 +1,5 @@
 name: daily boat pipeline
+run-name: daily boat pipeline (${{ github.event.schedule || github.event_name }})
 on:
   schedule:
     # D1 の日次上限は UTC 0時 = 9:00 JST にリセット。朝のB/K同期を9:05に前倒しし、
@@ -31,15 +32,27 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: ${{ github.event_name == 'schedule' && endsWith(github.event.schedule, '1-14 * * *') && 'boat-experimental-forecast-trigger' || 'boat-learning-state' }}
+  group: ${{ github.event_name == 'schedule' && (github.event.schedule == '0-59/5 1-14 * * *' || github.event.schedule == '1-59/5 1-14 * * *' || github.event.schedule == '2-59/5 1-14 * * *' || github.event.schedule == '3-59/5 1-14 * * *' || github.event.schedule == '4-59/5 1-14 * * *') && 'boat-experimental-forecast-trigger' || 'boat-learning-state' }}
   cancel-in-progress: false
 jobs:
   forecast:
-    if: github.event_name == 'schedule' && endsWith(github.event.schedule, '1-14 * * *')
+    if: >-
+      github.event_name == 'schedule' &&
+      (github.event.schedule == '0-59/5 1-14 * * *' ||
+      github.event.schedule == '1-59/5 1-14 * * *' ||
+      github.event.schedule == '2-59/5 1-14 * * *' ||
+      github.event.schedule == '3-59/5 1-14 * * *' ||
+      github.event.schedule == '4-59/5 1-14 * * *')
     uses: ./.github/workflows/trifecta-experimental-forecast.yml
     secrets: inherit
   daily:
-    if: github.event_name != 'schedule' || !endsWith(github.event.schedule, '1-14 * * *')
+    if: >-
+      github.event_name != 'schedule' ||
+      !(github.event.schedule == '0-59/5 1-14 * * *' ||
+      github.event.schedule == '1-59/5 1-14 * * *' ||
+      github.event.schedule == '2-59/5 1-14 * * *' ||
+      github.event.schedule == '3-59/5 1-14 * * *' ||
+      github.event.schedule == '4-59/5 1-14 * * *')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

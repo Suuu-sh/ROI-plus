@@ -310,7 +310,8 @@ def test_separate_minute_experimental_forecast_workflow_is_read_only_to_learning
     assert "secrets: inherit" in schedule
     for minute in range(5):
         assert f"cron: '{minute}-59/5 1-14 * * *'" in schedule
-    assert schedule.count("endsWith(github.event.schedule, '1-14 * * *')") == 3
+        assert schedule.count(f"github.event.schedule == '{minute}-59/5 1-14 * * *'") == 3
+    assert "run-name: daily boat pipeline (${{ github.event.schedule || github.event_name }})" in schedule
     assert "boat-experimental-forecast-trigger" in schedule
     assert "group: boat-experimental-forecast" in workflow
     assert "cancel-in-progress: false" in workflow
