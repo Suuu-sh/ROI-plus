@@ -4,6 +4,7 @@ import { boatArchiveEvidenceValid } from './boatArchiveEvidence.js'
 import { predictHistoricalTrifecta, historicalTrifectaModelMetadata, HISTORICAL_TRIFECTA_EXPERIMENT_KEY, HISTORICAL_TRIFECTA_MODEL_ID } from './historicalTrifectaModel.js'
 import { primaryPaperTiming } from './paperTiming.js'
 import { sizeExperimentalPortfolioResult } from './experimentalSizing.js'
+import { HISTORICAL_ARCHIVE_SCHEMA, type HistoricalObservation } from './historicalTrifectaArchive.js'
 
 const CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1'
 const MODEL_TRAINED_AT = Date.parse('2026-10-13T16:21:26.363521Z')
@@ -40,7 +41,7 @@ const featureRows = (entries: any[]) => entries.map((entry, i) => {
 })
 
 export async function historicalTrifectaExperimentDecision(db: Db, decisionAt = Date.now(), oddsContext?: PurchaseOddsContext) {
-  const report = { evaluated: 0, placedRaces: 0, placedBets: 0, abstainedByReason: {} as Record<string, number> }
+  const report = { evaluated: 0, placedRaces: 0, placedBets: 0, archivedCandidates: 0, abstainedByReason: {} as Record<string, number>, archiveObservations: [] as HistoricalObservation[] }
   if (MODEL_TRAINED_AT >= decisionAt) return report
   const from = jst(decisionAt + 50_000), to = jst(decisionAt + 70_000)
   const races = await all<any>(db, `SELECT * FROM races r WHERE r.sport='boat' AND r.data_origin='real' AND r.status='scheduled'
@@ -52,16 +53,17 @@ export async function historicalTrifectaExperimentDecision(db: Db, decisionAt = 
     if (!primaryPaperTiming(race.betting_cutoff_at, decisionAt, race.betting_cutoff_source, race.betting_cutoff_observed_at).eligible) continue
     report.evaluated++
     let reason: string | null = null, archiveRow: any = null, archive: any = null, odds: any = null
+    let inputReason: string | null = null, predictionAt: string | null = null
     const entries = await all<any>(db, `SELECT * FROM entries WHERE race_id=? AND data_origin='real' ORDER BY number`, race.id)
-    if (entries.length !== 6 || entries.some((e, i) => Number(e.number) !== i + 1)) reason = 'official_entries_incomplete'
+    if (entries.length !== 6 || entries.some((e, i) => Number(e.number) !== i + 1)) reason = inputReason = 'official_entries_incomplete'
     const target = Date.parse(race.betting_cutoff_at) - 60_000
-    if (!reason && entries.some(e => !timestampIsActual(e.available_at, target))) reason = 'entry_arrival_time_unverified'
+    if (!reason && entries.some(e => !timestampIsActual(e.available_at, target))) reason = inputReason = 'entry_arrival_time_unverified'
     const entryFeatures = entries.map(e => parseFeatures(e.features_json) ?? {})
     const sourceHashes = new Set(entryFeatures.map(f => f.source_sha256))
     if (!reason && (sourceHashes.size !== 1 || !/^[a-f0-9]{64}$/.test(String(entryFeatures[0]?.source_sha256 ?? ''))
       || entryFeatures.some((f, i) => f.source_url !== officialBFileUrl(race.race_date)
         || f.source_available_at !== entries[i].available_at
-        || !timestampIsActual(f.source_available_at, target)))) reason = 'entry_source_unverified'
+        || !timestampIsActual(f.source_available_at, target)))) reason = inputReason = 'entry_source_unverified'
     if (!reason) {
       archiveRow = await first<any>(db, `SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives
         WHERE race_id=? AND data_origin='real' AND julianday(captured_at)<=julianday(?)
@@ -77,9 +79,10 @@ export async function historicalTrifectaExperimentDecision(db: Db, decisionAt = 
       || !timestampIsActual(archive.trifectaOdds?.capturedAt, target)
       || archive.trifectaOdds?.capturedAt !== archiveRow.captured_at
       )) reason = 'official_archive_identity_or_freshness_invalid'
+    const archiveVerified = !!archive && !!archiveRow && !['official_archive_missing_or_stale', 'official_archive_invalid', 'official_archive_identity_or_freshness_invalid'].includes(reason ?? '')
     let predictions: ReturnType<typeof predictHistoricalTrifecta> = []
     if (!reason) {
-      try { predictions = predictHistoricalTrifecta(featureRows(entries)) } catch { reason = 'historical_model_input_invalid' }
+      try { predictions = predictHistoricalTrifecta(featureRows(entries)); predictionAt = new Date().toISOString() } catch { reason = 'historical_model_input_invalid' }
     }
     if (!reason && !oddsContext) reason = 'purchase_odds_context_unavailable'
     if (!reason && oddsContext) {
@@ -130,6 +133,48 @@ export async function historicalTrifectaExperimentDecision(db: Db, decisionAt = 
     if (Number(result?.[decisionIndex]?.meta?.changes ?? 0)) {
       if (totalStake) { report.placedRaces++; report.placedBets += sizing.stakes.length }
       else report.abstainedByReason[abstentionReason] = (report.abstainedByReason[abstentionReason] ?? 0) + 1
+      const observedAt = new Date().toISOString()
+      const inputRows = !inputReason && entries.length === 6 ? featureRows(entries).map((features, index) => ({
+        ...features,
+        availableAt: entries[index].available_at,
+        source: { kind: 'official-daily-B-file', url: officialBFileUrl(race.race_date), sha256: entryFeatures[index].source_sha256, availableAt: entryFeatures[index].source_available_at },
+      })) : []
+      const targetIso = jst(target)
+      const model = historicalTrifectaModelMetadata()
+      const predictedAtMs = predictionAt ? Date.parse(predictionAt) : Number.NaN
+      const predictionComplete = predictions.length === 120 && Number.isFinite(predictedAtMs)
+        && Math.abs(predictedAtMs - target) <= 10_000 && Date.parse(model.trainedAt) <= predictedAtMs
+        && entries.every(entry => Date.parse(entry.available_at) <= predictedAtMs)
+      const oddsValid = !!odds && odds.qualityStatus === 'verified-complete-v1'
+        && odds.url === `https://www.boatrace.jp/owpc/pc/race/odds3t?rno=${race.race_no}&jcd=${race.venue_id}&hd=${race.race_date.replaceAll('-', '')}`
+        && Date.parse(odds.requestedAt) <= Date.parse(odds.capturedAt) && Date.parse(odds.capturedAt) <= Date.parse(observedAt)
+        && Math.abs(Date.parse(odds.capturedAt) - target) <= 10_000
+        && odds.odds?.length === 120
+      const observation: HistoricalObservation = {
+        schema: HISTORICAL_ARCHIVE_SCHEMA,
+        dataOrigin: 'real',
+        race: { id: race.id, raceDate: race.race_date, venueId: race.venue_id, raceNo: Number(race.race_no) },
+        model,
+        timing: { phase: 't60', cutoffAt: race.betting_cutoff_at, cutoffSource: race.betting_cutoff_source,
+          cutoffObservedAt: race.betting_cutoff_observed_at, targetAt: targetIso, predictedAt: predictionComplete ? predictionAt : null, observedAt },
+        archiveEvidence: { status: archiveVerified ? 'verified' : 'unavailable',
+          reason: archiveVerified ? null : reason ?? 'official_archive_missing_or_invalid', id: archiveRow?.id ?? null,
+          capturedAt: archiveRow?.captured_at ?? null, raceListSha256: archive?.raceList?.sha256 ?? null },
+        input: { status: inputRows.length === 6 ? 'complete' : 'unavailable',
+          missingReason: inputRows.length === 6 ? null : inputReason ?? reason ?? 'official_input_unavailable', rows: inputRows },
+        predictions: { status: predictionComplete ? 'complete' : 'unavailable',
+          missingReason: predictionComplete ? null : predictions.length !== 120 ? reason ?? 'model_prediction_unavailable' : 'prediction_outside_t60_window_or_non_point_in_time_input',
+          rows: predictionComplete ? predictions.map(row => ({ selection: row.selection, probability: row.probability, probStd: row.probStd })) : [] },
+        odds: { status: oddsValid ? 'complete' : 'missing', missingReason: oddsValid ? null : !odds ? 'fresh_official_market_not_observed' : 'market_not_point_in_time_or_incomplete',
+          sourceUrl: oddsValid ? odds.url : null, requestedAt: oddsValid ? odds.requestedAt : null,
+          capturedAt: oddsValid ? odds.capturedAt : null, sha256: oddsValid ? odds.sha256 : null,
+          qualityStatus: oddsValid ? odds.qualityStatus : null,
+          rows: oddsValid ? odds.odds.map((row: any) => ({ selection: row.selection, odds: Number(row.odds) })) : [] },
+        virtualDecision: { decisionId, outcome: totalStake ? 'placed' : 'abstained', totalStake },
+      }
+      // In-memory snapshots are frozen before the caller schedules any R2 work.
+      report.archiveObservations.push(structuredClone(observation))
+      report.archivedCandidates++
     }
   }
   return report
