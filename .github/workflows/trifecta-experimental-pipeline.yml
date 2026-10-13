@@ -167,9 +167,10 @@ jobs:
         run: |
           rm -f ml/data/learning/trifecta-experimental-forecast-status.json ml/data/learning/trifecta-experimental-forecast.json
           python - <<'PY'
-          import datetime, json, os, subprocess, sys, urllib.error, urllib.request
+          import datetime, json, os, subprocess, sys
           from pathlib import Path
           from zoneinfo import ZoneInfo
+          from edgelab.experimental_forecast_submit import submit_forecasts
 
           report_path = Path('ml/data/learning/trifecta-experimental-forecast-status.json')
           envelope_path = Path('ml/data/learning/trifecta-experimental-forecast.json')
@@ -193,40 +194,23 @@ jobs:
                   status['reason'] = 'forecast_envelope_unreadable'
           if isinstance(envelope, dict) and envelope.get('modelId') == model_id:
               races = envelope.get('races')
-              if isinstance(races, list) and 1 <= len(races) <= 4:
-                  status.update({'status': 'submitting', 'eligibleRaceCount': len(races)})
-                  base = os.environ.get('EDGELAB_API_URL', '').rstrip('/')
-                  token = os.environ.get('INGEST_TOKEN', '')
-                  if not base or not token:
-                      status.update({'status': 'submission_unavailable', 'reason': 'forecast_credentials_unavailable'})
-                  else:
-                      body = json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode('utf-8')
-                      request = urllib.request.Request(base + '/api/ingest/experimental-trifecta/forecast',
-                          data=body, method='POST', headers={'Authorization': 'Bearer ' + token,
-                          'Content-Type': 'application/json', 'Accept': 'application/json'})
-                      try:
-                          with urllib.request.urlopen(request, timeout=30) as response:
-                              result = json.loads(response.read(16384).decode('utf-8'))
-                          stored = result.get('stored') if isinstance(result, dict) else None
-                          if (isinstance(stored, list) and len(stored) == len(races)
-                                  and all(isinstance(item, dict) and item.get('predictionCount') == 120
-                                          for item in stored)):
-                              status.update({'status': 'forecast_stored', 'storedRaceCount': len(stored),
-                                             'decision': 'worker T-60 timing gate'})
-                          else:
-                              status.update({'status': 'submission_rejected', 'reason': 'invalid_api_response'})
-                      except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
-                          status.update({'status': 'submission_failed', 'reason': 'api_unavailable_or_rejected',
-                                         'errorCategory': type(exc).__name__})
-              else:
+              if isinstance(races, list) and not races:
                   status.update({'status': 'no_eligible_cutoff_race',
                                  'reason': 'no_verified_actual_t60_forecast_available'})
+              elif isinstance(races, list) and 1 <= len(races) <= 4:
+                  status = {'schema': status['schema'], 'modelId': model_id, 'asOf': as_of,
+                            **submit_forecasts(envelope,
+                              base_url=os.environ.get('EDGELAB_API_URL', ''),
+                              token=os.environ.get('INGEST_TOKEN', ''))}
+              else:
+                  status.update({'status': 'generation_unavailable',
+                                 'reason': 'forecast_race_count_invalid'})
           report_path.parent.mkdir(parents=True, exist_ok=True)
           report_path.write_text(json.dumps(status, ensure_ascii=False, indent=2, sort_keys=True) + '\n',
                                  encoding='utf-8')
           print(json.dumps(status, ensure_ascii=False, sort_keys=True))
-          if status['status'] in {'generation_unavailable', 'submission_unavailable',
-                                  'submission_failed', 'submission_rejected'}:
+          if status['status'] in {'generation_unavailable', 'invalid_request',
+                                  'submission_failed', 'partially_stored'}:
               raise SystemExit(1)
           PY
       - name: Archive experimental forecast status and generated envelope
