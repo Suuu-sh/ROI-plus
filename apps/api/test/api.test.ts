@@ -3,7 +3,7 @@ import Sqlite from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { app, settleOpen, autoBet, autoBetWithReport, recordPaperAbstention, experimentalPaperDecision, cron } from '../src/index.js';
+import worker, { app, settleOpen, autoBet, autoBetWithReport, recordPaperAbstention, experimentalPaperDecision, cron } from '../src/index.js';
 import { D1SqliteAdapter } from './d1-adapter.js';
 import { payoutYen, settleValues } from '../src/services/logic.js';
 import { readWriteBudget, reserveWriteBudget } from '../src/services/writeBudget.js';
@@ -1112,6 +1112,35 @@ describe('collection status quality compatibility',()=>{
   for(let i=0;i<12;i++)insert.run(`batch-${i}`,new Date(oldEnoughAt-i*60_000).toISOString());
   await cron(DB,false);
   expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE id LIKE 'batch-%'").get()).toMatchObject({n:2});
+ });
+ it('evaluates registered experimental T-60 decisions once on :00, :01, and hourly :05 ticks',async()=>{
+  const raceDate=jstDate(new Date()),base=Date.parse(`${raceDate}T10:00:00+09:00`),modelId='boat-trifecta-schedule-fixture',artifactSha='a'.repeat(64),manifestSha='b'.repeat(64),metadataSha='c'.repeat(64);
+  const metadata={id:modelId,status:'candidate',trainingMode:'experimental',experimentalOnly:true,sport:'boat',betType:'trifecta',boatFeatureSchemaVersion:'boat-prerace-v2-no-weather-experimental-v1',ticketBetType:'trifecta',ticketArtifactSha256:artifactSha};
+  const manifest={schema:'edgelab-experimental-trifecta-artifact-v1',modelId,trainingMode:'experimental',experimentalOnly:true,
+   files:{[`${modelId}.pkl`]:{sha256:artifactSha},[`${modelId}.json`]:{sha256:metadataSha}}};
+  sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
+   VALUES(?,'candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
+   .run(modelId,artifactSha,manifestSha,metadataSha,jstIso(base-300_000),JSON.stringify(manifest),JSON.stringify(metadata),jstIso(base-300_000));
+  sqlite.prepare("INSERT OR IGNORE INTO venues(id,sport,name) VALUES('99','boat','Experimental schedule fixture')").run();
+  const ticks=[base,base+60_000,base+5*60_000];
+  ticks.forEach((tick,i)=>{
+   const raceId=`boat-${raceDate.replaceAll('-','')}-99-${String(i+1).padStart(2,'0')}`;
+   sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at,betting_cutoff_at,betting_cutoff_source,betting_cutoff_observed_at)
+    VALUES(?,'boat','99',?,?,?,'scheduled','real',?,?,'boatrace-racelist-cutoff-v1',?)`).run(raceId,raceDate,i+1,jstIso(tick+300_000),jstIso(tick),jstIso(tick+60_000),jstIso(tick-1_000));
+   for(let n=1;n<=6;n++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,features_json,available_at,data_origin) VALUES(?,?,?,?,?,?,'real')")
+    .run(`${raceId}-e${n}`,raceId,n,`Boat ${n}`,JSON.stringify({racer_id:String(1000+n)}),jstIso(tick-300_000));
+  });
+  const modelLookupSql="SELECT * FROM experimental_models WHERE status IN ('candidate','experimental') ORDER BY registered_at DESC,id DESC LIMIT 1";
+  let modelLookups=0;const prepare=DB.prepare.bind(DB);DB.prepare=(sql:string)=>{if(sql===modelLookupSql)modelLookups++;return prepare(sql);};
+  vi.useFakeTimers();
+  for(const tick of ticks){
+   vi.setSystemTime(tick);
+   await worker.scheduled({cron:'* * * * *',scheduledTime:tick} as ScheduledController,
+    env({ENABLE_BOATRACE_RESULTS_SCRAPE:tick===ticks[2]?'true':'false'}));
+  }
+  expect(modelLookups).toBe(3); // exactly once per tick, including :00 maintenance and :05 early return
+  expect(sqlite.prepare('SELECT race_id,outcome,reason FROM experimental_paper_decisions ORDER BY race_id').all()).toEqual(ticks.map((_,i)=>({
+   race_id:`boat-${raceDate.replaceAll('-','')}-99-${String(i+1).padStart(2,'0')}`,outcome:'abstained',reason:'experimental_forecast_missing_or_invalid'})));
  });
 });
 

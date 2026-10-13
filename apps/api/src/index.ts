@@ -813,7 +813,6 @@ async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false, trifectaO
   // Evaluate against observations already available at decision time. A
   // collection pass in this invocation must not make a late snapshot eligible.
   const paper=await autoBetWithReport(db,autoEnabled);
-  const experimental=await experimentalPaperDecision(db,Date.now());
   await collectScheduledOdds(db, oddsEnabled, trifectaOddsEnabled);
   const settled=await settleOpen(db);
   const cutoff=new Date(Date.now()-30*86400000).toISOString();
@@ -821,7 +820,7 @@ async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false, trifectaO
   const cleanupCount=Math.min(10,Number(oldRows?.count??0));
   if(cleanupCount>0&&await reserveOptionalWorkerWrites(db,cleanupCount)) await run(db, `DELETE FROM odds_snapshots WHERE rowid IN (SELECT rowid FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at) LIMIT 10)`, cutoff).catch(()=>{});
   await cleanupOldQualityRuns(db);
-  return {settled,bought:paper.bought,paperTiming:paper.report,experimental};
+  return {settled,bought:paper.bought,paperTiming:paper.report};
 }
 
 // Quality-only collector telemetry is short-lived. Preserve mixed runs and
@@ -1681,6 +1680,11 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
     const paper=await autoBetWithReport(env.DB,true);
     console.info(JSON.stringify({event:'paper-decision-timing',...paper.report}));
   }
+  // Experimental trifecta decisions use a minute-resolution T-60 window and
+  // therefore run on every tick, independently from normal auto-bet settings.
+  // This is before the hourly :05 early return and before ten-minute maintenance.
+  const experimental=await experimentalPaperDecision(env.DB,Date.now());
+  console.info(JSON.stringify({event:'experimental-paper-decision',...experimental}));
   const paperBoundary = Math.floor(event.scheduledTime / 60_000) % 10 === 0;
   // Reserve minute :05 for the hourly result pass. This is not a ten-minute
   // maintenance boundary; isolating it avoids consuming the 50-query free
