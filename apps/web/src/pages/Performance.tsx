@@ -7,8 +7,7 @@ import { useAsync } from '../lib/useAsync'
 import { odds, pct, signedYen, tone, yen } from '../lib/format'
 import { t } from '../i18n'
 import { BetsTable } from '../components/BetsTable'
-import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
-import { HistoricalTrifectaExperiment } from '../components/HistoricalTrifectaExperiment'
+import { mergePurchaseHistory } from '../lib/purchaseHistory'
 import { CountUp, Empty, ErrorState, Loading, Section, SportIcon } from '../components/ui'
 
 const axis = { fontSize: 11, fill: 'rgb(var(--faint))' }
@@ -16,7 +15,14 @@ const tip = { contentStyle: { background: 'rgb(var(--surface))', border: '1px so
 
 export function PerformancePage() {
   const { origin } = useOrigin()
-  const q = useAsync(() => Promise.all([api.breakdown(origin), api.bets(origin), origin === 'all' ? Promise.resolve(null) : api.rankComparison(origin)]), [origin], () => Promise.all([api.breakdown(origin), api.bets(origin, undefined, true), origin === 'all' ? Promise.resolve(null) : api.rankComparison(origin)]))
+  const load = async (fresh = false) => {
+    const real = origin !== 'sample'
+    const [breakdown, normal, t60, base, rank] = await Promise.all([api.breakdown(origin), api.bets(origin, undefined, fresh),
+      real ? api.experimentalBets() : Promise.resolve([]), real ? api.historicalBets() : Promise.resolve([]),
+      origin === 'all' ? Promise.resolve(null) : api.rankComparison(origin)])
+    return [breakdown, mergePurchaseHistory(normal, t60, base), rank] as const
+  }
+  const q = useAsync(() => load(), [origin], () => load(true))
   if (q.error) return <div className="card"><ErrorState error={q.error} onRetry={q.reload} /></div>
   if (!q.data) return <div className="card"><Loading rows={6} /></div>
   const [bd, bets, rankComparison] = q.data
@@ -108,10 +114,6 @@ export function PerformancePage() {
       </div>
 
       <Section title="仮想購入履歴" right={<span className="num text-xs text-muted">{bets.length.toLocaleString()}点</span>}><PagedBets bets={bets} /></Section>
-
-      {/* Separate experimental ledger: kept after the normal results it must not be mixed with. */}
-      <ExperimentalPerformance />
-      <HistoricalTrifectaExperiment />
     </div>
   )
 }

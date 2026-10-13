@@ -106,6 +106,29 @@ describe('historical BASE dedicated T-60 virtual experiment', () => {
     expect(JSON.parse(decision.snapshot_json).model.exhibitionFeaturesUsed).toBe(false)
   })
 
+  it('sizes against the shared virtual bankroll, not only its own ledger balance', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-15T03:00:00.000Z'))
+    const run = async (initialBankroll?: number) => {
+      const f = createFixture(jst(Date.now() - 30_000))
+      if (initialBankroll != null) f.sqlite.prepare("INSERT INTO settings(key,value) VALUES('initial_bankroll',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(initialBankroll))
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(marketHtml(), { status: 200 })))
+      const odds = purchaseOddsContext({ used: 0, max: 4 }); odds.enabled = true; odds.sleep = async () => undefined
+      await historicalTrifectaExperimentDecision(f.DB, Date.now(), odds)
+      return {
+        decision: f.sqlite.prepare('SELECT outcome FROM historical_trifecta_experiment_decisions').get() as { outcome: string },
+        stake: (f.sqlite.prepare('SELECT COALESCE(SUM(stake),0) s FROM historical_trifecta_experiment_bets').get() as { s: number }).s,
+        ledger: (f.sqlite.prepare('SELECT available_balance b FROM historical_trifecta_experiment_bankroll').get() as { b: number }).b,
+      }
+    }
+    const funded = await run()
+    expect(funded.decision.outcome).toBe('placed')
+    expect(funded.stake).toBeGreaterThan(0)
+    const drained = await run(0)
+    expect(drained.decision.outcome).toBe('abstained')
+    expect(drained.stake).toBe(0)
+    expect(drained.ledger).toBe(100000)
+  })
+
   it('abstains without fetching when only a synthesized JST-midnight arrival timestamp is available', async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-15T03:00:00.000Z'))
     const f = createFixture('2026-10-15T00:00:00+09:00')

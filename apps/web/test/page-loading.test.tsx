@@ -12,24 +12,11 @@ import type { Bet } from '@edgelab/shared/src/types'
 
 const overview = { initialBankroll: 100000, bankroll: 100000, totalProfit: 0, roi: null, betCount: 0, settledCount: 0, hitRate: null, maxDrawdown: 0, maxDrawdownPct: 0, equityCurve: [] }
 const boatOverview = { ...overview, equityCurve: [{ at: '2026-10-01T00:00:00.000Z', bankroll: 100000 }, { at: '2026-10-02T00:00:00.000Z', bankroll: 100100 }] }
-const historicalTrifectaPerformance = {
-  model: {
-    experimentKey: 'boat-trifecta-historical-base-v1', id: 'boat-trifecta-historical-base-20261014',
-    immutableVersion: '2026-10-14.1', sourceArtifactSha256: 'b7688efcec865ce2bc9e770ec9e39631742481db5bc8a5f9b5a8b7ee2cbe0b3a',
-    featureSchemaVersion: 'boat-base-v1', featureColumns: ['lane', 'national_win_rate', 'local_win_rate', 'motor_2rate', 'boat_2rate', 'national_2rate', 'local_2rate', 'age', 'weight_carried', 'racer_class_code', 'history_starts', 'history_wins', 'history_win_rate'],
-    fitCount: 5, trainingRaces: 10508, validationRaces: 2213, testRaces: 2070,
-    candidateKind: 'historical_base_unverified', evaluationQualified: false, promotionEligible: false,
-    pointInTimeEvidenceComplete: false, profitabilityProven: false, exhibitionFeaturesUsed: false, selectionProfile: 'all-120',
-  },
-  summary: { decisions: 0, placed_races: 0, abstained_races: 0, bets: 0, total_stake: 0, settled_profit: 0, open_bets: 0, available_balance: 100000 },
-  decisions: [],
-}
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
-function mockReads(purchasedBets: Bet[] = [], experimentalBets: ExperimentalBet[] = []) {
+function mockReads(purchasedBets: Bet[] = [], experimentalBets: ExperimentalBet[] = [], historicalBets: ExperimentalBet[] = []) {
   const fetcher = vi.fn(async (url: string) => {
     if (url === '/api/races/detail-race') return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
-    if (url === '/api/performance/experimental') return new Response(JSON.stringify({ experimentKey: 'boat-trifecta-small-sample-v1', state: 'unavailable', model: null, bankroll: { initial: 100000, available: 100000 }, metrics: { races: 0, bets: 0, stake: 0, payout: 0, profit: 0, roi: null }, decisions: [], sizing: { method: 'fractional-kelly-portfolio', perRaceCombinedCap: 1000, dailyCap: null, balanceGuard: 'nonnegative-virtual-balance' } }), { headers: { 'content-type': 'application/json' } })
-    if (url === '/api/performance/historical-trifecta-experiment') return new Response(JSON.stringify(historicalTrifectaPerformance), { headers: { 'content-type': 'application/json' } })
+    if (url === '/api/bets/historical-trifecta-experiment') return new Response(JSON.stringify(historicalBets), { headers: { 'content-type': 'application/json' } })
     if (url === '/api/bets/experimental') return new Response(JSON.stringify(experimentalBets), { headers: { 'content-type': 'application/json' } })
     if (url.startsWith('/api/bets')) return new Response(JSON.stringify(purchasedBets), { headers: { 'content-type': 'application/json' } })
     return new Response(JSON.stringify(url.includes('/performance/overview') ? url.includes('sport=boat') ? boatOverview : overview : []), { headers: { 'content-type': 'application/json' } })
@@ -72,9 +59,9 @@ it('boat main page loads only real purchases and performance without exploration
   expect(screen.queryByRole('button', { name: '全期間の購入履歴' })).toBeNull()
   expect(screen.queryByText(/レースを調べる/)).toBeNull()
   expect(screen.queryByText(/レースを調べるから購入できます/)).toBeNull()
-  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?sport=boat&origin=real', '/api/performance/overview?sport=boat&origin=real'])
+  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets/historical-trifecta-experiment', '/api/bets?sport=boat&origin=real', '/api/performance/overview?sport=boat&origin=real'])
 })
-it('boat purchase-history surface shows ticket-level experimental purchases in the unified history', async () => {
+it('boat purchase history shows former experiment tickets as ordinary virtual purchases', async () => {
   const experimentalBet: ExperimentalBet = {
     id: 'experimental-ticket-boat-example', recordKind: 'experimental_paper', experimentKey: 'boat-trifecta-small-sample-v1', decisionId: 'decision-example',
     raceId: 'boat-20261013-04-12', sport: 'boat', betType: 'trifecta', selection: '1-2-3', stake: 22,
@@ -82,13 +69,16 @@ it('boat purchase-history surface shows ticket-level experimental purchases in t
     placedAt: '2026-10-13T03:00:00.000Z', status: 'open', payout: null, profit: null, settledAt: null,
     dataOrigin: 'real', venueName: '平和島', raceNo: 12, raceDate: '2026-10-13',
   }
-  const fetcher = mockReads([], [experimentalBet])
+  const fetcher = mockReads([], [experimentalBet], [{ ...experimentalBet, id: 'base-ticket', recordKind: 'historical_base', raceId: 'boat-20261013-05-01', venueName: '多摩川', raceNo: 1 }])
   render(<MemoryRouter><SportPage sport="boat" /></MemoryRouter>)
-  expect(await screen.findByText('実験・通常成績対象外')).toBeTruthy()
+  expect(await screen.findByText('多摩川 1R')).toBeTruthy()
+  expect(screen.getAllByText('仮想・自動')).toHaveLength(2)
+  expect(screen.queryByText(/実験/)).toBeNull()
   expect(screen.queryByRole('heading', { name: '実験購入履歴（別台帳）' })).toBeNull()
-  expect(screen.getByRole('link', { name: '出走表を見る →' }).getAttribute('href')).toBe('/boat/boat-20261013-04-12')
-  expect(screen.getByText('22円')).toBeTruthy()
+  expect(screen.getAllByRole('link', { name: '出走表を見る →' }).map((link) => link.getAttribute('href'))).toContain('/boat/boat-20261013-04-12')
+  expect(screen.getAllByText('22円').length).toBeGreaterThan(0)
   expect(fetcher).toHaveBeenCalledWith('/api/bets/experimental', expect.anything())
+  expect(fetcher).toHaveBeenCalledWith('/api/bets/historical-trifecta-experiment', expect.anything())
   expect(screen.getAllByRole('heading', { name: /^仮想購入履歴/ })).toHaveLength(1)
 })
 it('hides origin controls and sample notice on boat routes only', () => {
@@ -126,10 +116,10 @@ it('board shows operational performance and only races with recorded purchases',
   await screen.findByRole('heading', { name: '購入したレース' })
   expect(screen.getByRole('heading', { name: '運用成績' })).toBeTruthy()
   expect(screen.queryByText('競馬 vs ボートレースを比較')).toBeNull()
-  await screen.findByText('実験用仮想残高')
-  expect(fetcher).toHaveBeenCalledTimes(5)
+  expect(screen.queryByText('三連単モデル実験')).toBeNull()
+  expect(fetcher).toHaveBeenCalledTimes(4)
   expect(fetcher.mock.calls.some(([url]) => /\/models|\/races\?|\/rankings|\/collection/.test(url))).toBe(false)
-  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?origin=all', '/api/performance/experimental', '/api/performance/historical-trifecta-experiment', '/api/performance/overview?origin=all'])
+  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets/historical-trifecta-experiment', '/api/bets?origin=all', '/api/performance/overview?origin=all'])
 })
 it('does not request or show the real experimental ledger in sample origin on Overview', async () => {
   vi.stubGlobal('localStorage', { getItem: (key: string) => key === 'edgelab.origin' ? 'sample' : null, setItem: vi.fn(), removeItem: vi.fn() })
@@ -137,7 +127,7 @@ it('does not request or show the real experimental ledger in sample origin on Ov
   render(<OriginProvider><MemoryRouter><OverviewPage /></MemoryRouter></OriginProvider>)
   await screen.findByRole('heading', { name: '購入したレース' })
   expect(screen.queryByRole('heading', { name: '実験購入履歴（別台帳）' })).toBeNull()
-  expect(fetcher.mock.calls.some(([url]) => url === '/api/bets/experimental')).toBe(false)
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/bets/experimental' || url === '/api/bets/historical-trifecta-experiment')).toBe(false)
 })
 it('board lists a bought race and links only that race to its detail', async () => {
   const bet: Bet = { id: 'bought-1', raceId: 'boat-20261011-18-07', sport: 'boat', betType: 'trifecta', selection: '1-2-3', stake: 100,
@@ -181,11 +171,14 @@ it('keeps the date controls while boat uses all purchases and horse filters by s
   expect(screen.queryByText(/この日付の仮想購入はありません/)).toBeNull()
 })
 
-it('board unifies experiment tickets but keeps normal performance count unchanged', async () => {
-  mockReads([], [{ id: 'e-board', recordKind: 'experimental_paper', raceId: 'boat-example', sport: 'boat', betType: 'trifecta', selection: '1-2-3', stake: 100, placedAt: '2026-10-14T00:00:00Z', status: 'lost', payout: 0, profit: -100, finalOdds: 8, dataOrigin: 'real', venueName: '実験場', raceNo: 1, raceDate: '2026-10-14' } as ExperimentalBet])
+it('board lists former experiment tickets as ordinary purchases without experiment labels', async () => {
+  mockReads([], [{ id: 'e-board', recordKind: 'experimental_paper', raceId: 'boat-example', sport: 'boat', betType: 'trifecta', selection: '1-2-3', stake: 100, placedAt: '2026-10-14T00:00:00Z', status: 'lost', payout: 0, profit: -100, finalOdds: 8, dataOrigin: 'real', venueName: '若松', raceNo: 1, raceDate: '2026-10-14' } as ExperimentalBet],
+    [{ id: 'h-board', recordKind: 'historical_base', raceId: 'boat-base', sport: 'boat', betType: 'trifecta', selection: '2-1-3', stake: 200, placedAt: '2026-10-14T01:00:00Z', status: 'open', payout: null, profit: null, finalOdds: null, dataOrigin: 'real', venueName: '下関', raceNo: 7, raceDate: '2026-10-14' } as ExperimentalBet])
   render(<MemoryRouter><OverviewPage /></MemoryRouter>)
-  expect(await screen.findByText('実験・通常成績対象外')).toBeTruthy()
-  expect(screen.getByText('1レース · 1点')).toBeTruthy()
-  expect(screen.queryByRole('heading', { name: '実験購入履歴（別台帳）' })).toBeNull()
-  expect(screen.getByText('購入点数').parentElement?.textContent).toContain('0')
+  expect(await screen.findByText('3連単 1-2-3')).toBeTruthy()
+  expect(screen.getByText('3連単 2-1-3')).toBeTruthy()
+  expect(screen.getByText('2レース · 2点')).toBeTruthy()
+  expect(screen.queryByText(/実験/)).toBeNull()
+  // Unsettled count covers every ledger.
+  expect(screen.getByText('損益・回収率の集計対象外').parentElement?.textContent).toMatch(/未確定1/)
 })

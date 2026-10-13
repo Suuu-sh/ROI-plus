@@ -13,6 +13,7 @@ import { collectResults, resultUrl, RESULTS_SOURCE } from './services/collectBoa
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
 import { sizeExperimentalPortfolioResult } from './services/experimentalSizing.js';
+import { unifiedAvailableBankrollSql, unifiedLedgerSql } from './services/unifiedLedger.js';
 import { historicalTrifectaExperimentDecision, historicalTrifectaExperimentPerformance,
   historicalTrifectaExperimentBets, settleHistoricalTrifectaExperimentOpen } from './services/historicalTrifectaExperiment.js';
 import { exportHistoricalArchive, historicalArchiveCoverage, historicalArchiveKey, listHistoricalArchiveObjects,
@@ -153,9 +154,8 @@ const jsonError = (c: any, message: string, status = 400) => c.json({ error: mes
 async function setting(db: Db, key: string, fallback: string): Promise<string> {
   return (await first<{value:string}>(db, 'SELECT value FROM settings WHERE key=?', key))?.value ?? fallback;
 }
-const availableBankrollSql = `(COALESCE((SELECT CAST(value AS REAL) FROM settings WHERE key='initial_bankroll'), 100000)
-  + COALESCE((SELECT SUM(CASE WHEN b.status IN ('won','lost') THEN b.profit ELSE 0 END) FROM bets b WHERE NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=b.id)), 0)
-  - COALESCE((SELECT SUM(CASE WHEN b.status='open' THEN b.stake ELSE 0 END) FROM bets b WHERE NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=b.id)), 0))`;
+// Normal, former T-60 experiment and historical BASE tickets share one virtual bankroll.
+const availableBankrollSql = unifiedAvailableBankrollSql;
 const nonQuarantinedBet = (alias = 'b') => `NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=${alias}.id)`;
 function auth(c: any) { const token = c.env.INGEST_TOKEN; return !!token && c.req.header('Authorization') === `Bearer ${token}`; }
 // Trusted frontend Service Binding adds this secret header; never accept a
@@ -568,7 +568,8 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now(), oddsCont
    }
    const oddsBySelection=new Map(odds.map((x:any)=>[x.selection,Number(x.odds)]));
    const tickets=!reason?predictions.map((p:any)=>({selection:p.selection,probability:Number(p.probability),probStd:Number(p.prob_std),odds:Number(oddsBySelection.get(p.selection))})):[];
-   const balance=await first<any>(db,"SELECT available_balance FROM experimental_bankroll WHERE experiment_key='boat-trifecta-small-sample-v1'");
+   // Size against the shared virtual bankroll; the per-ledger balance stays as a lower bound for its CHECK.
+   const balance=await first<any>(db,`SELECT MIN(available_balance,${availableBankrollSql}) available_balance FROM experimental_bankroll WHERE experiment_key='boat-trifecta-small-sample-v1'`);
    const sizing=reason?{stakes:[],abstentionReason:null}:sizeExperimentalPortfolioResult(tickets,Number(balance?.available_balance??0));
    const stakes=sizing.stakes;
    const totalStake=stakes.reduce((sum,x)=>sum+x.stake,0),outcome=totalStake?'placed':'abstained';
@@ -587,10 +588,10 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now(), oddsCont
       ||Date.parse(archive?.trifectaOdds?.capturedAt??'')>commitAt))continue;
    const committedAt=isoJstAt(commitAt);
    const statements:Statement[]=[];
-   if(totalStake>0)statements.push(db.prepare(`UPDATE experimental_bankroll SET available_balance=available_balance-?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND available_balance>=? AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)
+   if(totalStake>0)statements.push(db.prepare(`UPDATE experimental_bankroll SET available_balance=available_balance-?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND available_balance>=? AND ${availableBankrollSql}>=? AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)
       AND EXISTS(SELECT 1 FROM races r WHERE r.id=? AND r.status='scheduled' AND r.betting_cutoff_at=? AND r.betting_cutoff_source=?
         AND ABS((julianday(r.betting_cutoff_at)-julianday('now'))*86400-60)<=10
-        AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id))`).bind(totalStake,committedAt,totalStake,race.id,race.id,race.betting_cutoff_at,TRUSTED_CUTOFF_SOURCE));
+        AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id))`).bind(totalStake,committedAt,totalStake,totalStake,race.id,race.id,race.betting_cutoff_at,TRUSTED_CUTOFF_SOURCE));
    statements.push(totalStake>0
      ?db.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,capture_archive_id,decision_at,outcome,reason,total_stake,sizing_method,snapshot_json)
        SELECT ?,'boat-trifecta-small-sample-v1',?,?,?,?,'placed',NULL,?,'fractional-kelly-portfolio',? WHERE changes()>0 AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)`).bind(decisionId,race.id,model.id,archiveRow.id,committedAt,totalStake,JSON.stringify(snapshot),race.id)
@@ -1359,8 +1360,9 @@ app.get('/performance/overview',async c=>{
  const sport=c.req.query('sport'),origin=originFilter(c.req.query('origin'));
  if(sport&&!validSport(sport))return jsonError(c,'invalid sport');
  const db=c.env.DB,initial=Number(await setting(db,'initial_bankroll','100000'));
- const bets=await all<any>(db,`SELECT * FROM bets b WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at,b.id`,sport||null,sport||null,origin,origin);
+ const bets=await all<any>(db,`SELECT * FROM (${unifiedLedgerSql}) b WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?) ORDER BY b.placed_at,b.id`,sport||null,sport||null,origin,origin);
  let bankroll=initial,settled=0,scored=0,hits=0,stake=0,payout=0;
+ const openStake=bets.reduce((sum:number,b:any)=>sum+(b.status==='open'?Number(b.stake):0),0);
  const equity=[{at:bets[0]?.placed_at??now(),bankroll}];
  const settledBets=bets.filter((b:any)=>b.status==='won'||b.status==='lost'||b.status==='void')
    .sort((a:any,b:any)=>String(a.settled_at??a.placed_at).localeCompare(String(b.settled_at??b.placed_at))||String(a.id).localeCompare(String(b.id)));
@@ -1374,7 +1376,7 @@ app.get('/performance/overview',async c=>{
  }
  let peak=initial,dd=0,ddPct=0;
  for(const e of equity){peak=Math.max(peak,e.bankroll);dd=Math.max(dd,peak-e.bankroll);if(peak>0)ddPct=Math.max(ddPct,(peak-e.bankroll)/peak);}
- return c.json({initialBankroll:initial,bankroll,totalProfit:bankroll-initial,roi:stake?payout/stake:null,betCount:bets.length,settledCount:settled,hitRate:scored?hits/scored:null,maxDrawdown:dd,maxDrawdownPct:ddPct,equityCurve:equity,quarantined:await quarantineSummary(db,sport||null,origin)});
+ return c.json({initialBankroll:initial,bankroll,totalProfit:bankroll-initial,roi:stake?payout/stake:null,betCount:bets.length,settledCount:settled,hitRate:scored?hits/scored:null,maxDrawdown:dd,maxDrawdownPct:ddPct,openStake,equityCurve:equity,quarantined:await quarantineSummary(db,sport||null,origin)});
 });
 app.post('/ingest/experimental-trifecta/model',async c=>{
  if(!auth(c))return jsonError(c,'unauthorized',401);
@@ -1521,9 +1523,9 @@ app.get('/performance/historical-trifecta-experiment',async c=>{
  return c.json(await historicalTrifectaExperimentPerformance(c.env.DB));
 });
 app.get('/performance/breakdown',async c=>{const db=c.env.DB,origin=originFilter(c.req.query('origin'));
- const O=`(? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet('b')}`;
- const bySport=await all<any>(db,`SELECT sport,COUNT(*) bets,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,SUM(COALESCE(profit,0)) profit,CASE WHEN SUM(stake)>0 THEN 1.0*SUM(COALESCE(payout,0))/SUM(stake) END roi,1.0*SUM(CASE WHEN status='won' THEN 1 ELSE 0 END)/COUNT(*) hitRate FROM bets b WHERE ${O} AND status IN ('won','lost') GROUP BY sport`,origin,origin);
- const byMonth=await all<any>(db,`SELECT substr(placed_at,1,7) month,sport,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,SUM(COALESCE(profit,0)) profit FROM bets b WHERE ${O} AND status IN ('won','lost') GROUP BY month,sport ORDER BY month`,origin,origin);
+ const O=`(? IS NULL OR b.data_origin=?)`,L=`(${unifiedLedgerSql})`;
+ const bySport=await all<any>(db,`SELECT sport,COUNT(*) bets,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,SUM(COALESCE(profit,0)) profit,CASE WHEN SUM(stake)>0 THEN 1.0*SUM(COALESCE(payout,0))/SUM(stake) END roi,1.0*SUM(CASE WHEN status='won' THEN 1 ELSE 0 END)/COUNT(*) hitRate FROM ${L} b WHERE ${O} AND status IN ('won','lost') GROUP BY sport`,origin,origin);
+ const byMonth=await all<any>(db,`SELECT substr(placed_at,1,7) month,sport,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,SUM(COALESCE(profit,0)) profit FROM ${L} b WHERE ${O} AND status IN ('won','lost') GROUP BY month,sport ORDER BY month`,origin,origin);
  const byEdge=await all<any>(db,`SELECT CASE
    WHEN expected_roi IS NULL THEN '不明'
    WHEN expected_roi >= 0.20 THEN '20%以上'
@@ -1531,10 +1533,10 @@ app.get('/performance/breakdown',async c=>{const db=c.env.DB,origin=originFilter
    WHEN expected_roi >= 0 THEN '0〜5%'
    ELSE '< 0%'
   END bucket,COUNT(*) bets,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,CASE WHEN SUM(stake)>0 THEN 1.0*SUM(COALESCE(payout,0))/SUM(stake) END roi
-  FROM bets b WHERE ${O} AND status IN ('won','lost') GROUP BY bucket ORDER BY CASE bucket WHEN '20%以上' THEN 1 WHEN '5〜20%' THEN 2 WHEN '0〜5%' THEN 3 WHEN '< 0%' THEN 4 ELSE 5 END`,origin,origin);
- const byModel=await all<any>(db,`SELECT COALESCE(model_id,'unknown') modelId,COUNT(*) bets,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,CASE WHEN SUM(stake)>0 THEN 1.0*SUM(COALESCE(payout,0))/SUM(stake) END roi FROM bets b WHERE ${O} AND status IN ('won','lost') GROUP BY model_id`,origin,origin);
+  FROM ${L} b WHERE ${O} AND status IN ('won','lost') GROUP BY bucket ORDER BY CASE bucket WHEN '20%以上' THEN 1 WHEN '5〜20%' THEN 2 WHEN '0〜5%' THEN 3 WHEN '< 0%' THEN 4 ELSE 5 END`,origin,origin);
+ const byModel=await all<any>(db,`SELECT COALESCE(model_id,'unknown') modelId,COUNT(*) bets,SUM(stake) stake,SUM(COALESCE(payout,0)) payout,CASE WHEN SUM(stake)>0 THEN 1.0*SUM(COALESCE(payout,0))/SUM(stake) END roi FROM ${L} b WHERE ${O} AND status IN ('won','lost') GROUP BY model_id`,origin,origin);
  const calibration=await all<any>(db,`SELECT r.sport,CAST(p.probability*10 AS INT) bin,AVG(p.probability) predicted,AVG(CASE WHEN res.finish_order=1 THEN 1.0 ELSE 0.0 END) actual,COUNT(*) count FROM predictions p JOIN races r ON r.id=p.race_id AND p.data_origin=r.data_origin JOIN models m ON m.id=p.model_id AND m.sport=r.sport AND m.bet_type='win' AND (r.sport<>'boat' OR CASE WHEN json_valid(m.metrics_json) THEN (json_type(m.metrics_json,'$.boatArtifactSha256')='text' AND json_extract(m.metrics_json,'$.boatVenueSchemaVersion')='boat-venue-v2' AND length(json_extract(m.metrics_json,'$.correctedTrainingDataSha256'))=64 AND json_extract(m.metrics_json,'$.correctedTrainingDataSha256') NOT GLOB '*[^a-f0-9]*' AND length(json_extract(m.metrics_json,'$.boatArtifactSha256'))=64 AND json_extract(m.metrics_json,'$.boatArtifactSha256') NOT GLOB '*[^a-f0-9]*') ELSE 0 END) JOIN results res ON res.race_id=p.race_id AND res.number=p.number AND res.data_origin=r.data_origin WHERE NOT EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='prediction' AND q.record_id=p.id) AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races qr WHERE qr.race_id=r.id) AND r.status='finished' AND r.post_time IS NOT NULL AND julianday(p.predicted_at)<=julianday(r.post_time) AND (? IS NULL OR r.data_origin=?) AND p.predicted_at=(SELECT p2.predicted_at FROM predictions p2 WHERE p2.race_id=p.race_id AND p2.model_id=p.model_id AND p2.number=p.number AND p2.data_origin=r.data_origin AND julianday(p2.predicted_at)<=julianday(r.post_time) ORDER BY julianday(p2.predicted_at) DESC LIMIT 1) GROUP BY r.sport,bin ORDER BY r.sport,bin`,origin,origin);
- const oddsDrift=await first<any>(db,`SELECT COUNT(*) bets,AVG(odds_at_bet) avgOddsAtBet,AVG(final_odds) avgFinalOdds,COALESCE(SUM(ev_lost),0) evLostCount FROM bets b WHERE status IN ('won','lost') AND ${O}`,origin,origin);
+ const oddsDrift=await first<any>(db,`SELECT COUNT(*) bets,AVG(odds_at_bet) avgOddsAtBet,AVG(final_odds) avgFinalOdds,COALESCE(SUM(ev_lost),0) evLostCount FROM ${L} b WHERE status IN ('won','lost') AND ${O}`,origin,origin);
  return c.json({bySport,byMonth,byEdge,byModel,calibration,oddsDrift,quarantined:await quarantineSummary(db,null,origin)});
 });
 function isRecord(value: unknown): value is Record<string, any> { return !!value && typeof value === 'object' && !Array.isArray(value); }

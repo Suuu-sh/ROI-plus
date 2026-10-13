@@ -9,9 +9,7 @@ import { betTypeLabel } from '../lib/betType'
 import { dateTime, pct, signedYen, tone, yen } from '../lib/format'
 import { t } from '../i18n'
 import { EquityChart } from '../components/EquityChart'
-import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
 import { mergePurchaseHistory, type HistoryBet } from '../lib/purchaseHistory'
-import { HistoricalTrifectaExperiment } from '../components/HistoricalTrifectaExperiment'
 import { CountUp, Empty, ErrorState, LiveDot, Loading, Section, Segmented, SportIcon } from '../components/ui'
 
 type PurchasedRace = {
@@ -54,8 +52,11 @@ function raceState(race: PurchasedRace): Exclude<RaceFilter, 'all'> {
 export function OverviewPage() {
   const { origin } = useOrigin()
   const load = async (fresh = false) => {
-    const [performance, normal, experimental] = await Promise.all([api.overview(origin, undefined, fresh), api.bets(origin, undefined, fresh), origin === 'sample' ? Promise.resolve([]) : api.experimentalBets()])
-    return [performance, mergePurchaseHistory(normal, experimental), normal] as const
+    // Trifecta tickets from the former experiment ledgers are real-data purchases, so sample view leaves them out.
+    const real = origin !== 'sample'
+    const [performance, normal, t60, base] = await Promise.all([api.overview(origin, undefined, fresh), api.bets(origin, undefined, fresh),
+      real ? api.experimentalBets() : Promise.resolve([]), real ? api.historicalBets() : Promise.resolve([])])
+    return [performance, mergePurchaseHistory(normal, t60, base)] as const
   }
   const all = useAsync(() => load(), [origin], () => load(true))
   const purchasedRaces = useMemo(() => all.data ? groupPurchasedRaces(all.data[1]) : [], [all.data])
@@ -65,7 +66,7 @@ export function OverviewPage() {
   if (all.error) return <div className="card"><ErrorState error={all.error} onRetry={all.reload} /></div>
   if (!all.data) return <div className="card"><Loading rows={5} /></div>
   const [performance, bets] = all.data
-  const unresolved = all.data[2].filter((bet) => bet.status === 'open').length
+  const unresolved = bets.filter((bet) => bet.status === 'open').length
   const counts = { all: purchasedRaces.length, open: 0, won: 0, lost: 0 }
   for (const race of purchasedRaces) counts[raceState(race)] += 1
   const filtered = filter === 'all' ? purchasedRaces : purchasedRaces.filter((race) => raceState(race) === filter)
@@ -83,44 +84,34 @@ export function OverviewPage() {
 
     <SettledTicker bets={bets} />
 
-    <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
-      <div className="min-w-0 space-y-5">
-        <Section title="運用成績" right={<span className="text-xs text-muted">確定分の払戻と損益 · 初期資金 {yen(performance.initialBankroll)}</span>}>
-          <Scoreboard performance={performance} unresolved={unresolved} />
-          <div className="border-t border-line px-2 pb-3 pt-2">
-            {performance.equityCurve.length > 1 ? <EquityChart data={performance.equityCurve} base={performance.initialBankroll} /> : <Empty>確定した仮想購入がまだありません。</Empty>}
-          </div>
-        </Section>
-
-        <Section title="購入したレース" right={<span className="num text-xs text-muted">{purchasedRaces.length}レース · {bets.length}点</span>}>
-          {!purchasedRaces.length ? <Empty>この表示条件では仮想購入がありません。未購入レースは表示しません。</Empty> : <>
-            <div className="border-b border-line px-4 py-3">
-              <Segmented<RaceFilter> size="sm" ariaLabel="購入したレースの絞り込み" value={filter} onChange={(next) => { setFilter(next); setVisible(PAGE_SIZE) }} options={[
-                { value: 'all', label: <>すべて <span className="num ml-0.5 text-faint">{counts.all}</span></> },
-                { value: 'open', label: <>精算待ち <span className="num ml-0.5 text-faint">{counts.open}</span></> },
-                { value: 'won', label: <>的中あり <span className="num ml-0.5 text-faint">{counts.won}</span></> },
-                { value: 'lost', label: <>不的中 <span className="num ml-0.5 text-faint">{counts.lost}</span></> },
-              ]} />
-            </div>
-            <div className="race-list">
-              {shown.length > 0 && <PurchasedRaceHeader />}
-              {!shown.length ? <Empty>この条件に該当するレースはありません。</Empty> : <div key={filter} className="stagger divide-y divide-line">
-                {shown.map((race, index) => <PurchasedRaceCard key={race.raceId} race={race} index={index % PAGE_SIZE} />)}
-              </div>}
-            </div>
-            {filtered.length > shown.length && <div className="border-t border-line p-3 text-center">
-              <button className="btn-ghost h-9 text-xs" onClick={() => setVisible((n) => n + PAGE_SIZE)}>さらに表示（残り {(filtered.length - shown.length).toLocaleString()}レース）</button>
-            </div>}
-          </>}
-        </Section>
+    <Section title="運用成績" right={<span className="text-xs text-muted">確定分の払戻と損益 · 初期資金 {yen(performance.initialBankroll)}</span>}>
+      <Scoreboard performance={performance} unresolved={unresolved} />
+      <div className="border-t border-line px-2 pb-3 pt-2">
+        {performance.equityCurve.length > 1 ? <EquityChart data={performance.equityCurve} base={performance.initialBankroll} /> : <Empty>確定した仮想購入がまだありません。</Empty>}
       </div>
+    </Section>
 
-      {/* The experimental ledger is separate from normal results, so it sits beside them rather than between them. */}
-      <aside aria-label="実験台帳" className="min-w-0 space-y-5">
-        <ExperimentalPerformance compact narrow />
-        <HistoricalTrifectaExperiment compact />
-      </aside>
-    </div>
+    <Section title="購入したレース" right={<span className="num text-xs text-muted">{purchasedRaces.length}レース · {bets.length}点</span>}>
+      {!purchasedRaces.length ? <Empty>この表示条件では仮想購入がありません。未購入レースは表示しません。</Empty> : <>
+        <div className="border-b border-line px-4 py-3">
+          <Segmented<RaceFilter> size="sm" ariaLabel="購入したレースの絞り込み" value={filter} onChange={(next) => { setFilter(next); setVisible(PAGE_SIZE) }} options={[
+            { value: 'all', label: <>すべて <span className="num ml-0.5 text-faint">{counts.all}</span></> },
+            { value: 'open', label: <>精算待ち <span className="num ml-0.5 text-faint">{counts.open}</span></> },
+            { value: 'won', label: <>的中あり <span className="num ml-0.5 text-faint">{counts.won}</span></> },
+            { value: 'lost', label: <>不的中 <span className="num ml-0.5 text-faint">{counts.lost}</span></> },
+          ]} />
+        </div>
+        <div className="race-list">
+          {shown.length > 0 && <PurchasedRaceHeader />}
+          {!shown.length ? <Empty>この条件に該当するレースはありません。</Empty> : <div key={filter} className="stagger divide-y divide-line">
+            {shown.map((race, index) => <PurchasedRaceCard key={race.raceId} race={race} index={index % PAGE_SIZE} />)}
+          </div>}
+        </div>
+        {filtered.length > shown.length && <div className="border-t border-line p-3 text-center">
+          <button className="btn-ghost h-9 text-xs" onClick={() => setVisible((n) => n + PAGE_SIZE)}>さらに表示（残り {(filtered.length - shown.length).toLocaleString()}レース）</button>
+        </div>}
+      </>}
+    </Section>
   </div>
 }
 
@@ -214,9 +205,6 @@ function PurchasedRaceCard({ race, index }: { race: PurchasedRace; index: number
   const state = raceState(race)
   const strip = state === 'open' ? 'bg-mark' : state === 'won' ? 'bg-pos' : 'bg-line'
   const profitKnown = knownProfits.length === resolved.length && resolved.length > 0
-  const experimentalCount = race.bets.filter((bet) => bet.recordKind === 'experimental_paper').length
-  // One label per race when the whole race is experimental; mixed races mark each experimental ticket.
-  const allExperimental = experimentalCount === race.bets.length
   return <article className="race-row group relative p-4 pl-5 transition-colors duration-300 hover:bg-raised/40" style={{ ['--i' as string]: index }}>
     <span aria-hidden="true" className={`absolute inset-y-3 left-0 w-1 rounded-r transition-[top,bottom] duration-300 group-hover:inset-y-0 ${strip}`} />
     <div className="race-main min-w-0">
@@ -226,11 +214,9 @@ function PurchasedRaceCard({ race, index }: { race: PurchasedRace; index: number
         <span className="shrink-0 text-xs font-normal text-muted transition-transform duration-300 group-hover:translate-x-1 race-wide-hidden">詳細 →</span>
       </Link>
       <div className="num mt-1 text-[11px] text-muted">{race.raceDate ?? '開催日不明'} · 購入 {race.bets.length}点 · {dateTime(race.latestPurchase)} 時点</div>
-      {allExperimental && <span className="mt-1.5 inline-block whitespace-nowrap rounded-[3px] border border-dashed border-line px-1.5 py-0.5 text-[10px] font-bold text-muted">実験・通常成績対象外</span>}
     </div>
     <div className="race-tickets flex min-w-0 flex-wrap gap-1.5">
       {race.bets.map((bet) => <div key={bet.id} className={`flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-[4px] border px-2 py-1 text-xs [&>span]:whitespace-nowrap ${bet.status === 'won' ? 'border-pos/50 bg-pos/10' : 'border-line bg-surface'}`}>
-        {bet.recordKind === 'experimental_paper' && !allExperimental && <span className="rounded-[3px] border border-dashed border-line px-1 text-[10px] font-bold text-muted" title="実験・通常成績対象外">実験</span>}
         <span className="font-mono font-bold">{betTypeLabel[bet.betType]} {bet.selection}</span>
         <span className="num text-muted">{yen(bet.stake)}</span>
         <span className={bet.status === 'won' ? 'anim-stamp inline-block font-bold text-pos' : bet.status === 'void' ? 'text-warn' : 'text-muted'}>{t().betStatus[bet.status]}</span>

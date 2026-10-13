@@ -30,12 +30,10 @@ export function BetSheet({ race, entry, ticket, onClose, onPlaced }: {
     if (!entry) return
     let alive = true
     setFundsLoading(true)
-    // The backend bankroll guard is global across sample and real-origin virtual bets.
-    Promise.all([api.overview('all'), api.bets('all')])
-      .then(([overview, bets]) => {
-        const settledProfit = bets.reduce((sum, bet) => sum + (bet.status === 'won' || bet.status === 'lost' || bet.status === 'void' ? bet.profit ?? 0 : 0), 0)
-        const openStake = bets.reduce((sum, bet) => sum + (bet.status === 'open' ? bet.stake : 0), 0)
-        if (alive) setBankroll(overview.initialBankroll + settledProfit - openStake)
+    // The backend bankroll guard is one shared ledger across origins and every former experiment ledger.
+    api.overview('all')
+      .then((overview) => {
+        if (alive) setBankroll(typeof overview.openStake === 'number' ? overview.bankroll - overview.openStake : null)
       })
       .catch((e) => { if (alive) setErr(e instanceof ApiError ? e.message : '仮想資金を取得できませんでした') })
       .finally(() => { if (alive) setFundsLoading(false) })

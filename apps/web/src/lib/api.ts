@@ -74,9 +74,8 @@ export const api = {
   overview: (origin: OriginFilter, sport?: Sport, fresh = false) => req<Overview>(`/performance/overview${qs({ sport, origin })}`, fresh || Date.now() < readFreshUntil ? { headers: { 'X-ROI-Cache-Bypass': '1' } } : undefined),
   breakdown: (origin: OriginFilter) => req<Breakdown>(`/performance/breakdown${qs({ origin })}`),
   rankComparison: (origin: OriginFilter) => req<RankComparison>(`/performance/rank-comparison${qs({ origin })}`),
-  experimentalPerformance: () => req<ExperimentalPerformance>('/performance/experimental'),
   experimentalBets: () => req<ExperimentalBet[]>('/bets/experimental'),
-  historicalTrifectaPerformance: () => req<HistoricalTrifectaPerformance>('/performance/historical-trifecta-experiment'),
+  historicalBets: () => req<ExperimentalBet[]>('/bets/historical-trifecta-experiment'),
   models: () => req<ModelInfo[]>('/models'),
   promote: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/promote`, { method: 'POST' }),
   promoteInitialBaseline: (id: string, validationFingerprint: string) =>
@@ -89,9 +88,10 @@ export const api = {
 
 export interface ExperimentalBet {
   id: string
-  recordKind: 'experimental_paper'
-  experimentKey: 'boat-trifecta-small-sample-v1'
-  decisionId: string
+  /** Source table of a trifecta ticket; every source counts as an ordinary virtual purchase. */
+  recordKind: 'experimental_paper' | 'historical_base'
+  experimentKey?: string
+  decisionId?: string
   raceId: string
   sport: 'boat'
   betType: 'trifecta'
@@ -114,64 +114,6 @@ export interface ExperimentalBet {
   raceDate: string
   finalOdds?: number | null
   officialSelection: string | null
-}
-
-export interface ExperimentalPerformance {
-  experimentKey: 'boat-trifecta-small-sample-v1'
-  state: 'unavailable' | 'ready'
-  model: { id: string; status: 'candidate' | 'experimental'; artifactSha256: string; schemaVersion: string; trainedAt: string } | null
-  bankroll: { initial: 100000; available: number }
-  metrics: { races: number; bets: number; stake: number; payout: number; profit: number; roi: number | null }
-  comparison?: {
-    actual: { tickets: number; stake: number; payout: number; profit: number; roi: number | null }
-    fixed100: { tickets: number; stake: number; payout: number; profit: number; roi: number | null }
-    settledRaceCount: number; pendingRaceCount: number; excludedRaceCount: number
-  }
-  decisions: ExperimentalDecision[]
-  sizing: { method: 'fractional-kelly-portfolio'; minimumTicketStake?: 100; stakeUnit?: 100; perRaceCombinedCap: 1000; dailyCap: null; balanceGuard: 'nonnegative-virtual-balance' }
-}
-
-export interface ExperimentalDecision {
-  raceId: string
-  raceDate: string
-  raceNo: number
-  venueName: string | null
-  outcome: 'placed' | 'abstained' | 'void'
-  reason: string | null
-  stake: number
-  modelId: string
-  decidedAt: string
-  probability: number | null
-  odds: number | null
-  uncertainty: number | null
-  expectedRoi: number | null
-}
-
-export interface HistoricalTrifectaPerformance {
-  model: {
-    experimentKey: 'boat-trifecta-historical-base-v1'
-    id: 'boat-trifecta-historical-base-20261014'
-    immutableVersion: string
-    sourceArtifactSha256: string
-    featureSchemaVersion: string
-    featureColumns: string[]
-    fitCount: number
-    trainingRaces: number
-    validationRaces: number
-    testRaces: number
-    candidateKind: string
-    evaluationQualified: false
-    promotionEligible: false
-    pointInTimeEvidenceComplete: false
-    profitabilityProven: false
-    exhibitionFeaturesUsed: false
-    selectionProfile: string
-  }
-  summary: {
-    decisions: number | null; placed_races: number | null; abstained_races: number | null
-    bets: number; total_stake: number; settled_profit: number; open_bets: number; available_balance: number
-  }
-  decisions: Array<{ id: string; race_id: string; race_date: string; venue_id: string; race_no: number; decision_at: string; outcome: 'placed' | 'abstained'; reason: string | null; total_stake: number; snapshot: any }>
 }
 
 export interface RankComparison {

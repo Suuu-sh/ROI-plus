@@ -30,8 +30,7 @@ const race = {
 
 describe('BetSheet', () => {
   it('submits multiple selections with independent positive integer yen stakes', async () => {
-    vi.mocked(api.overview).mockResolvedValue({ initialBankroll: 1000 } as never)
-    vi.mocked(api.bets).mockResolvedValue([])
+    vi.mocked(api.overview).mockResolvedValue({ initialBankroll: 1000, bankroll: 1000, openStake: 0 } as never)
     vi.mocked(api.placeBetBatch).mockResolvedValue({ groupId: 'group', bets: [{}, {}] } as never)
     const onPlaced = vi.fn()
     render(<BetSheet race={race} entry={race.entries[0]} onClose={() => {}} onPlaced={onPlaced} />)
@@ -48,13 +47,13 @@ describe('BetSheet', () => {
       selections: [{ selection: '1', stake: 125 }, { selection: '2', stake: 51 }],
     })))
     expect(api.overview).toHaveBeenCalledWith('all')
-    expect(api.bets).toHaveBeenCalledWith('all')
+    expect(api.bets).not.toHaveBeenCalled()
     expect(onPlaced).toHaveBeenCalledWith(2)
   })
 
   it('blocks the full batch when total stakes exceed available virtual funds', async () => {
-    vi.mocked(api.overview).mockResolvedValue({ initialBankroll: 100 } as never)
-    vi.mocked(api.bets).mockResolvedValue([])
+    // Shared ledger: ¥400 settled bankroll with ¥300 still open in any ledger leaves ¥100.
+    vi.mocked(api.overview).mockResolvedValue({ initialBankroll: 1000, bankroll: 400, openStake: 300 } as never)
     render(<BetSheet race={race} entry={race.entries[0]} onClose={() => {}} onPlaced={() => {}} />)
 
     await screen.findByText('¥100')

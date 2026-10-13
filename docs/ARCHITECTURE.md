@@ -16,7 +16,7 @@
 
 ## システム構成
 
-競技ページの主表示は保存済み仮想購入をレースごとにまとめる購入レビューである。ボートと運用ボードの履歴表示は `GET /api/bets?sport=&origin=` と `GET /api/bets/experimental` を購入時刻の新しい順に統合し、実験券には通常成績対象外の印を付ける。実験台帳・残高・通常成績の集計は統合せず、sample表示では実験券を混在させない。賭け記録は購入時点で表示し、結果・払戻を照合する詳細だけを開いた時に `GET /api/races/:id` で取得する。購入時の確率・オッズ・期待収益率は bet の保存値を表示し、後日の予測や結果で置き換えない。着順・払戻が欠ける場合は欠損として示し、単一レースの結果から因果説明を生成しない。サンプル購入には出所バッジとサンプル結果の注記を表示する。日付フィルターは購入一覧とレース探索に共通し、「レースを調べる」内にランキング・出走表を残す。購入候補表示に結果を混入させない。
+競技ページの主表示は保存済み仮想購入をレースごとにまとめる購入レビューである。ボート・運用ボード・成績の履歴表示は `GET /api/bets?sport=&origin=`、`GET /api/bets/experimental`、`GET /api/bets/historical-trifecta-experiment` を購入時刻の新しい順に統合し、いずれも通常の仮想購入として表示する（実験の印は付けない）。sample表示では実データ由来の三連単券を混在させない。賭け記録は購入時点で表示し、結果・払戻を照合する詳細だけを開いた時に `GET /api/races/:id` で取得する。購入時の確率・オッズ・期待収益率は bet の保存値を表示し、後日の予測や結果で置き換えない。着順・払戻が欠ける場合は欠損として示し、単一レースの結果から因果説明を生成しない。サンプル購入には出所バッジとサンプル結果の注記を表示する。日付フィルターは購入一覧とレース探索に共通し、「レースを調べる」内にランキング・出走表を残す。購入候補表示に結果を混入させない。
 
 ```text
 ブラウザー
@@ -52,7 +52,7 @@ GitHub Actions / ローカル Python (ml/)
 
 `GET /api/bets` は購入時の情報を変更せず、未精算購入に限り `resultWaitReason` を返す。理由はレース状態・発走時刻、同じ出所の出走数と結果数（重複・出走外の結果も確認）、1着結果とその払戻、および精算状態から導く。区分は発走前、公式結果未取得、払戻未取得、結果収集失敗/一部失敗の記録あり、精算待ち、状況不明、中止、失格、欠場。失敗記録は当該レースの欠損原因を証明しない。結果収集の試行・成功時刻は、実データのボートで対象日と `mbrace-boat` ソースが一致する場合だけ返す（試行は開始、成功は完了時刻。未来時刻の記録は除外）。他の競技・サンプルには公式結果の収集状況を推定しない。サンプル購入は「サンプル（公式結果ではありません）」と明示し、公式結果待ちと混同しない。
 
-Experimental T-60 三連単の置かれた券は別テーブル `experimental_paper_bets` に保存され、通常の `/api/bets`・損益集計・残高には含めない。各券の仮想購入額は100円以上かつ100円単位で、Kelly予算が100円に届かない判断は購入せず見送る。旧実装が作成した条件外の未精算券は `experimental_paper_bet_reconciliations` に原記録を残したまま無効化・返金し、精算と実験成績から除外する。券単位の参照は `GET /api/bets/experimental` を使う。この API は固定 experiment の placed ticket のみ（実データのボートに限定、最大500件、新しい順）を明示的な `recordKind: 'experimental_paper'` として返し、棄権判断は返さない。無効化した旧券は監査用に `status: 'void'` と返す。`dataOrigin: 'real'` は実データ由来を示すだけで実購入ではなく、通常履歴とも分離した仮想実験の記録である。応答は `private, no-store` で、通常履歴の短期 read cache を通らない。
+Experimental T-60 三連単の置かれた券は別テーブル `experimental_paper_bets` に保存され、通常の `/api/bets` には含めない（成績・残高への合算は下記「仮想購入台帳の統合」）。各券の仮想購入額は100円以上かつ100円単位で、Kelly予算が100円に届かない判断は購入せず見送る。旧実装が作成した条件外の未精算券は `experimental_paper_bet_reconciliations` に原記録を残したまま無効化・返金し、精算と実験成績から除外する。券単位の参照は `GET /api/bets/experimental` を使う。この API は固定 experiment の placed ticket のみ（実データのボートに限定、最大500件、新しい順）を明示的な `recordKind: 'experimental_paper'` として返し、棄権判断は返さない。無効化した旧券は監査用に `status: 'void'` と返す。`dataOrigin: 'real'` は実データ由来を示すだけで実購入ではなく、通常履歴とも分離した仮想実験の記録である。応答は `private, no-store` で、通常履歴の短期 read cache を通らない。
 
 `GET /api/performance/experimental` は保存済み実験券の結果から、柔軟購入額と「同じ券を各100円」とした固定額の事後比較を返す。新しい台帳・購入判断・bankroll更新は行わない。比較はレース単位で全券が won/lost に確定した場合だけ同じ券集合を使い、openは保留、void・reconciliation・100円単位で払戻復元できない券は除外する。さらに実験の現行レース上限（10券・合計1,000円）を超える記録は比較から除く。固定額払戻は精算済みの実験払戻を実購入額の100円単位数で割って復元するため、同額予算比較や独立戦略の成績を意味しない。
 
@@ -224,6 +224,16 @@ npm -w apps/web run deploy
 `reset-normal-purchase-history.yml` はユーザーの明示承認を受けた通常購入・成績・残高のリセット専用operatorである。exact source SHAと `RESET NORMAL PURCHASE HISTORY ONLY` の確認を必須にし、INGEST_TOKEN認証のsnapshot routeで通常 `bets` / `daily_summaries` と保護対象（通常decision監査、実験購入・decision・bankroll）を一貫したD1 batchで取得する。秘密設定は取得せず、初期資金値だけを扱う。リセット前にアクセス制御されたActions artifactへsnapshotを30日保存し、upload成功後だけreset routeを呼ぶ。
 
 resetはsnapshot全行と初期資金を同じatomic D1 batchの先頭で照合し、購入・精算などの変更があればSQLエラーで全処理をrollbackする。削除は通常 `bets` / `daily_summaries` だけで、初期資金設定、通常decision監査、実験台帳・残高、レース・結果・予測・出所は変更しない。通常残高・成績はbetsから計算されるため初期資金／ゼロに戻る。実行後に保護対象の行数・SHA256を比較する。バックアップからの復元は自動化せず、artifactのJSON内の元列・元値を用いて別途人手レビューと明示承認を行う。SPECは変更していない。
+
+### 仮想購入台帳の統合
+
+ユーザー判断により、T-60三連単実験と過去データBASE三連単実験は終了扱いとし、両台帳の券を通常の仮想購入とみなす。テーブル・購入判断・精算経路は変更せず（migrationなし、既存D1の行も移動しない）、`apps/api/src/services/unifiedLedger.ts` の `unifiedLedgerSql` が通常 `bets`（data repair隔離を除く）、`experimental_paper_bets`（placed判断のみ、reconciliation済み券は返金済みの `void`）、`historical_trifecta_experiment_bets` を1つの読み取りビューとして結合する。
+
+- `GET /api/performance/overview` は3台帳を合算した残高・確定損益・回収率・的中率・最大DD・資産推移を返し、未確定券の購入額合計 `openStake` を追加で返す。三連単券は実データ・ボートのみなので、`origin=sample` / `sport=horse` では含まれない。
+- `GET /api/performance/breakdown` の競技別・月別・期待値帯別・モデル別・オッズ変動も同じビューを集計する（校正は従来どおり予測テーブル）。`/performance/rank-comparison` は通常のticket group専用のまま。
+- 仮想資金は初期資金（`settings.initial_bankroll`）1つを共有する。`unifiedAvailableBankrollSql` = 初期資金 + 全台帳の won/lost 損益 − 全台帳の open 購入額。手動・自動の通常購入ガード、T-60/BASE の購入額sizingと残高更新のガード（各台帳の `available_balance` 条件に加えて共有残高 ≥ 購入額）がこの値を使う。各台帳の `available_balance` は CHECK 制約を守る下限として残る。
+- Webは三連単モデル実験・過去データBASEの専用表示をなくし、購入シートの利用可能資金は overview の `bankroll − openStake` を使う。`GET /api/performance/experimental` / `historical-trifecta-experiment` と各台帳の bankroll 行は監査用に残すが画面では使わない。
+- `reset-normal-purchase-history.yml` は従来どおり通常 `bets` / `daily_summaries` だけを消す。三連単台帳の券は消えないため、実行後も統合成績・共有残高にはそれらが残る。
 
 ### 過去データBASE三連単の専用仮想実験（2026-10-14）
 

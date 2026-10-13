@@ -79,6 +79,8 @@ export interface RankComparison {
 export interface Overview {
   initialBankroll: number; bankroll: number; totalProfit: number; roi: number | null; // 回収率 = payout/stake
   betCount: number; settledCount: number; hitRate: number | null; maxDrawdown: number; maxDrawdownPct: number;
+  /** Stake of every still-open virtual ticket in the shared ledger. */
+  openStake?: number;
   equityCurve: { at: string; bankroll: number }[];
 }
 

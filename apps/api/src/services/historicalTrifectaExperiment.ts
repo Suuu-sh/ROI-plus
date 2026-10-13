@@ -4,6 +4,7 @@ import { boatArchiveEvidenceValid } from './boatArchiveEvidence.js'
 import { predictHistoricalTrifecta, historicalTrifectaModelMetadata, HISTORICAL_TRIFECTA_EXPERIMENT_KEY, HISTORICAL_TRIFECTA_MODEL_ID } from './historicalTrifectaModel.js'
 import { primaryPaperTiming } from './paperTiming.js'
 import { sizeExperimentalPortfolioResult } from './experimentalSizing.js'
+import { unifiedAvailableBankrollSql } from './unifiedLedger.js'
 import { HISTORICAL_ARCHIVE_SCHEMA, type HistoricalObservation } from './historicalTrifectaArchive.js'
 
 const CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1'
@@ -91,7 +92,8 @@ export async function historicalTrifectaExperimentDecision(db: Db, decisionAt = 
     }
     const oddsBySelection = new Map((odds?.odds ?? []).map((o: any) => [o.selection, Number(o.odds)]))
     const tickets = reason ? [] : predictions.map(p => ({ selection: p.selection, probability: p.probability, probStd: p.probStd, odds: Number(oddsBySelection.get(p.selection)) }))
-    const bank = await first<any>(db, `SELECT available_balance FROM historical_trifecta_experiment_bankroll WHERE experiment_key=?`, HISTORICAL_TRIFECTA_EXPERIMENT_KEY)
+    // Size against the shared virtual bankroll; the per-ledger balance stays as a lower bound for its CHECK.
+    const bank = await first<any>(db, `SELECT MIN(available_balance,${unifiedAvailableBankrollSql}) available_balance FROM historical_trifecta_experiment_bankroll WHERE experiment_key=?`, HISTORICAL_TRIFECTA_EXPERIMENT_KEY)
     const sizing = reason ? { stakes: [], abstentionReason: null } : sizeExperimentalPortfolioResult(tickets, Number(bank?.available_balance ?? 0))
     const totalStake = sizing.stakes.reduce((s, b) => s + b.stake, 0)
     const abstentionReason = reason ?? sizing.abstentionReason ?? 'no_conservative_positive_edge'
@@ -114,9 +116,9 @@ export async function historicalTrifectaExperimentDecision(db: Db, decisionAt = 
     if (!fresh) continue
     const statements = []
     if (totalStake) statements.push(db.prepare(`UPDATE historical_trifecta_experiment_bankroll SET available_balance=available_balance-?,updated_at=?
-      WHERE experiment_key=? AND available_balance>=? AND NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_decisions WHERE race_id=?)
+      WHERE experiment_key=? AND available_balance>=? AND ${unifiedAvailableBankrollSql}>=? AND NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_decisions WHERE race_id=?)
       AND EXISTS(SELECT 1 FROM races WHERE id=? AND status='scheduled' AND betting_cutoff_at=?)`)
-      .bind(totalStake, committed, HISTORICAL_TRIFECTA_EXPERIMENT_KEY, totalStake, race.id, race.id, race.betting_cutoff_at))
+      .bind(totalStake, committed, HISTORICAL_TRIFECTA_EXPERIMENT_KEY, totalStake, totalStake, race.id, race.id, race.betting_cutoff_at))
     statements.push(db.prepare(`INSERT INTO historical_trifecta_experiment_decisions
       (id,experiment_key,race_id,model_id,capture_archive_id,decision_at,outcome,reason,total_stake,snapshot_json)
       SELECT ?,?,?,?,?,?,?,?,?,? WHERE ${totalStake ? 'changes()>0 AND ' : ''}NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_decisions WHERE race_id=?)
@@ -225,7 +227,19 @@ export async function historicalTrifectaExperimentPerformance(db: Db) {
     FROM historical_trifecta_experiment_decisions d JOIN races r ON r.id=d.race_id ORDER BY d.decision_at DESC LIMIT 20`)
   return { model: historicalTrifectaModelMetadata(), summary, decisions: decisions.map(d => ({ ...d, snapshot: parseFeatures(d.snapshot_json) })) }
 }
+/** Ticket rows in the same shape as the other virtual purchase history endpoints. */
 export async function historicalTrifectaExperimentBets(db: Db) {
-  return all<any>(db, `SELECT b.*,r.race_date,r.venue_id,r.race_no FROM historical_trifecta_experiment_bets b
-    JOIN races r ON r.id=b.race_id ORDER BY b.placed_at DESC,b.id LIMIT 100`)
+  const rows = await all<any>(db, `SELECT b.*,r.race_date,r.race_no,v.name venue_name,
+    (SELECT group_concat(number,'-') FROM (SELECT x.number FROM results x WHERE x.race_id=b.race_id AND x.data_origin='real' AND x.finish_order BETWEEN 1 AND 3 ORDER BY x.finish_order LIMIT 3)) official_selection
+    FROM historical_trifecta_experiment_bets b JOIN races r ON r.id=b.race_id LEFT JOIN venues v ON v.id=r.venue_id
+    ORDER BY julianday(b.placed_at) DESC,b.id DESC LIMIT 500`)
+  return rows.map(row => ({
+    id: row.id, recordKind: 'historical_base', raceId: row.race_id, sport: 'boat', betType: 'trifecta', selection: row.selection,
+    stake: Number(row.stake), predictedProb: Number(row.probability), probabilityStd: Number(row.prob_std), oddsAtBet: Number(row.odds_at_bet),
+    expectedRoi: Number(row.expected_roi), modelId: row.model_id, placedAt: row.placed_at, status: row.status,
+    payout: row.payout == null ? null : Number(row.payout), profit: row.profit == null ? null : Number(row.profit), settledAt: row.settled_at ?? null,
+    finalOdds: row.final_odds == null ? null : Number(row.final_odds), dataOrigin: 'real', venueName: row.venue_name ?? null,
+    raceNo: Number(row.race_no), raceDate: row.race_date,
+    officialSelection: typeof row.official_selection === 'string' && row.official_selection.split('-').length === 3 ? row.official_selection : null,
+  }))
 }

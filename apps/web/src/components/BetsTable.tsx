@@ -60,7 +60,7 @@ export function BetsTable({ bets, limit }: { bets: Bet[]; limit?: number }) {
                   <div className="mt-0.5 text-[10px] text-faint">{b.oddsCapturedAt ? `取得 ${dateTime(b.oddsCapturedAt)}` : '取得時刻不明'}</div>
                 </td>
                 <td className={`num px-2 py-2.5 text-right ${tone(b.expectedRoi)}`}>{signedPct(b.expectedRoi)}</td>
-                <td className="px-2 py-2.5"><div className="flex gap-1"><EdgeBadge edge={b.edgeLabel} compact />{b.dataOrigin === 'sample' && <OriginBadge origin="sample" />}</div></td>
+                <td className="px-2 py-2.5"><div className="flex gap-1">{'recordKind' in b && b.recordKind ? <span className="text-xs text-faint">—</span> : <EdgeBadge edge={b.edgeLabel} compact />}{b.dataOrigin === 'sample' && <OriginBadge origin="sample" />}</div></td>
                 <td className="px-2 py-2.5 text-xs">
                   {b.status === 'open' && b.dataOrigin === 'sample' ? <span className="rounded bg-raised px-1.5 py-0.5 text-muted">{resultWaitLabel.sampledata}</span> : null}
                   {b.status === 'open' && b.dataOrigin === 'real' ? <>

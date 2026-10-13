@@ -7,6 +7,7 @@ import worker, { app, settleOpen, autoBet, autoBetWithReport, recordPaperAbstent
 import { D1SqliteAdapter } from './d1-adapter.js';
 import { payoutYen, settleValues } from '../src/services/logic.js';
 import { readWriteBudget, reserveWriteBudget } from '../src/services/writeBudget.js';
+import { unifiedAvailableBankrollSql } from '../src/services/unifiedLedger.js';
 
 const root=resolve(import.meta.dirname,'../../..');
 let sqlite: Sqlite.Database, DB: D1SqliteAdapter;
@@ -1286,7 +1287,7 @@ it('keeps the experimental trifecta model and performance ledger separate from n
  const normal=await app.request('/api/performance/overview',{},env());expect(((await normal.json()) as any).betCount).toBe(normalBefore);
 });
 
-it('lists placed experimental paper tickets separately from ordinary bet history and metrics',async()=>{
+it('lists placed experimental paper tickets through their own endpoint, apart from ordinary bet rows',async()=>{
  const placedRace='boat-20990101-99-41',abstainedRace='boat-20990101-99-42',voidRace='boat-20990101-99-43',modelId='boat-trifecta-history-fixture',artifactSha='a'.repeat(64);
  addValidatedTrifectaFixture(placedRace,'history-normal-fixture');
  addValidatedTrifectaFixture(abstainedRace,'history-abstained-fixture');
@@ -1349,6 +1350,48 @@ it('lists placed experimental paper tickets separately from ordinary bet history
  expect(experimentBody.metrics).toMatchObject({races:1,bets:1,stake:100,payout:500,profit:400});
  expect(experimentBody.decisions.find((row:any)=>row.raceId===placedRace)).toMatchObject({outcome:'placed',stake:100,probability:0.2});
  expect(experimentBody.decisions.find((row:any)=>row.raceId===voidRace)).toMatchObject({outcome:'void',reason:'invalid_stake_unit',stake:0,probability:null,odds:null});
+});
+
+it('counts former experiment tickets as ordinary virtual purchases with one shared bankroll',async()=>{
+ const raceId='boat-20990101-99-61',histRace='boat-20990101-99-62',modelId='boat-trifecta-unified-fixture',artifactSha='9'.repeat(64);
+ addValidatedTrifectaFixture(raceId,'unified-normal-fixture');
+ addValidatedTrifectaFixture(histRace,'unified-hist-normal-fixture');
+ const overview=async()=>(await (await app.request('/api/performance/overview?origin=real&sport=boat',{},env())).json()) as any;
+ const available=()=>Number((sqlite.prepare(`SELECT ${unifiedAvailableBankrollSql} v`).get() as any).v);
+ const before=await overview(),availableBefore=available();
+ sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
+  VALUES(?,'candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,'{}','{}',?)`)
+  .run(modelId,artifactSha,'b'.repeat(64),'c'.repeat(64),jstIso(Date.now()-60_000),jstIso());
+ const placedAt=jstIso(Date.now()-3_000),settledAt=jstIso(Date.now()-1_000);
+ sqlite.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,sizing_method,snapshot_json)
+  VALUES('unified-decision','boat-trifecta-small-sample-v1',?,?,?,'placed',700,'fractional-kelly-portfolio','{}')`).run(raceId,modelId,placedAt);
+ const ticket=sqlite.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,payout,profit,settled_at,data_origin)
+  VALUES(?,'unified-decision',?,?,?,?,0.1,0.01,20,1,?,?,?,?,?,'real')`);
+ ticket.run('unified-won',raceId,modelId,'1-2-3',100,placedAt,'won',500,400,settledAt);
+ ticket.run('unified-open',raceId,modelId,'1-3-2',300,placedAt,'open',null,null,null);
+ ticket.run('unified-refunded',raceId,modelId,'2-1-3',300,placedAt,'open',null,null,null);
+ sqlite.prepare(`INSERT INTO experimental_paper_bet_reconciliations(bet_id,experiment_key,original_stake,refund_amount,repair_reason,repaired_at,refund_applied_at)
+  VALUES('unified-refunded','boat-trifecta-small-sample-v1',300,300,'invalid_stake_unit',?,?)`).run(settledAt,settledAt);
+ sqlite.prepare(`INSERT INTO historical_trifecta_experiment_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,snapshot_json)
+  VALUES('unified-hist-decision','boat-trifecta-historical-base-v1',?,'boat-trifecta-historical-base-20261014',?,'placed',200,'{}')`).run(histRace,placedAt);
+ sqlite.prepare(`INSERT INTO historical_trifecta_experiment_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,payout,profit,settled_at,data_origin)
+  VALUES('unified-hist-lost','unified-hist-decision',?,'boat-trifecta-historical-base-20261014','4-5-6',200,0.05,0.01,30,0.5,?,'lost',0,-200,?,'real')`).run(histRace,placedAt,settledAt);
+
+ const after=await overview();
+ expect(after.betCount-before.betCount).toBe(4);
+ expect(after.settledCount-before.settledCount).toBe(3);
+ expect(after.bankroll-before.bankroll).toBe(200);
+ expect(after.openStake-before.openStake).toBe(300);
+ expect(after.equityCurve.length-before.equityCurve.length).toBe(3);
+ // One bankroll: settled profit (+400 −200) and the open stake (−300) all reduce what any purchase can use; the refund is neutral.
+ expect(available()-availableBefore).toBe(-100);
+ const breakdown=await (await app.request('/api/performance/breakdown?origin=real',{},env())).json() as any;
+ expect(breakdown.byModel).toEqual(expect.arrayContaining([
+  expect.objectContaining({modelId,bets:1,stake:100,payout:500}),
+  expect.objectContaining({modelId:'boat-trifecta-historical-base-20261014',bets:1,stake:200,payout:0}),
+ ])); const baseRows=await (await app.request('/api/bets/historical-trifecta-experiment',{},env())).json() as any[];
+ expect(baseRows).toEqual([expect.objectContaining({id:'unified-hist-lost',recordKind:'historical_base',raceId:histRace,sport:'boat',betType:'trifecta',
+  selection:'4-5-6',stake:200,status:'lost',payout:0,profit:-200,settledAt,venueName:'Ticket fixture',raceNo:62,raceDate:'2099-01-01',dataOrigin:'real'})]);
 });
 
 it('settles only fully evidenced experimental trifecta outcomes and credits the separate bankroll',async()=>{
@@ -1444,6 +1487,14 @@ it('admits an experimental portfolio only with live-cutoff archive and full sour
  expect(sqlite.prepare('SELECT COUNT(*) n FROM experimental_paper_bets WHERE race_id=?').get(raceId)).toMatchObject({n:0});
  sqlite.prepare('DELETE FROM experimental_paper_decisions WHERE race_id=?').run(raceId);
  sqlite.prepare('UPDATE experimental_bankroll SET available_balance=100000 WHERE experiment_key=?').run('boat-trifecta-small-sample-v1');
+ // The ledger balance alone is not enough: sizing also uses the shared virtual bankroll across all purchases.
+ const sharedAvailable=Number((sqlite.prepare(`SELECT ${unifiedAvailableBankrollSql} v`).get() as any).v);
+ const initialSetting=sqlite.prepare("SELECT value FROM settings WHERE key='initial_bankroll'").get() as {value:string}|undefined;
+ const initial=Number(initialSetting?.value??100000);
+ sqlite.prepare("INSERT INTO settings(key,value) VALUES('initial_bankroll',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(initial-(sharedAvailable-535)));
+ expect(await experimentalPaperDecision(DB,at+1_000)).toMatchObject({evaluated:1,placedRaces:0,abstainedByReason:{minimum_virtual_stake_not_reached:1}});
+ sqlite.prepare('DELETE FROM experimental_paper_decisions WHERE race_id=?').run(raceId);
+ sqlite.prepare("INSERT INTO settings(key,value) VALUES('initial_bankroll',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(initial));
  const report=await experimentalPaperDecision(DB,at+1_000);
  expect(report).toMatchObject({evaluated:1,placedRaces:1});
  const result:any=sqlite.prepare('SELECT total_stake FROM experimental_paper_decisions WHERE race_id=?').get(raceId);
