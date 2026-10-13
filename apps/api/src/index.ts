@@ -53,6 +53,12 @@ async function hasVerifiedCapsizeNoRefund(db: Db, race: {id:string;race_date:str
     && Array.isArray(evidence?.terminalEntries) && evidence.terminalEntries.some((x:any)=>x?.number===number&&x?.finishCode==='転覆');
 }
 const app = new Hono<Ctx>().basePath('/api');
+// Static deployment diagnostic only: no build SHA, account data, or secrets.
+// Register first so it also marks CORS, proxy-guard, auth, and cache responses.
+app.use('*', async (c, next) => {
+  await next();
+  c.header('X-ROI-API-Revision', 'experimental-paper-v1');
+});
 app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization','X-ROI-Cache-Bypass'], exposeHeaders: ['X-ROI-Read-Cache'] }));
 // 本番では閲覧系 API を、Cloudflare Access で保護された画面 Worker（Service Binding）経由に限定する。
 // PROXY_TOKEN 未設定（ローカル開発・テスト）では制限しない。ingest は従来どおり INGEST_TOKEN で認証。
