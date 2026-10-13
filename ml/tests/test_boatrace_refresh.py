@@ -109,3 +109,82 @@ def test_collect_boat_propagates_only_verified_b_file_arrival_metadata(tmp_path,
     assert store["entries"][0]["available_at"] == "2026-10-09T06:00:00+00:00"
     assert store["entries"][0]["source_available_at"] == "2026-10-09T06:00:00+00:00"
     assert store["entries"][0]["source_sha256"] == "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("target_date", "now", "verified_b", "b_has_cutoff", "k_content", "k_mode", "pending"),
+    [
+        ("2026-10-13", "2026-10-13T00:00:00+00:00", True, True,
+         "2026年10月13日\n", "empty", True),
+        ("2026-10-13", "2026-10-13T01:30:00+00:00", True, True,
+         "2026年10月13日\n", "empty", False),
+        ("2026-10-12", "2026-10-13T00:00:00+00:00", True, True,
+         "2026年10月12日\n", "empty", False),
+        ("2026-10-13", "2026-10-13T00:00:00+00:00", False, True,
+         "2026年10月13日\n", "empty", False),
+        ("2026-10-13", "2026-10-13T00:00:00+00:00", True, False,
+         "2026年10月13日\\n", "empty", False),
+        ("2026-10-13", "2026-10-13T00:00:00+00:00", True, True,
+         "unlinked partial result", "partial", False),
+        ("2026-10-13", "2026-10-13T00:00:00+00:00", True, True,
+         "2026年10月12日\n", "empty", False),
+        ("2026-10-13", "2026-10-13T00:00:00+00:00", True, True,
+         "malformed K source", "empty", False),
+    ],
+)
+def test_empty_k_results_are_pending_only_before_verified_same_day_first_cutoff(
+        tmp_path, monkeypatch, target_date, now, verified_b, b_has_cutoff, k_content, k_mode, pending):
+    monkeypatch.chdir(tmp_path)
+    cache = Path("data/raw/boatrace")
+    cache.mkdir(parents=True)
+    day = date.fromisoformat(target_date)
+    b_path = cache / f"b{day:%y%m%d}.lzh"
+    k_path = cache / f"k{day:%y%m%d}.lzh"
+    b_path.write_bytes(b"cached B")
+    k_path.write_bytes(b"old K cache")
+    store = {key: [] for key in ("races", "entries", "results", "payouts", "odds_snapshots",
+                                  "predictions", "models", "collection_runs")}
+    monkeypatch.setattr(cli, "load_rows", lambda: store)
+    monkeypatch.setattr(cli, "save_rows", lambda _value: None)
+    monkeypatch.setattr(cli, "_now", lambda: now)
+    monkeypatch.setattr(boatrace, "read_lzh", lambda path:
+                        "B schedule" if Path(path).name.startswith("b") else k_content)
+    monkeypatch.setattr(boatrace, "read_source_file_metadata", lambda _path, kind, _day:
+                        {"fetchedAt": f"{target_date}T00:00:00+00:00",
+                         "targetDate": target_date, "sourceSha256": "a" * 64}
+                        if kind == "B" and verified_b else None)
+
+    def fetch(kind, _day, **kwargs):
+        if kind == "K" and kwargs.get("refresh"):
+            kwargs["validator"](k_content)
+        return b_path if kind == "B" else k_path
+
+    monkeypatch.setattr(boatrace, "fetch_boatrace_file", fetch)
+    race_id = f"boat-{target_date.replace('-', '')}-01-01"
+    monkeypatch.setattr("edgelab.parsers.boatrace_b.parse_b",
+                        lambda _content, race_date: {"races": [{
+                            "id": race_id, "sport": "boat", "race_date": race_date,
+                            "post_time": (f"{race_date}T10:30:00+09:00" if b_has_cutoff else None),
+                            "status": "scheduled", "data_origin": "real"}],
+                            "entries": []})
+
+    def parse_k(_content, race_date):
+        results = ([{"race_id": "unlinked-race", "finish_order": 1, "data_origin": "real"}]
+                   if k_mode == "partial" else [])
+        return {"races": [], "entries": [], "results": results, "payouts": []}
+
+    monkeypatch.setattr("edgelab.parsers.boatrace_k.parse_k", parse_k)
+
+    cli.collect_boat(target_date, target_date, refresh_k_dates={target_date})
+
+    run = store["collection_runs"][-1]
+    assert run["status"] == "partial"
+    assert k_path.read_bytes() == b"old K cache"
+    assert store["results"] == []
+    assert store["payouts"] == []
+    if pending:
+        assert run["reason"] == cli.EXPECTED_PENDING_K_RESULTS_REASON
+        assert run["error"] is None
+    else:
+        assert run["reason"] is None
+        assert "no valid same-day race results" in run["error"]
