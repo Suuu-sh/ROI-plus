@@ -125,6 +125,23 @@ def test_partial_exhibition_capture_is_rejected_as_not_training_evidence():
     assert not store["prerace_capture_odds"] and not store["prerace_observations"]
 
 
+def test_missing_weather_timestamp_exposes_only_bounded_safe_diagnostic():
+    wrapper = _archive("2026-10-11T15:17:03+09:00", 6.78)
+    archive = json.loads(wrapper["archiveJson"])
+    archive["beforeinfo"]["weatherObservedAt"] = None
+    archive["beforeinfo"]["weatherObservationLabel"] = "11R時点\nhttps://private.example/secret"
+    wrapper["archiveJson"] = json.dumps(archive, ensure_ascii=False, separators=(",", ":"))
+    wrapper["archiveSha256"] = hashlib.sha256(wrapper["archiveJson"].encode()).hexdigest()
+    result = import_capture_archives(_store(), [_page(wrapper)], DAY)
+    assert result["exclusionCounts"] == {"weather_observation_missing": 1}
+    assert result["weatherDiagnostics"] == [{
+        "reason": "weather_observation_missing",
+        "weatherObservationLabel": None,
+        "capturedAt": "2026-10-11T15:17:00+09:00",
+    }]
+    assert "private.example" not in json.dumps(result)
+
+
 def test_existing_earlier_cutoff_observation_survives_later_archive_import():
     store = _store()
     store["races"][0].update({"betting_cutoff_at": "2026-10-11T15:19:00+09:00",

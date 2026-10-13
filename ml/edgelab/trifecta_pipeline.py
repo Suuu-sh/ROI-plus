@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -74,6 +75,7 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
                     "archiveDates": 0, "importedArchives": 0, "excludedArchives": 0,
                     "archiveExclusionCounts": {},
                     "archiveExclusionCountsByDate": {},
+                    "weatherDiagnostics": [],
                     "training": {"status": "not_attempted"}, "promotion": "not_performed"}
     day = start
     while day <= end:
@@ -87,6 +89,28 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
         report["archiveExclusionCountsByDate"][day_text] = safe_counts
         for reason, count in safe_counts.items():
             report["archiveExclusionCounts"][reason] = report["archiveExclusionCounts"].get(reason, 0) + count
+        diagnostics = imported.get("weatherDiagnostics")
+        if isinstance(diagnostics, list):
+            for item in diagnostics:
+                if not isinstance(item, dict) or item.get("reason") != "weather_observation_missing":
+                    continue
+                label = item.get("weatherObservationLabel")
+                label = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", label) if isinstance(label, str) else ""
+                label = "".join(label.split())
+                if not re.fullmatch(r"(?:\d{1,2}:\d{2}現在|\d{1,2}R時点)", label):
+                    label = None
+                captured_at = item.get("capturedAt")
+                if not isinstance(captured_at, str) or not re.fullmatch(
+                        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+                        captured_at):
+                    captured_at = None
+                report["weatherDiagnostics"].append({
+                    "reason": "weather_observation_missing",
+                    "weatherObservationLabel": label[:32] if label else None,
+                    "capturedAt": captured_at[:40] if captured_at else None,
+                })
+                if len(report["weatherDiagnostics"]) >= 32:
+                    break
         day += timedelta(days=1)
     if report["importedArchives"]:
         save_rows(rows, store_path)
@@ -162,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
                     "local_pipeline_error")
         result = {"schema": "trifecta-candidate-pipeline-v1", "training": {"status": "not_attempted"},
                   "promotion": "not_performed", "archiveExclusionCounts": {},
-                  "archiveExclusionCountsByDate": {}, "error": category}
+                  "archiveExclusionCountsByDate": {}, "weatherDiagnostics": [], "error": category}
         target = Path(args.report).with_name("trifecta-pipeline-summary.json")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")

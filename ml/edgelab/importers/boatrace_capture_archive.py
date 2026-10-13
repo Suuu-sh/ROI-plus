@@ -295,6 +295,7 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
     exclusion_counts: dict[str, int] = {}
     imported = already = excluded = observation_count = odds_count = 0
     cutoff_evidence_updated = cutoff_evidence_preserved = 0
+    weather_diagnostics: list[dict[str, str | None]] = []
     manifests = _row_map(store["prerace_capture_archive_manifest"], ("id",))
     observations = _row_map(store["prerace_observations"], ("race_id", "kind", "entry_number", "fetched_at"))
     markets = _row_map(store["prerace_capture_odds"], ("race_id", "bet_type", "selection", "captured_at"))
@@ -320,6 +321,31 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
                 reason = str(exc) if str(exc) else type(exc).__name__
                 exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
                 excluded += 1
+                if reason == "weather_observation_missing" and len(weather_diagnostics) < 32:
+                    try:
+                        archive = json.loads(wrapper.get("archiveJson", ""))
+                        before = archive.get("beforeinfo") if isinstance(archive, dict) else None
+                        before = before if isinstance(before, dict) else {}
+                        label = before.get("weatherObservationLabel")
+                        label = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", label) if isinstance(label, str) else ""
+                        label = "".join(label.split())
+                        if not re.fullmatch(r"(?:\d{1,2}:\d{2}\s*現在|\d{1,2}R時点)", label):
+                            label = ""
+                        captured_at = before.get("capturedAt")
+                        if not isinstance(captured_at, str) or not re.fullmatch(
+                                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+                                captured_at):
+                            captured_at = ""
+                        weather_diagnostics.append({
+                            "reason": "weather_observation_missing",
+                            "weatherObservationLabel": label[:32] or None,
+                            "capturedAt": captured_at[:40] or None,
+                        })
+                    except (TypeError, ValueError):
+                        weather_diagnostics.append({
+                            "reason": "weather_observation_missing",
+                            "weatherObservationLabel": None, "capturedAt": None,
+                        })
                 continue
             if known:
                 if known.get("archive_sha256") == digest:
@@ -407,5 +433,6 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
         "observationsAdded": observation_count, "oddsRowsAdded": odds_count,
         "cutoffEvidenceUpdated": cutoff_evidence_updated,
         "cutoffEvidencePreserved": cutoff_evidence_preserved,
+        "weatherDiagnostics": weather_diagnostics,
         "oddsStorage": "local_only_prerace_capture_odds",
     }

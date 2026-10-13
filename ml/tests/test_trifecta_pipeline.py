@@ -30,7 +30,13 @@ class TrifectaPipelineTests(unittest.TestCase):
                                "limit": 25, "archives": [], "nextCursor": None}]
         importer.return_value = {"importedArchives": 0, "excludedArchives": 1,
                                  "exclusionCounts": {"race_identity_or_real_race_missing": 1,
-                                                     "https://private.example/token=do-not-report": 9}}
+                                                     "https://private.example/token=do-not-report": 9},
+                                 "weatherDiagnostics": [{
+                                     "reason": "weather_observation_missing",
+                                     "weatherObservationLabel": "11R時点",
+                                     "capturedAt": "2026-10-13T10:15:00+09:00",
+                                     "url": "https://private.example/not-report",
+                                 }, {"reason": "https://private.example/not-report"}]}
         with TemporaryDirectory() as directory:
             summary_path = Path(directory) / "trifecta-pipeline-summary.json"
             result = run(since="2026-10-13", until="2026-10-13",
@@ -42,8 +48,14 @@ class TrifectaPipelineTests(unittest.TestCase):
         })
         self.assertEqual(result["archiveExclusionCountsByDate"]["2026-10-13"], result["archiveExclusionCounts"])
         self.assertEqual(persisted["archiveExclusionCounts"], result["archiveExclusionCounts"])
+        self.assertEqual(result["weatherDiagnostics"], [{
+            "reason": "weather_observation_missing",
+            "weatherObservationLabel": "11R時点",
+            "capturedAt": "2026-10-13T10:15:00+09:00",
+        }])
         self.assertEqual(result["training"]["status"], "insufficient_pit_evidence")
         self.assertNotIn("private.example", json.dumps(result))
+        self.assertEqual(persisted["weatherDiagnostics"], result["weatherDiagnostics"])
 
 
 if __name__ == "__main__":
