@@ -330,7 +330,8 @@ def _read_json_response(url: str, token: str, *, limit: int, opener=urlopen) -> 
     return payload
 
 
-def fetch_date_coverage(day: date, *, base_url: str, token: str, opener=urlopen) -> dict[str, Any]:
+def fetch_date_coverage(day: date, *, base_url: str, token: str, opener=urlopen,
+                        expected_race_id: str | None = None) -> dict[str, Any]:
     """Read the independent expected-vs-stored archive coverage audit."""
     payload = _read_json_response(f"{base_url}/api/ingest/historical-trifecta-coverage?{urlencode({'date': day.isoformat()})}",
                                   token, limit=_MAX_INDEX_BYTES, opener=opener)
@@ -341,13 +342,29 @@ def fetch_date_coverage(day: date, *, base_url: str, token: str, opener=urlopen)
             or payload["complete"] + payload["incomplete"] + payload["missing"] + payload["failed"] > payload["expected"]
             or not isinstance(payload.get("entries"), list) or len(payload["entries"]) > 400):
         raise RuntimeError("invalid_archive_coverage")
-    return {"date": day.isoformat(), "expected": payload["expected"], "complete": payload["complete"],
+    result = {"date": day.isoformat(), "expected": payload["expected"], "complete": payload["complete"],
             "incomplete": payload["incomplete"], "missing": payload["missing"], "failed": payload["failed"],
             "truncated": bool(payload.get("truncated"))}
+    if expected_race_id is not None:
+        matching = [entry for entry in payload["entries"]
+                    if isinstance(entry, Mapping) and entry.get("raceId") == expected_race_id]
+        if len(matching) == 1:
+            entry = matching[0]
+            result["targetRace"] = {key: entry.get(key) for key in
+                                    ("raceId", "status", "archiveKey", "failureReason", "cutoffTrusted")}
+        elif len(matching) > 1:
+            result["targetRace"] = {"raceId": expected_race_id, "status": "invalid", "failureReason": "duplicate_coverage_identity"}
+        else:
+            result["targetRace"] = {"raceId": expected_race_id,
+                                    "status": "unknown" if result["truncated"] else "missing",
+                                    "failureReason": "coverage_truncated" if result["truncated"] else "race_not_in_coverage"}
+    return result
 
 
 def iter_date_archives(day: date, *, base_url: str, token: str,
-                       coverage: Counter[str], opener=urlopen) -> Iterator[tuple[dict[str, Any], bytes]]:
+                       coverage: Counter[str], opener=urlopen,
+                       expected_race_id: str | None = None,
+                       expected_model_id: str | None = None) -> Iterator[tuple[dict[str, Any], bytes]]:
     """Yield one verified-size archive at a time; never retain a whole date in memory."""
     cursor = None
     seen_cursors: set[str] = set()
@@ -376,6 +393,11 @@ def iter_date_archives(day: date, *, base_url: str, token: str,
             key, race_id = item.get("key"), item.get("raceId")
             if not isinstance(key, str) or not _KEY.fullmatch(key) or not isinstance(race_id, str):
                 coverage["index_identity_invalid"] += 1
+                continue
+            key_match = _KEY.fullmatch(key)
+            if (expected_race_id is not None and race_id != expected_race_id
+                    or expected_model_id is not None and key_match.group(4) != expected_model_id):
+                coverage["other_race_skipped"] += 1
                 continue
             if key in seen:
                 coverage["duplicate_key"] += 1
@@ -408,8 +430,8 @@ def iter_date_archives(day: date, *, base_url: str, token: str,
             except (URLError, TimeoutError, OSError, EOFError, gzip.BadGzipFile, zlib.error):
                 coverage["archive_read_invalid"] += 1
                 continue
-            yield dict(item), decompressed
             coverage["archive_bodies_downloaded"] += 1
+            yield dict(item), decompressed
         next_cursor = payload.get("nextCursor")
         if next_cursor is None:
             return
@@ -420,7 +442,8 @@ def iter_date_archives(day: date, *, base_url: str, token: str,
     raise RuntimeError("archive_page_limit_exceeded")
 
 
-def iter_date_labels(day: date, *, base_url: str, token: str, opener=urlopen) -> Iterator[dict[str, Any]]:
+def iter_date_labels(day: date, *, base_url: str, token: str, opener=urlopen,
+                     expected_archive_key: str | None = None) -> Iterator[dict[str, Any]]:
     """Yield verified-envelope label records a bounded page at a time."""
     cursor = None
     seen_cursors: set[str] = set()
@@ -434,6 +457,9 @@ def iter_date_labels(day: date, *, base_url: str, token: str, opener=urlopen) ->
                 or not isinstance(payload.get("labels"), list) or len(payload["labels"]) > 5):
             raise RuntimeError("invalid_label_export")
         for label in payload["labels"]:
+            if expected_archive_key is not None and (not isinstance(label, Mapping)
+                    or label.get("archiveKey") != expected_archive_key):
+                continue
             yield label
         next_cursor = payload.get("nextCursor")
         if next_cursor is None:
