@@ -1164,6 +1164,9 @@ it('admits an experimental portfolio only with live-cutoff archive and full sour
   trifectaOdds:{url:`https://www.boatrace.jp/owpc/pc/race/odds3t?hd=${raceDate.replaceAll('-','')}&jcd=99&rno=1`,sha256:'3'.repeat(64),capturedAt:jstIso(at-2_000),qualityStatus:'verified-complete-v1',final:false,odds:selections.map(selection=>({selection,odds:200}))}};
  const archiveId=`${raceId}:capture:${at-2000}`;
  sqlite.prepare("INSERT INTO boatrace_prerace_capture_archives(id,race_id,race_date,captured_at,archive_json,data_origin) VALUES(?,?,?,?,?,'real')").run(archiveId,raceId,raceDate,jstIso(at-2_000),JSON.stringify(archive));
+ // A later capture must not replace the source snapshot that existed at prediction time.
+ const laterArchive={...archive,capturedAt:jstIso(at+2_000)};
+ sqlite.prepare("INSERT INTO boatrace_prerace_capture_archives(id,race_id,race_date,captured_at,archive_json,data_origin) VALUES(?,?,?,?,?,'real')").run(`${raceId}:capture:${at+2_000}`,raceId,raceDate,jstIso(at+2_000),JSON.stringify(laterArchive));
  const artifactSha='4'.repeat(64),trainedAt=jstIso(at-120_000),raceSetSha='5'.repeat(64);
  const metadata={id:modelId,status:'candidate',trainingMode:'experimental',experimentalOnly:true,sport:'boat',betType:'trifecta',featureColumns:['lane_exhibition_time'],
   boatFeatureSchemaVersion:'boat-prerace-v2-no-weather-experimental-v1',ticketModelSchemaVersion:'ticket-selection-v1',ticketPredictionSemantics:'exact-selection-probability-v1',ticketBetType:'trifecta',ticketArtifactSha256:artifactSha,trainedAt,

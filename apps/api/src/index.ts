@@ -1356,7 +1356,9 @@ app.post('/ingest/experimental-trifecta/forecast',async c=>{
    if(race.betting_cutoff_source!==TRUSTED_CUTOFF_SOURCE||!Number.isFinite(cutoffMs)||!Number.isFinite(observedMs)||observedMs>decisionAt+5_000
       ||decisionAt-observedMs>BOATRACE_CUTOFF_MAX_AGE_MS||decisionAt>targetMs+PRIMARY_PAPER_TOLERANCE_MS||forecastMs>targetMs)
       return jsonError(c,'experimental forecast is outside a verified pre-cutoff prediction window');
-   const archiveRow=await first<any>(db,'SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin=\'real\' ORDER BY captured_at DESC LIMIT 1',race.id);
+   // Resolve the latest archive available at the model's actual prediction
+   // time. A newer capture must not invalidate a valid point-in-time snapshot.
+   const archiveRow=await first<any>(db,'SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin=\'real\' AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1',race.id,forecast.predictedAt);
    if(!archiveRow||Date.parse(archiveRow.captured_at)>forecastMs||forecastMs-Date.parse(archiveRow.captured_at)>5*60_000)return jsonError(c,'official prerace archive is not fresh as of prediction time');
    let archive:any;try{archive=JSON.parse(archiveRow.archive_json)}catch{return jsonError(c,'official prerace archive is invalid');}
    const lanes=await all<any>(db,'SELECT number,features_json FROM entries WHERE race_id=? AND data_origin=\'real\' ORDER BY number',race.id),numbers=lanes.map(x=>Number(x.number));
