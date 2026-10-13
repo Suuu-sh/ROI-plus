@@ -25,16 +25,21 @@ export type CollectResultsOptions = {
   requestBudget?: ResultsRequestBudget;
   // Explicitly collect labels only for races with validated archived PIT inputs.
   labelOnly?: boolean;
+  // Canonical complete R2 archive races selected by the bounded archive cursor.
+  // These are lower priority than open bets and share the existing request budget.
+  archiveRaceIds?: string[];
   sleep?: (ms: number) => Promise<void>;
   fetch?: (input: string, init?: RequestInit) => Promise<Response>;
 };
 const runId = (raceId: string) => `boat-result:${raceId}`;
 export const resultUrl = (race: RaceTarget) => `https://www.boatrace.jp/owpc/pc/race/raceresult?rno=${race.race_no}&jcd=${race.venue_id}&hd=${race.race_date.replaceAll('-', '')}`;
 
-export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_BATCH_SIZE, labelOnly = false) {
+export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_BATCH_SIZE, labelOnly = false, archiveRaceIds: string[] = []) {
   // Old open purchases may still need settlement; no history-wide collection.
   // Least recently attempted first prevents an unpublished race starving others.
   const jstDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);
+  const archiveIds=archiveRaceIds.filter(id=>/^boat-\d{8}-\d{2}-\d{2}$/.test(id)).slice(0,80)
+  const archiveIdSql=archiveIds.length?`r.id IN (${archiveIds.map(()=>'?').join(',')})`:'0'
   return all<RaceTarget>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date,r.betting_cutoff_at,r.betting_cutoff_source FROM races r
     LEFT JOIN collection_runs cr ON cr.id='boat-result:'||r.id AND cr.source=?
     WHERE r.sport='boat' AND r.data_origin='real' AND r.status IN ('scheduled','closed','finished')
@@ -45,17 +50,25 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
         AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=b.id))
         OR EXISTS(SELECT 1 FROM experimental_paper_bets eb
           JOIN experimental_paper_decisions ed ON ed.id=eb.decision_id AND ed.experiment_key='boat-trifecta-small-sample-v1'
-          WHERE eb.race_id=r.id AND eb.data_origin='real')))
+          WHERE eb.race_id=r.id AND eb.data_origin='real')
+        OR EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb
+          JOIN historical_trifecta_experiment_decisions hd ON hd.id=hb.decision_id AND hd.experiment_key='boat-trifecta-historical-base-v1'
+          WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open')))
         OR (?=1 AND r.race_date=? AND r.betting_cutoff_source='boatrace-racelist-cutoff-v1'
           AND julianday(r.betting_cutoff_at)<=julianday(?,'-5 minutes')
           AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.data_origin='real' AND b.status='open')
+          AND NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open')
           AND EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives ar WHERE ar.race_id=r.id AND ar.data_origin='real'
             AND julianday(ar.captured_at)<=julianday(r.betting_cutoff_at,'-60 seconds')
             AND json_valid(ar.archive_json) AND json_extract(ar.archive_json,'$.schema')='boat-prerace-capture-v1')
           AND NOT EXISTS(SELECT 1 FROM collection_runs proof WHERE proof.id='boat-result:'||r.id AND proof.source=?
             AND proof.status='success' AND json_valid(proof.reason) AND json_extract(proof.reason,'$.quality')='verified-official-outcome-v2'
-            AND json_type(proof.reason,'$.results')='array' AND json_type(proof.reason,'$.payouts')='array')))
-      AND (?=1 OR (EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real')
+            AND json_type(proof.reason,'$.results')='array' AND json_type(proof.reason,'$.payouts')='array'))
+        OR (${archiveIdSql} AND r.betting_cutoff_source='boatrace-racelist-cutoff-v1'
+          AND julianday(r.betting_cutoff_at)<=julianday(?)
+          AND NOT EXISTS(SELECT 1 FROM collection_runs proof WHERE proof.id='boat-result:'||r.id AND proof.source=?
+            AND proof.status='success' AND json_valid(proof.reason) AND json_extract(proof.reason,'$.quality')='verified-official-outcome-v2')))
+      AND (?=1 OR ${archiveIdSql} OR (EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real')
         AND NOT COALESCE((cr.status='success' AND json_valid(cr.reason) AND json_extract(cr.reason,'$.finalMarket.quality')='verified-result-final-market-v1'),0)) OR NOT (
         (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')=6
         AND (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')+
@@ -73,10 +86,18 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
           AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=eb.id)
           AND NOT EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
             AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3)))
+        AND NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open'
+          AND NOT EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
+            AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3)))
       ))
-    ORDER BY julianday(cr.started_at) ASC,julianday(r.post_time) ASC,r.id ASC LIMIT ?`, RESULTS_SOURCE,
+    ORDER BY CASE WHEN EXISTS(SELECT 1 FROM bets ob WHERE ob.race_id=r.id AND ob.sport='boat' AND ob.data_origin='real' AND ob.status='open'
+        AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=ob.id))
+        OR EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real' AND eb.status='open')
+        OR EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open') THEN 0 ELSE 1 END,
+      julianday(cr.started_at) ASC,julianday(r.post_time) ASC,r.id ASC LIMIT ?`, RESULTS_SOURCE,
     new Date(now.getTime()-5*60_000).toISOString(),Number(labelOnly),Number(labelOnly),jstDate,
-    new Date(now.getTime()).toISOString(),RESULTS_SOURCE,Number(labelOnly),Math.max(0, Math.floor(maximum)));
+    new Date(now.getTime()).toISOString(),RESULTS_SOURCE,...archiveIds,new Date(now.getTime()-5*60_000).toISOString(),RESULTS_SOURCE,
+    Number(labelOnly),...archiveIds,Math.max(0, Math.floor(maximum)));
 }
 
 type FetchFailureCode = 'http-status' | 'http-redirect-rejected' | 'body-missing' | 'body-too-large' | 'body-read-failed' | 'utf8-rejected' | 'hash-failed' | 'fetch-timeout' | 'fetch-rejected';
@@ -148,7 +169,8 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
     Math.max(0,budget.max-budget.used));
   if (!attemptLimit) return skipped;
   const labelOnly=opts.labelOnly===true;
-  const targets = await selectResultsTargets(db,now,labelOnly?Math.min(4,attemptLimit):attemptLimit,labelOnly);
+  const archiveRaceIds=(opts.archiveRaceIds??[]).filter(id=>/^boat-\d{8}-\d{2}-\d{2}$/.test(id)).slice(0,80)
+  const targets = await selectResultsTargets(db,now,labelOnly?Math.min(4,attemptLimit):attemptLimit,labelOnly,archiveRaceIds);
   if (!targets.length) return skipped;
   const lease=manual?new Date(now.getTime()+5*60_000).toISOString():hour;
   const fetcher=opts.fetch ?? ((input,init)=>fetch(input,init)),sleep=opts.sleep ?? pause;

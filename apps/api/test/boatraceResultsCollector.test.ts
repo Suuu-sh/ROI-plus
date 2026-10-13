@@ -130,6 +130,29 @@ describe('purchased real boat hourly results',()=>{
     sqlite.prepare("INSERT INTO data_repair_audit_marks(repair_id,race_id,record_type,record_id,reason,marked_at) VALUES('fixture',?,'bet',?,?,?)").run(id(6),`${id(6)}-bet`,'fixture',now.toISOString());
     expect((await selectResultsTargets(DB,now)).map(x=>x.id)).toEqual([id()]);
   });
+  it('adds only bounded verified-cutoff R2 archive IDs as lower-priority unbought label targets',async()=>{
+    const archived=seed(7);sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(archived);
+    sqlite.prepare("UPDATE races SET betting_cutoff_at=?,betting_cutoff_source='boatrace-racelist-cutoff-v1' WHERE id=?")
+      .run('2026-10-11T03:00:00Z',archived);
+    const unlisted=seed(8);sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(unlisted);
+    sqlite.prepare("UPDATE races SET betting_cutoff_at=?,betting_cutoff_source='boatrace-racelist-cutoff-v1' WHERE id=?")
+      .run('2026-10-11T03:00:00Z',unlisted);
+    const wrongCutoff=seed(9);sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(wrongCutoff);
+    sqlite.prepare('UPDATE races SET betting_cutoff_at=? WHERE id=?').run('2026-10-11T03:00:00Z',wrongCutoff);
+    const targets=await selectResultsTargets(DB,now,8,false,[archived,wrongCutoff]);
+    expect(targets.map(row=>row.id)).toContain(archived);
+    expect(targets.map(row=>row.id)).not.toContain(unlisted);
+    expect(targets.map(row=>row.id)).not.toContain(wrongCutoff);
+  });
+  it('targets a historical-only open virtual race while excluding unrelated races',async()=>{
+    seed(1);seed(2);seed(3,'real','won');
+    sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(id(2));
+    sqlite.prepare(`INSERT INTO historical_trifecta_experiment_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,snapshot_json)
+      VALUES('hist-decision','boat-trifecta-historical-base-v1',?,'boat-trifecta-historical-base-20261014','2026-10-11T02:00:00Z','placed',100,'{}')`).run(id(2));
+    sqlite.prepare(`INSERT INTO historical_trifecta_experiment_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+      VALUES('hist-bet','hist-decision',?,'boat-trifecta-historical-base-20261014','1-2-3',100,0.1,0.01,200,19,'2026-10-11T02:00:00Z','open','real')`).run(id(2));
+    expect((await selectResultsTargets(DB,now)).map(x=>x.id)).toEqual([id(1),id(2)]);
+  });
   it('collects purchased results with missing, invalid, or exhausted legacy reservation state',async()=>{
     seed();sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();
     const fetcher=vi.fn(fetchPage);

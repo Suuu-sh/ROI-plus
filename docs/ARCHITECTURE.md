@@ -224,3 +224,19 @@ npm -w apps/web run deploy
 `reset-normal-purchase-history.yml` はユーザーの明示承認を受けた通常購入・成績・残高のリセット専用operatorである。exact source SHAと `RESET NORMAL PURCHASE HISTORY ONLY` の確認を必須にし、INGEST_TOKEN認証のsnapshot routeで通常 `bets` / `daily_summaries` と保護対象（通常decision監査、実験購入・decision・bankroll）を一貫したD1 batchで取得する。秘密設定は取得せず、初期資金値だけを扱う。リセット前にアクセス制御されたActions artifactへsnapshotを30日保存し、upload成功後だけreset routeを呼ぶ。
 
 resetはsnapshot全行と初期資金を同じatomic D1 batchの先頭で照合し、購入・精算などの変更があればSQLエラーで全処理をrollbackする。削除は通常 `bets` / `daily_summaries` だけで、初期資金設定、通常decision監査、実験台帳・残高、レース・結果・予測・出所は変更しない。通常残高・成績はbetsから計算されるため初期資金／ゼロに戻る。実行後に保護対象の行数・SHA256を比較する。バックアップからの復元は自動化せず、artifactのJSON内の元列・元値を用いて別途人手レビューと明示承認を行う。SPECは変更していない。
+
+### 過去データBASE三連単の専用仮想実験（2026-10-14）
+
+未検証の過去データ学習BASEモデルを通常昇格や既存13レース実験と混同しない、固定モデルID `boat-trifecta-historical-base-20261014` の専用仮想経路。学習artifact source snapshotは `origin/main` の `839bb56`、この実装のrelease baseは `8aa37ac`。配布はWorker静的JSONの5 fit重み（pickle SHA-256 `b7688efcec865ce2bc9e770ec9e39631742481db5bc8a5f9b5a8b7ee2cbe0b3a`、immutable version `2026-10-14.1`）を使い、BASE 13列の固定allowlist、ソースSHA、fit数と有限値をruntimeで検証する。通常モデルregistry・昇格資格・既存experimental latest selectorは変更しない。
+
+入力は現在の公式出走表の6艇 rosterに一致し、利用可能時刻がT-60以前で実際のarrival timestampが確認できる実データだけ。Bファイルの日次取得の検証済みsidecarから取込時刻・公式URL・本文SHA-256を既存 `features_json` に保持し、runtimeは6艇の共通SHA、canonical source URL、`source_available_at === entries.available_at`、取得時刻がtarget以前を確認する。JST 0時に合成された `available_at` やsidecarのないcacheは証跡として認めない。この当日B source gateは過去学習行のPoint-in-time証明ではない。source-bound archive identity/roster、公式三連単120組のcapture freshness、締切source・時刻ガードを再利用し、展示値は検証目的のarchiveに存在しても特徴量に渡さない。購入判断時の公式オッズは既存 `fetchPurchaseOdds` によるfresh complete marketだけで、保存済市場fallbackをしない。既存実験と独立したT-60の仮想残高・判断/券台帳、精算経路、UI/APIを持つ。現在の専用実験 ledger 以外に過去 raw 15kレコードや全過去120券の予測履歴は投入しない。
+
+専用D1台帳は `0014_historical_trifecta_experiment.sql` の add-only 3 tables。`workflow_dispatch` でmainから実行する `historical-trifecta-schema.yml` は、bounded read-only `d1_migrations` queryを使い、このcheckoutの全migrationが適用済みか、唯一の不足が0014の時だけ進めるfail-closed手動経路。通常のmigration readiness checkはlocal migration一覧との完全一致を確認するため、migration名allowlistの追加更新は不要。既存の日次収集/syncがmainのこのコードで次回動作した後に、初めてsource sidecar付き新鮮行が見込める。既存収集・秘密同期・raw archive upload経路は増やさない。通常のwriteBudget推定は無効化済みno-opで、49 fetch枠など既存の実行時上限以上のprovider quota保証は主張しない。学習10508/校正2213/検証2070はレース件数、過去PIT/ROI証明、収益性、通常昇格資格はfalseのまま。仕様書は変更せず、SPECの通常qualified model/実験レジストリ設計との差分として記録する。
+
+### 固定BASEモデルのR2観測アーカイブと3か月候補学習
+
+`historical-trifecta-candidate.yml` は毎週、JST暦月で直近3か月（開始日を含み、as-of日を除外）のR2観測を読み、公式結果ラベルと結合できた実レースだけで時間順train/calibration/testの候補を評価する。2026-10-14時点の窓は2026-07-14以上・2026-10-14未満。保存開始前の過去オッズ・特徴量を遡及生成しないため、初回はデータ不足で候補が作られないのが正常で、3か月分の履歴が揃うまではその状態をreportに記録する。
+
+R2は固定モデルID `boat-trifecta-historical-base-20261014` / version `2026-10-14.1` / source SHA-256 `b7688efcec865ce2bc9e770ec9e39631742481db5bc8a5f9b5a8b7ee2cbe0b3a` のBASE 13列・6艇・順序付き120確率を記録する。学習readerはWorker同梱モデルmetadataとの完全一致、`trainedAt <= predictedAt`、公式BファイルURL・本文SHA・実到着時刻、6艇rosterの公式archive証跡、T-60締切証跡、公式120組オッズ時刻を再検証する。特徴入力は`availableAt <= predictedAt`、確率は実際の`predictedAt`がT-60 targetの±10秒、購入判断用オッズは`requestedAt <= capturedAt <= observedAt`かつtargetの±10秒を満たす場合だけ受け入れる。オッズはBASE特徴量に混ぜず、推論後に取得されることもある。すべての時刻を後付けしない。結果・正確な三連単払戻は別の認証済み公式label exportから取得し、確定時刻が予測より後で全着順・勝者・払戻が一致するラベルだけを使用する。未保存・不完全・取得失敗は欠損のままcoverage reportに残し、全件収集を主張しない。
+
+週次処理はfingerprint付きの新規candidate artifactとActions reportだけを作る。通常registry、推論同期、予測、購入判断、live係数の変更はしない。同じsnapshotの候補artifactはartifact SHAを検証して再利用し、別snapshotは別IDにする。最低300のtraining raceと時間分離calibration/testがない場合は`insufficient_data` / `unqualified`とし、少ないデータから昇格資格・利益を主張しない。再学習candidateのtest結果と、元のR2保存確率の同じtest raceに対するproper scoreを別々に評価する。profitabilityは実際の時刻付きオッズと完全一致払戻が揃う場合以外は算出しない。Actionsには候補と監査manifestだけを保存し、R2 raw archive本体はartifact化しない。自動昇格・R2削除・TTL変更は行わない。

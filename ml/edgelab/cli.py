@@ -562,6 +562,17 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                                 entry["available_at"] = source["fetchedAt"]
                                 entry["source_available_at"] = source["fetchedAt"]
                                 entry["source_sha256"] = source["sourceSha256"]
+                                entry["source_url"] = source["sourceUrl"]
+                                # Persist verifiable source identity through the existing
+                                # features_json column; entries' schema stays unchanged.
+                                try:
+                                    feature_values = json.loads(entry.get("features_json") or "{}")
+                                except (TypeError, ValueError):
+                                    feature_values = {}
+                                feature_values["source_available_at"] = source["fetchedAt"]
+                                feature_values["source_sha256"] = source["sourceSha256"]
+                                feature_values["source_url"] = source["sourceUrl"]
+                                entry["features_json"] = json.dumps(feature_values, ensure_ascii=False, separators=(",", ":"))
                 if kind == "K":
                     observed_at = _now()
                     for result in parsed.get("results", []):

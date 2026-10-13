@@ -96,7 +96,8 @@ def test_collect_boat_propagates_only_verified_b_file_arrival_metadata(tmp_path,
     monkeypatch.setattr(boatrace, "fetch_boatrace_file", lambda kind, day, **kwargs: Path(f"{kind}.lzh"))
     monkeypatch.setattr(boatrace, "read_lzh", lambda path: "fixture text")
     monkeypatch.setattr(boatrace, "read_source_file_metadata", lambda path, kind, day: {
-        "fetchedAt": "2026-10-09T06:00:00+00:00", "sourceSha256": "a" * 64} if kind == "B" else None)
+        "fetchedAt": "2026-10-09T06:00:00+00:00", "sourceSha256": "a" * 64,
+        "sourceUrl": "https://www1.mbrace.or.jp/od2/B/202610/b261009.lzh"} if kind == "B" else None)
     monkeypatch.setattr("edgelab.parsers.boatrace_b.parse_b", lambda content, race_date: {
         "races": [{"id": "boat-20261009-01-01", "sport": "boat", "race_date": race_date,
                    "status": "scheduled", "data_origin": "real"}],

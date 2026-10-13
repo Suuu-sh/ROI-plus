@@ -8,6 +8,7 @@ import { odds, pct, signedYen, tone, yen } from '../lib/format'
 import { t } from '../i18n'
 import { BetsTable } from '../components/BetsTable'
 import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
+import { HistoricalTrifectaExperiment } from '../components/HistoricalTrifectaExperiment'
 import { CountUp, Empty, ErrorState, Loading, Section, SportIcon } from '../components/ui'
 
 const axis = { fontSize: 11, fill: 'rgb(var(--faint))' }
@@ -110,6 +111,7 @@ export function PerformancePage() {
 
       {/* Separate experimental ledger: kept after the normal results it must not be mixed with. */}
       <ExperimentalPerformance />
+      <HistoricalTrifectaExperiment />
     </div>
   )
 }

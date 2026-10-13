@@ -11,6 +11,7 @@ import { t } from '../i18n'
 import { EquityChart } from '../components/EquityChart'
 import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
 import { mergePurchaseHistory, type HistoryBet } from '../lib/purchaseHistory'
+import { HistoricalTrifectaExperiment } from '../components/HistoricalTrifectaExperiment'
 import { CountUp, Empty, ErrorState, LiveDot, Loading, Section, Segmented, SportIcon } from '../components/ui'
 
 type PurchasedRace = {
@@ -117,6 +118,7 @@ export function OverviewPage() {
       {/* The experimental ledger is separate from normal results, so it sits beside them rather than between them. */}
       <aside aria-label="実験台帳" className="min-w-0 space-y-5">
         <ExperimentalPerformance compact narrow />
+        <HistoricalTrifectaExperiment compact />
       </aside>
     </div>
   </div>

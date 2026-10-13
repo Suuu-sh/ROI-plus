@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler",
     "strict": true, "skipLibCheck": true, "lib": ["ES2022", "WebWorker"],
-    "types": ["@cloudflare/workers-types"], "noEmit": true,
+    "types": ["@cloudflare/workers-types"], "noEmit": true, "resolveJsonModule": true,
     "paths": {"@edgelab/shared": ["../../packages/shared/src/index.ts"]}
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]

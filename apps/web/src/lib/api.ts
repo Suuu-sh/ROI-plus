@@ -76,6 +76,7 @@ export const api = {
   rankComparison: (origin: OriginFilter) => req<RankComparison>(`/performance/rank-comparison${qs({ origin })}`),
   experimentalPerformance: () => req<ExperimentalPerformance>('/performance/experimental'),
   experimentalBets: () => req<ExperimentalBet[]>('/bets/experimental'),
+  historicalTrifectaPerformance: () => req<HistoricalTrifectaPerformance>('/performance/historical-trifecta-experiment'),
   models: () => req<ModelInfo[]>('/models'),
   promote: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/promote`, { method: 'POST' }),
   promoteInitialBaseline: (id: string, validationFingerprint: string) =>
@@ -144,6 +145,33 @@ export interface ExperimentalDecision {
   odds: number | null
   uncertainty: number | null
   expectedRoi: number | null
+}
+
+export interface HistoricalTrifectaPerformance {
+  model: {
+    experimentKey: 'boat-trifecta-historical-base-v1'
+    id: 'boat-trifecta-historical-base-20261014'
+    immutableVersion: string
+    sourceArtifactSha256: string
+    featureSchemaVersion: string
+    featureColumns: string[]
+    fitCount: number
+    trainingRaces: number
+    validationRaces: number
+    testRaces: number
+    candidateKind: string
+    evaluationQualified: false
+    promotionEligible: false
+    pointInTimeEvidenceComplete: false
+    profitabilityProven: false
+    exhibitionFeaturesUsed: false
+    selectionProfile: string
+  }
+  summary: {
+    decisions: number | null; placed_races: number | null; abstained_races: number | null
+    bets: number; total_stake: number; settled_profit: number; open_bets: number; available_balance: number
+  }
+  decisions: Array<{ id: string; race_id: string; race_date: string; venue_id: string; race_no: number; decision_at: string; outcome: 'placed' | 'abstained'; reason: string | null; total_stake: number; snapshot: any }>
 }
 
 export interface RankComparison {
