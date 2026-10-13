@@ -9,7 +9,7 @@ import { dateTime, pct, signedYen, tone, yen } from '../lib/format'
 import { t } from '../i18n'
 import { EquityChart } from '../components/EquityChart'
 import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
-import { ExperimentalBetsHistory } from '../components/ExperimentalBetsHistory'
+import { mergePurchaseHistory, type HistoryBet } from '../lib/purchaseHistory'
 import { CountUp, Empty, ErrorState, LiveDot, Loading, Section, Segmented, SportIcon } from '../components/ui'
 
 type PurchasedRace = {
@@ -18,11 +18,11 @@ type PurchasedRace = {
   raceDate?: string
   venueName?: string
   raceNo?: number
-  bets: Bet[]
+  bets: HistoryBet[]
   latestPurchase: string
 }
 
-function groupPurchasedRaces(bets: Bet[]): PurchasedRace[] {
+function groupPurchasedRaces(bets: HistoryBet[]): PurchasedRace[] {
   const groups = new Map<string, PurchasedRace>()
   for (const bet of bets) {
     const group = groups.get(bet.raceId) ?? {
@@ -51,7 +51,11 @@ function raceState(race: PurchasedRace): Exclude<RaceFilter, 'all'> {
 
 export function OverviewPage() {
   const { origin } = useOrigin()
-  const all = useAsync(() => Promise.all([api.overview(origin), api.bets(origin)]), [origin], () => Promise.all([api.overview(origin, undefined, true), api.bets(origin, undefined, true)]))
+  const load = async (fresh = false) => {
+    const [performance, normal, experimental] = await Promise.all([api.overview(origin, undefined, fresh), api.bets(origin, undefined, fresh), origin === 'sample' ? Promise.resolve([]) : api.experimentalBets()])
+    return [performance, mergePurchaseHistory(normal, experimental), normal] as const
+  }
+  const all = useAsync(() => load(), [origin], () => load(true))
   const purchasedRaces = useMemo(() => all.data ? groupPurchasedRaces(all.data[1]) : [], [all.data])
   const [filter, setFilter] = useState<RaceFilter>('all')
   const [visible, setVisible] = useState(PAGE_SIZE)
@@ -59,7 +63,7 @@ export function OverviewPage() {
   if (all.error) return <div className="card"><ErrorState error={all.error} onRetry={all.reload} /></div>
   if (!all.data) return <div className="card"><Loading rows={5} /></div>
   const [performance, bets] = all.data
-  const unresolved = bets.filter((bet) => bet.status === 'open').length
+  const unresolved = all.data[2].filter((bet) => bet.status === 'open').length
   const counts = { all: purchasedRaces.length, open: 0, won: 0, lost: 0 }
   for (const race of purchasedRaces) counts[raceState(race)] += 1
   const filtered = filter === 'all' ? purchasedRaces : purchasedRaces.filter((race) => raceState(race) === filter)
@@ -85,7 +89,6 @@ export function OverviewPage() {
     <SettledTicker bets={bets} />
 
     <ExperimentalPerformance compact />
-    {origin !== 'sample' && <ExperimentalBetsHistory compact />}
 
     <Section title="購入したレース" right={<span className="num text-xs text-muted">{purchasedRaces.length}レース · {bets.length}点</span>}>
       {!purchasedRaces.length ? <Empty>この表示条件では仮想購入がありません。未購入レースは表示しません。</Empty> : <>
@@ -208,7 +211,7 @@ function PurchasedRaceCard({ race, index }: { race: PurchasedRace; index: number
     </div>
     <div className="mt-3 flex flex-wrap gap-2">
       {race.bets.map((bet) => <div key={bet.id} className={`flex items-center gap-2 rounded-[4px] border px-2.5 py-1.5 text-xs ${bet.status === 'won' ? 'border-pos/50 bg-pos/10' : 'border-line bg-surface'}`}>
-        <span className="font-mono font-bold">{betTypeLabel[bet.betType]} {bet.selection}</span>
+        <span className="font-mono font-bold">{bet.recordKind === 'experimental_paper' && <span className="mr-2 font-sans text-muted">実験・通常成績対象外</span>}{betTypeLabel[bet.betType]} {bet.selection}</span>
         <span className="num text-muted">{yen(bet.stake)}</span>
         <span className={bet.status === 'won' ? 'anim-stamp inline-block font-bold text-pos' : bet.status === 'void' ? 'text-warn' : 'text-muted'}>{t().betStatus[bet.status]}</span>
         {bet.status !== 'open' && bet.payout != null && <span className="num text-muted">払戻 {yen(bet.payout)}</span>}

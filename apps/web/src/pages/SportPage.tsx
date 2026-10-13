@@ -10,7 +10,7 @@ import { CountUp, EdgeBadge, Empty, ErrorState, LiveDot, Loading, OriginBadge, P
 import { BetSheet } from '../components/BetSheet'
 import { EquityChart } from '../components/EquityChart'
 import { betTypeLabel } from '../lib/betType'
-import { ExperimentalBetsHistory } from '../components/ExperimentalBetsHistory'
+import { mergePurchaseHistory, type HistoryBet } from '../lib/purchaseHistory'
 
 function shiftDate(d: string, days: number) {
   const x = new Date(`${d}T00:00:00Z`)
@@ -25,7 +25,11 @@ export function SportPage({ sport }: { sport: Sport }) {
   const [date, setDate] = useState(todayJst)
   const [performanceVersion, setPerformanceVersion] = useState(0)
   const [researchOpen, setResearchOpen] = useState(Boolean(raceId))
-  const bets = useAsync(() => api.bets(origin, sport), [sport, origin], () => api.bets(origin, sport, true))
+  const loadBets = async (fresh = false) => {
+    const [normal, experimental] = await Promise.all([api.bets(origin, sport, fresh), sport === 'boat' ? api.experimentalBets() : Promise.resolve([])])
+    return mergePurchaseHistory(normal, experimental)
+  }
+  const bets = useAsync(() => loadBets(), [sport, origin], () => loadBets(true))
   useEffect(() => { if (raceId) setResearchOpen(true) }, [raceId])
 
   const accent = sport === 'horse' ? 'text-horse' : 'text-boat'
@@ -56,7 +60,6 @@ export function SportPage({ sport }: { sport: Sport }) {
         error={bets.error}
         onRetry={() => { bets.reload(); setPerformanceVersion((v) => v + 1) }}
       />
-      {sport === 'boat' && <ExperimentalBetsHistory compact />}
 
       {(sport !== 'boat' || raceId) && <details className="card group" open={researchOpen || undefined} onToggle={(event) => setResearchOpen(event.currentTarget.open)}>
         <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-bold transition-colors hover:bg-raised/40 marker:content-none [&::-webkit-details-marker]:hidden"><Chevron />レースを調べる <span className="ml-2 text-xs font-normal text-muted">期待値ランキング・出走表</span></summary>
@@ -177,10 +180,11 @@ export function PurchasedRace({ bets, index = 0 }: { bets: Bet[]; index?: number
   </article>
 }
 
-function PurchaseSnapshot({ bet: b }: { bet: Bet }) {
+function PurchaseSnapshot({ bet: b }: { bet: HistoryBet }) {
   const label = b.status === 'open' ? '仮想購入・精算待ち' : b.status === 'void' ? '無効' : b.status === 'won' ? '的中（精算記録）' : '不的中（精算記録）'
   return <div className={`rounded-md border p-2.5 ${b.status === 'won' ? 'border-pos/50 bg-pos/5' : 'border-line bg-raised/30'}`}>
-    <div className="flex flex-wrap items-center justify-between gap-1"><div className="break-words font-mono text-sm font-bold">{betTypeLabel[b.betType]} {b.selection}<span className="ml-2 rounded bg-raised px-1.5 py-0.5 font-sans text-[10px] text-muted">仮想・{b.mode === 'auto' ? '自動' : '手動'}</span></div><span className={`text-[11px] font-bold ${b.status === 'won' ? 'anim-stamp inline-block rounded-[3px] border border-pos px-1 text-pos' : b.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{label}</span></div>
+    <div className="flex flex-wrap items-center justify-between gap-1"><div className="break-words font-mono text-sm font-bold">{betTypeLabel[b.betType]} {b.selection}<span className="ml-2 rounded bg-raised px-1.5 py-0.5 font-sans text-[10px] text-muted">{b.recordKind === 'experimental_paper' ? '実験・通常成績対象外' : `仮想・${b.mode === 'auto' ? '自動' : '手動'}`}</span></div><span className={`text-[11px] font-bold ${b.status === 'won' ? 'anim-stamp inline-block rounded-[3px] border border-pos px-1 text-pos' : b.status === 'lost' ? 'text-neg' : 'text-muted'}`}>{label}</span></div>
+    {b.recordKind === 'experimental_paper' && <p className="mt-1 text-[11px] text-muted">公式結果 {b.officialSelection ? `三連単 ${b.officialSelection}` : '未取得'}{b.status === 'void' ? ` · 返金済み${b.repairReason === 'invalid_stake_unit' ? '（購入額が100円単位の条件を満たさないため）' : b.repairReason ? '（旧記録の購入条件を満たさないため）' : ''}` : ''}</p>}
     <dl className="mt-2 grid grid-cols-2 gap-2 rounded-[4px] border border-dashed border-line bg-surface p-2 text-xs">
       <div><dt className="text-[10px] text-muted">購入時オッズ</dt><dd className="num mt-0.5 text-base font-bold">{b.oddsAtBet == null ? '記録なし' : odds(b.oddsAtBet)}</dd></div>
       <div><dt className="text-[10px] text-muted">確定オッズ（払戻換算）</dt><dd className="num mt-0.5 text-base font-bold">{b.status === 'void' ? '対象外（無効）' : b.finalOdds == null ? b.status === 'open' ? '未記録 / 精算待ち' : '記録なし' : odds(b.finalOdds)}</dd></div>
