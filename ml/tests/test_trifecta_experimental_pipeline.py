@@ -227,3 +227,73 @@ def test_result_export_failure_category_is_static_and_preserves_collector_counts
         assert exc.exception_class == "ExperimentalLabelExportError"
         assert exc.failure_category == "http_404"
     assert collector == {"collectorStatus": "success", "targets": 4, "verified": 2, "attempted": 4}
+
+
+def test_training_fingerprint_is_order_stable_and_covers_features_outcomes_and_source_evidence():
+    from edgelab.trifecta_experimental_pipeline import _training_cohort_fingerprint
+    rows = [{"race_id": "race-a", "number": lane, "finish_order": lane,
+             "feature_x": float(lane)} for lane in range(1, 7)]
+    store = {"races": [{"id": "race-a", "race_date": "2026-10-11"}],
+             "entries": [{"race_id": "race-a", "number": lane,
+                          "source_sha256": "a" * 64} for lane in range(1, 7)],
+             "results": [{"race_id": "race-a", "number": lane, "finish_order": lane,
+                          "source_sha256": "b" * 64} for lane in range(1, 7)],
+             "prerace_observations": [], "payouts": [], "prerace_capture_odds": [],
+             "odds_snapshots": []}
+    fingerprint = _training_cohort_fingerprint(rows, store, {"race-a"})
+    assert fingerprint == _training_cohort_fingerprint(list(reversed(rows)), store, {"race-a"})
+    unrelated = [{"race_id": "race-ineligible", "number": 1, "feature_x": 999}]
+    assert fingerprint == _training_cohort_fingerprint(rows + unrelated, store, {"race-a"})
+    weather_only = {**store, "prerace_observations": [{"race_id": "race-a", "kind": "weather",
+                                                        "wind_speed": 8, "source_sha256": "d" * 64}]}
+    assert fingerprint == _training_cohort_fingerprint(rows, weather_only, {"race-a"})
+    changed_rows = [dict(row) for row in rows]
+    changed_rows[0]["finish_order"] = 2
+    assert fingerprint != _training_cohort_fingerprint(changed_rows, store, {"race-a"})
+    changed_store = {**store, "entries": [dict(row) for row in store["entries"]]}
+    changed_store["entries"][0]["source_sha256"] = "c" * 64
+    assert fingerprint != _training_cohort_fingerprint(rows, changed_store, {"race-a"})
+
+
+def test_experimental_shadow_holdout_uses_whole_later_date_and_keeps_gates_false(monkeypatch):
+    from edgelab.models import trifecta
+    fit_rows = []
+
+    def fake_fit(rows, columns):
+        fit_rows.extend(rows)
+        return {"train_races": len({row["race_id"] for row in rows})}
+
+    def uniform(model, group):
+        return {f"{a}-{b}-{c}": 1 / 120 for a in range(1, 7)
+                for b in range(1, 7) if b != a
+                for c in range(1, 7) if c not in {a, b}}
+
+    monkeypatch.setattr(trifecta, "_fit", fake_fit)
+    monkeypatch.setattr(trifecta, "ordered_triple_probabilities", uniform)
+    groups = []
+    for day, race_no in (("2026-10-10", 1), ("2026-10-10", 2),
+                         ("2026-10-11", 1), ("2026-10-11", 2)):
+        race_id = f"boat-{day.replace('-', '')}-01-{race_no:02d}"
+        groups.append([{"race_id": race_id, "race_date": day, "number": lane,
+                        "finish_order": lane, "x": lane} for lane in range(1, 7)])
+    result = trifecta._experimental_temporal_shadow(groups, ["x"])
+    assert {row["race_date"] for row in fit_rows} == {"2026-10-10"}
+    assert result["trainRaceCount"] == 2 and result["holdoutRaceCount"] == 2
+    assert set(result["trainRaceIds"]).isdisjoint(result["holdoutRaceIds"])
+    assert result["candidate"]["nRaces"] == 2
+    assert result["promotionEligible"] is False
+    assert result["evaluationQualified"] is False
+    assert result["profitabilityProven"] is False
+    assert result["modelSpecificIndependentValidation"] is False
+
+
+def test_experimental_workflow_schedules_learning_only_and_gates_registry_forecast():
+    workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/trifecta-experimental-pipeline.yml").read_text()
+    assert "'50 0 * * *' # 09:50 JST, learning only" in workflow
+    assert "'20 4 * * *' # 13:20 JST, learning only" in workflow
+    assert "'50 14 * * *' # 23:50 JST, learning only" in workflow
+    assert "mode=learning_only" in workflow and "EVENT_NAME" in workflow
+    assert "- learning_only" in workflow
+    assert "steps.mode.outputs.value == 'train_and_forecast'" in workflow
+    assert "steps.mode.outputs.value == 'forecast_only'" in workflow
+    assert "steps.mode.outputs.value != 'learning_only'" in workflow

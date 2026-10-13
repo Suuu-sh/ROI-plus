@@ -45,6 +45,68 @@ def _group_races(rows: Sequence[Mapping[str, Any]]) -> list[list[dict[str, Any]]
     return [by_race[key] for key in sorted(by_race)]
 
 
+def compute_training_cohort_fingerprint(rows: Sequence[Mapping[str, Any]],
+                                       store: Mapping[str, Any],
+                                       race_ids: set[str] | None = None) -> str:
+    """Canonical digest of eligible features/outcomes plus their source evidence."""
+    def canonical_value(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): canonical_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [canonical_value(item) for item in value]
+        if isinstance(value, (float, np.floating)):
+            return float(value) if math.isfinite(float(value)) else None
+        if isinstance(value, np.integer):
+            return int(value)
+        return value
+
+    ids = race_ids or {str(row.get("race_id")) for row in rows if row.get("race_id")}
+    tables = ("races", "entries", "prerace_observations", "results", "payouts",
+              "prerace_capture_odds", "odds_snapshots")
+    evidence = {}
+    for table in tables:
+        selected = [canonical_value(row) for row in store.get(table, [])
+                    if str(row.get("race_id") or row.get("id") or "") in ids
+                    and (table != "prerace_observations" or row.get("kind") == "exhibition")]
+        evidence[table] = sorted(selected, key=lambda row: json.dumps(
+            row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+    payload = {"fingerprintSchema": "trifecta-experimental-training-cohort-v2",
+               "featuresAndOutcomes": sorted((canonical_value(dict(row)) for row in rows
+                                                if str(row.get("race_id") or "") in ids), key=lambda row: (
+                   str(row.get("race_id")), str(row.get("number")))),
+               "sourceEvidence": evidence}
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), allow_nan=False, default=str).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _eligible_experimental_training_groups(rows: Sequence[Mapping[str, Any]],
+                                           store: Mapping[str, Any]):
+    """Return exactly the verified race groups eligible for experimental fit."""
+    safe_rows = [dict(row) for row in rows if row.get("data_origin") == "real"
+                 and row.get("race_id") and row.get("race_date") and row.get("predicted_at")
+                 and available_by(row, row["predicted_at"])]
+    complete = [group for group in _group_races(safe_rows) if _complete_race(group)]
+    complete_rows = [row for group in complete for row in group]
+    coverage = audit_trifecta_coverage(store, complete_rows, include_races=True)
+    from edgelab.importers.experimental_result_labels import verified_experimental_result_race_ids
+    verified_result_ids = verified_experimental_result_race_ids(store)
+    evidence_by_id = {str(race["raceId"]): race for race in coverage.get("races", [])
+                      if isinstance(race, Mapping) and race.get("raceId")}
+    eligible_ids = {race_id for race_id, evidence in evidence_by_id.items()
+                    if race_id in verified_result_ids
+                    and evidence.get("completeResult") is True
+                    and evidence.get("verifiedT60Cutoff") is True
+                    and evidence.get("sixEntryAvailability") is True
+                    and evidence.get("sourceArrivalVerified") is True
+                    and evidence.get("freshExhibitionLanes") == [1, 2, 3, 4, 5, 6]
+                    and evidence.get("completeT60Odds") is True
+                    and evidence.get("consistentPayout") is True}
+    groups = [group for group in complete if str(group[0].get("race_id")) in eligible_ids]
+    coverage.pop("races", None)
+    return groups, coverage, evidence_by_id
+
+
 def _complete_race(group: Sequence[Mapping[str, Any]]) -> bool:
     """Require real-data lanes 1..6 and an exact, unique K finish order."""
     try:
@@ -383,6 +445,73 @@ def _paired_delta_interval(groups, candidate_values, baseline_values, *, cluster
             "meanDeltaCandidateMinusBaseline": sum(cluster_values) / len(cluster_values),
             "ci95": [means[int(.025 * (samples - 1))], means[int(.975 * (samples - 1))]],
             "interpretation": "negative favors candidate; proper-score interval, not a profitability interval"}
+
+
+def _experimental_temporal_shadow(groups: Sequence[Sequence[Mapping[str, Any]]],
+                                  columns: Sequence[str]) -> dict[str, Any]:
+    """Score a train-only candidate against a train-only lane prior on later dates.
+
+    This is a shadow development diagnostic: the final artifact is subsequently
+    fit on the full cohort, so these scores do not validate that artifact.
+    """
+    dated = sorted(groups, key=lambda group: (str(group[0].get("race_date")),
+                                               str(group[0].get("race_id"))))
+    dates = sorted({str(group[0].get("race_date")) for group in dated})
+    report: dict[str, Any] = {
+        "schema": "experimental-trifecta-shadow-temporal-v1",
+        "splitUnit": "race_date_blocks; each race appears in exactly one partition",
+        "modelSpecificIndependentValidation": False,
+        "promotionEligible": False, "evaluationQualified": False,
+        "profitabilityProven": False,
+    }
+    if len(dates) < 2:
+        return {**report, "status": "not_evaluated", "reason": "fewer_than_two_race_dates",
+                "trainRaceCount": 0, "holdoutRaceCount": 0, "trainDateCount": len(dates),
+                "holdoutDateCount": 0}
+    # Hold out the most recent whole date block(s). No race/date can cross the
+    # split; there is no tuning against this holdout.
+    holdout_date_count = min(len(dates) - 1, max(1, math.ceil(len(dates) * .2)))
+    if len(dates) >= 4:
+        holdout_date_count = max(2, holdout_date_count)
+    holdout_dates = set(dates[-holdout_date_count:])
+    train = [group for group in dated if str(group[0].get("race_date")) not in holdout_dates]
+    holdout = [group for group in dated if str(group[0].get("race_date")) in holdout_dates]
+    report.update({"trainRaceCount": len(train), "holdoutRaceCount": len(holdout),
+                   "trainDateCount": len({str(g[0].get("race_date")) for g in train}),
+                   "holdoutDateCount": len({str(g[0].get("race_date")) for g in holdout}),
+                   "trainRaceIds": sorted(str(g[0].get("race_id")) for g in train),
+                   "holdoutRaceIds": sorted(str(g[0].get("race_id")) for g in holdout),
+                   "holdoutDates": sorted(holdout_dates)})
+    if not train or not holdout:
+        return {**report, "status": "not_evaluated", "reason": "empty_temporal_partition"}
+    train_rows = [row for group in train for row in group]
+    candidate = _fit(train_rows, columns)
+    candidate_distributions = [ordered_triple_probabilities(candidate, group) for group in holdout]
+    baseline_distribution = _lane_order_model(train, alpha=1.0)
+    baseline_distributions = [baseline_distribution for _ in holdout]
+    candidate_metrics = _proper_ticket_metrics(holdout, candidate_distributions)
+    baseline_metrics = _proper_ticket_metrics(holdout, baseline_distributions)
+    report.update({"status": "shadow_scores_insufficient_sample",
+                   "reason": "sample_or_date_spread_insufficient_for_independent_validation",
+                   "candidate": {key: candidate_metrics[key] for key in
+                                 ("exactOrderLogLoss", "multiclassBrier", "topTicketEce", "nRaces")},
+                   "trainOnlyLaneOrderBaseline": {key: baseline_metrics[key] for key in
+                                 ("exactOrderLogLoss", "multiclassBrier", "topTicketEce", "nRaces")},
+                   "deltaCandidateMinusBaseline": {
+                       "exactOrderLogLoss": candidate_metrics["exactOrderLogLoss"] - baseline_metrics["exactOrderLogLoss"],
+                       "multiclassBrier": candidate_metrics["multiclassBrier"] - baseline_metrics["multiclassBrier"]},
+                   "improvementAssessment": (
+                       "candidate_lower_shadow_logloss" if candidate_metrics["exactOrderLogLoss"] < baseline_metrics["exactOrderLogLoss"]
+                       else "baseline_lower_or_tied_shadow_logloss"),
+                   "raceBootstrapLogLossDelta": _paired_delta_interval(
+                       holdout, candidate_metrics["raceLogLosses"], baseline_metrics["raceLogLosses"], cluster="race"),
+                   "interpretation": "descriptive shadow temporal scores only; final artifact is fit on the full cohort"})
+    if (len(train) >= 5 and len(holdout) >= 5
+            and len({str(g[0].get("race_date")) for g in train}) >= 2
+            and len({str(g[0].get("race_date")) for g in holdout}) >= 2):
+        report["status"] = "shadow_temporal_comparison"
+        report["reason"] = "still_not_independent_validation_of_full_cohort_artifact"
+    return report
 
 
 def _temperature(valid: Sequence[Mapping[str, Any]], model: Mapping[str, Any]) -> float:
@@ -761,7 +890,8 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
 
 
 def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], *,
-                                model_id: str, artifact_dir: str | Path = "ml/artifacts") -> dict[str, Any]:
+                                model_id: str, artifact_dir: str | Path = "ml/artifacts",
+                                training_cohort_fingerprint: str | None = None) -> dict[str, Any]:
     """Fit an explicitly experimental, weatherless model without relaxing candidate gates.
 
     This separate path uses only real, complete outcomes whose own T-60 entry,
@@ -771,30 +901,8 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
     """
     if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", model_id):
         raise ValueError("experimental model ID is not a safe artifact filename")
-    safe_rows = [dict(row) for row in rows if row.get("data_origin") == "real"
-                 and row.get("race_id") and row.get("race_date") and row.get("predicted_at")
-                 and available_by(row, row["predicted_at"])]
-    complete = [group for group in _group_races(safe_rows) if _complete_race(group)]
-    complete_rows = [row for group in complete for row in group]
-    coverage = audit_trifecta_coverage(store, complete_rows, include_races=True)
-    # Outcome labels must carry their own verified official-result fetch proof.
-    # A historic K row alone is not evidence that this label was source-verified.
-    from edgelab.importers.experimental_result_labels import verified_experimental_result_race_ids
-    verified_result_ids = verified_experimental_result_race_ids(store)
-    evidence_by_id = {str(race["raceId"]): race for race in coverage.get("races", [])
-                      if isinstance(race, Mapping) and race.get("raceId")}
-    eligible_ids = {race_id for race_id, evidence in evidence_by_id.items()
-                    if race_id in verified_result_ids
-                    and evidence.get("completeResult") is True
-                    and evidence.get("verifiedT60Cutoff") is True
-                    and evidence.get("sixEntryAvailability") is True
-                    and evidence.get("sourceArrivalVerified") is True
-                    and evidence.get("freshExhibitionLanes") == [1, 2, 3, 4, 5, 6]
-                    and evidence.get("completeT60Odds") is True
-                    and evidence.get("consistentPayout") is True}
-    groups = [group for group in complete if str(group[0].get("race_id")) in eligible_ids]
+    groups, coverage, evidence_by_id = _eligible_experimental_training_groups(rows, store)
     training_rows = [row for group in groups for row in group]
-    coverage.pop("races", None)
     out = Path(artifact_dir)
     pkl_path, json_path = out / f"{model_id}.pkl", out / f"{model_id}.json"
     manifest_path = out / f"experimental-trifecta-{model_id}.manifest.json"
@@ -805,7 +913,14 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
                 "experimentalOnly": True, "reason": "no_races_with_complete_required_pit_evidence",
                 "nTrainRaces": 0, "coverage": coverage, "artifactCreated": False}
 
+    actual_cohort_fingerprint = compute_training_cohort_fingerprint(
+        training_rows, store, {str(row["race_id"]) for row in training_rows})
+    if training_cohort_fingerprint and training_cohort_fingerprint != actual_cohort_fingerprint:
+        raise ValueError("provided training cohort fingerprint does not match eligible fit rows")
+    training_cohort_fingerprint = actual_cohort_fingerprint
+
     columns = list(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
+    temporal_shadow = _experimental_temporal_shadow(groups, columns)
     model = _fit(training_rows, columns)
     bootstrap_models = []
     rng = random.Random(17013)
@@ -829,6 +944,7 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
         "consistentPayoutRaceCount": len(groups), "weatherMissingRaceCount": missing_weather,
         "officialOutcomeSourceVerifiedRaceCount": len(groups),
         "raceIdSetSha256": training_digest,
+        "trainingCohortFingerprintSha256": training_cohort_fingerprint,
         "requirements": {"realCompletedSixBoatKOrder": True,
             "officialRacelistCutoffObservedByT60": True,
             "sixEntriesHaveArrivalTimestampAndSourceSha256ByT60": True,
@@ -859,6 +975,7 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
         "nTestRaces": 0, "temperature": 1.0, "calibration": "none; experimental model",
         "trainedAt": trained_at, "nBootstrapModels": len(bootstrap_models),
         "trainingEvidence": training_evidence,
+        "temporalShadowEvaluation": temporal_shadow,
         "metrics": {"independentValidationPerformed": False, "evaluationQualified": False,
                     "promotionEligible": False, "profitabilityProven": False,
                     "pointInTimeEvidenceComplete": True, "ticketModelSchemaVersion": TICKET_SCHEMA,
@@ -879,6 +996,7 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
                 "trainingMode": "experimental", "experimentalOnly": True,
                 "boatFeatureSchemaVersion": TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
                 "trainingRaceIdSetSha256": training_digest,
+                "trainingCohortFingerprintSha256": training_cohort_fingerprint,
                 "artifactProvenance": provenance,
                 "files": {pkl_path.name: {"sha256": artifact_sha, "sizeBytes": len(pickle_bytes)},
                           json_path.name: {"sha256": hashlib.sha256(metadata_bytes).hexdigest(),

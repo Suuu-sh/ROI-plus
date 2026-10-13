@@ -52,6 +52,38 @@ def test_experimental_training_does_not_create_artifact_from_unproven_rows(tmp_p
     assert not list(tmp_path.iterdir())
 
 
+def test_experimental_trainer_persists_shadow_report_and_full_cohort_remains_unqualified(tmp_path, monkeypatch):
+    import json
+    from edgelab.importers import experimental_result_labels
+    from edgelab.models import trifecta
+
+    race_id = "boat-20261010-01-01"
+    rows = [{**row, "data_origin": "real", "available_at": "2026-10-10T10:00:00+09:00",
+             "predicted_at": "2026-10-10T11:00:00+09:00"}
+            for row in race(race_id, "2026-10-10")]
+    evidence = {"raceId": race_id, "completeResult": True, "verifiedT60Cutoff": True,
+                "sixEntryAvailability": True, "sourceArrivalVerified": True,
+                "freshExhibitionLanes": [1, 2, 3, 4, 5, 6],
+                "completeT60Odds": True, "consistentPayout": True, "freshWeather": False}
+    monkeypatch.setattr(trifecta, "audit_trifecta_coverage", lambda *args, **kwargs:
+                        {"races": [evidence], "finishedRealBoatRaces": 1})
+    monkeypatch.setattr(experimental_result_labels, "verified_experimental_result_race_ids",
+                        lambda store: {race_id})
+    result = train_trifecta_experimental(rows, {}, model_id="experimental-shadow-persist",
+                                         artifact_dir=tmp_path)
+    persisted = json.loads((tmp_path / "experimental-shadow-persist.json").read_text())
+    assert result["artifactCreated"] is True
+    assert persisted["temporalShadowEvaluation"]["status"] == "not_evaluated"
+    assert persisted["temporalShadowEvaluation"]["reason"] == "fewer_than_two_race_dates"
+    assert persisted["trainingEvidence"]["trainingCohortFingerprintSha256"]
+    assert persisted["metrics"]["evaluationQualified"] is False
+    assert persisted["metrics"]["promotionEligible"] is False
+    assert persisted["metrics"]["profitabilityProven"] is False
+    with pytest.raises(ValueError, match="fingerprint does not match eligible fit rows"):
+        train_trifecta_experimental(rows, {}, model_id="experimental-shadow-mismatch",
+                                    artifact_dir=tmp_path, training_cohort_fingerprint="f" * 64)
+
+
 def test_experimental_forecast_is_separate_empty_envelope_without_eligible_live_inputs():
     columns = list(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
     fitted = _fit(race("test-fit", "2026-01-01"), columns)

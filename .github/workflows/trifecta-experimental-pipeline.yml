@@ -1,16 +1,19 @@
 name: trifecta experimental model pipeline
 on:
   schedule:
-    - cron: '0 4 * * *' # 13:00 JST
+    - cron: '50 0 * * *' # 09:50 JST, learning only
+    - cron: '20 4 * * *' # 13:20 JST, learning only
+    - cron: '50 14 * * *' # 23:50 JST, learning only
   workflow_dispatch:
     inputs:
       mode:
-        description: Run normal training plus forecast, or diagnose a pinned registered model only
+        description: Train and forecast, train only, or diagnose a pinned registered model only
         required: true
         default: train_and_forecast
         type: choice
         options:
           - train_and_forecast
+          - learning_only
           - forecast_only
       model_id:
         description: Required only for forecast_only; exact registered experimental model ID
@@ -57,9 +60,23 @@ jobs:
           key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
           restore-keys: |
             daily-${{ runner.os }}-
+      - name: Resolve run mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MODE: ${{ inputs.mode }}
+        run: |
+          if [[ "$EVENT_NAME" == schedule ]]; then
+            mode=learning_only
+          elif [[ -n "$INPUT_MODE" ]]; then
+            mode="$INPUT_MODE"
+          else
+            mode=train_and_forecast
+          fi
+          printf 'value=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Validate bounded archive range
         id: dates
-        if: inputs.mode != 'forecast_only'
+        if: steps.mode.outputs.value != 'forecast_only'
         env:
           INPUT_SINCE: ${{ inputs.since }}
           INPUT_UNTIL: ${{ inputs.until }}
@@ -86,10 +103,10 @@ jobs:
               stream.write(f"since={start}\nuntil={end}\n")
           PY
       - name: Remove stale experiment reports
-        if: inputs.mode != 'forecast_only'
+        if: steps.mode.outputs.value != 'forecast_only'
         run: rm -f ml/data/learning/trifecta-experimental-report.json
       - name: Import verified archives and train isolated experimental model
-        if: inputs.mode != 'forecast_only'
+        if: steps.mode.outputs.value != 'forecast_only'
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
@@ -99,10 +116,10 @@ jobs:
         run: python -m edgelab.trifecta_experimental_pipeline --since "$EXPERIMENT_SINCE" --until "$EXPERIMENT_UNTIL"
       - name: Identify generated experimental artifacts
         id: model
-        if: always() && !cancelled() && (inputs.mode == 'forecast_only' || hashFiles('ml/data/learning/trifecta-experimental-report.json') != '')
+        if: always() && !cancelled() && (steps.mode.outputs.value == 'forecast_only' || hashFiles('ml/data/learning/trifecta-experimental-report.json') != '')
         env:
           PYTHONPATH: ml
-          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_MODE: ${{ steps.mode.outputs.value }}
           INPUT_MODEL_ID: ${{ inputs.model_id }}
           INPUT_ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
         run: |
@@ -135,7 +152,7 @@ jobs:
               stream.write(f'model_id={model_id}\n')
           PY
       - name: Archive experimental model and training evidence
-        if: always() && !cancelled() && inputs.mode != 'forecast_only' && steps.model.outputs.model_id != ''
+        if: always() && !cancelled() && steps.mode.outputs.value != 'forecast_only' && steps.model.outputs.model_id != ''
         uses: actions/upload-artifact@v4
         with:
           name: experimental-trifecta-model-${{ steps.model.outputs.model_id }}
@@ -147,7 +164,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Archive experiment coverage report
-        if: always() && !cancelled() && inputs.mode != 'forecast_only' && hashFiles('ml/data/learning/trifecta-experimental-report.json') != ''
+        if: always() && !cancelled() && steps.mode.outputs.value != 'forecast_only' && hashFiles('ml/data/learning/trifecta-experimental-report.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: trifecta-experimental-report-${{ github.run_id }}
@@ -155,7 +172,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Register only the hash-bound experimental model
-        if: success() && inputs.mode != 'forecast_only' && steps.model.outputs.model_id != ''
+        if: success() && steps.mode.outputs.value == 'train_and_forecast' && steps.model.outputs.model_id != ''
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
@@ -179,7 +196,7 @@ jobs:
           print('Experimental model registered in the isolated experiment registry.')
           PY
       - name: Refresh current-day PIT archives immediately before forecast
-        if: success() && steps.model.outputs.model_id != ''
+        if: success() && (steps.mode.outputs.value == 'train_and_forecast' || steps.mode.outputs.value == 'forecast_only') && steps.model.outputs.model_id != ''
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
@@ -202,7 +219,7 @@ jobs:
           print(json.dumps(report, ensure_ascii=False, sort_keys=True))
           PY
       - name: Generate and submit only a current actual-time T-60 forecast
-        if: success() && steps.model.outputs.model_id != ''
+        if: success() && (steps.mode.outputs.value == 'train_and_forecast' || steps.mode.outputs.value == 'forecast_only') && steps.model.outputs.model_id != ''
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
@@ -264,7 +281,7 @@ jobs:
               raise SystemExit(1)
           PY
       - name: Archive experimental forecast status and generated envelope
-        if: always() && !cancelled() && hashFiles('ml/data/learning/trifecta-experimental-forecast-status.json') != ''
+        if: always() && !cancelled() && steps.mode.outputs.value != 'learning_only' && hashFiles('ml/data/learning/trifecta-experimental-forecast-status.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: experimental-trifecta-forecast-${{ github.run_id }}

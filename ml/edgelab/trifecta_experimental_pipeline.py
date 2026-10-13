@@ -23,6 +23,14 @@ from edgelab.sync import (collect_experimental_training_results,
                           fetch_experimental_training_result_labels,
                           fetch_prerace_capture_archives)
 
+
+def _training_cohort_fingerprint(training_rows: list[dict[str, Any]],
+                                 store: dict[str, list[dict[str, Any]]],
+                                 race_ids: set[str]) -> str:
+    """Hash the canonical eligible features, labels, and their source evidence."""
+    from edgelab.models.trifecta import compute_training_cohort_fingerprint
+    return compute_training_cohort_fingerprint(training_rows, store, race_ids)
+
 _SAFE_EXCEPTION_CLASSES = {"ValueError", "TypeError", "KeyError", "AttributeError", "IndexError", "NameError",
                            "OverflowError", "OSError", "RuntimeError", "ImportError", "AssertionError",
                            "ExperimentalLabelExportError"}
@@ -186,8 +194,8 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
 
     from edgelab.cli import _make_training_rows
     from edgelab.features.boat import TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA
-    from edgelab.models.trifecta import train_trifecta_experimental
-    from edgelab.models.trifecta_coverage import audit_trifecta_coverage
+    from edgelab.models.trifecta import (_eligible_experimental_training_groups,
+                                         train_trifecta_experimental)
 
     # This count explicitly proves whether cached real K outcomes exist. B-only
     # history and today's not-yet-finished races are never given labels.
@@ -199,33 +207,50 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
     training_store = _stage_call("training_row_build", experimental_training_store_projection, rows)
     training_rows = _stage_call("training_row_build", _make_training_rows, training_store, "boat",
         feature_schema=TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA, require_source_arrival=True)
-    coverage = _stage_call("coverage_audit", audit_trifecta_coverage, training_store, training_rows)
+    eligible_groups, coverage, _ = _stage_call("coverage_audit",
+        _eligible_experimental_training_groups, training_rows, training_store)
+    fit_rows = [row for group in eligible_groups for row in group]
     report["coverage"] = {key: coverage.get(key) for key in (
         "finishedRealBoatRaces", "distinctRaceDates", "completeSixBoatResultRaces",
         "completeEvidenceRaces", "trainingRaceIdsPresentInStore", "counts", "exclusions")}
-    eligible_race_ids = sorted({str(row.get("race_id")) for row in training_rows if row.get("race_id")})
+    eligible_race_ids = sorted({str(row.get("race_id")) for row in fit_rows if row.get("race_id")})
     report["training"].update({"status": "insufficient_pit_evidence",
         "availableRealKResultRows": complete_k_count,
-        "eligibleBeforeEvidenceAuditRaceCount": len(eligible_race_ids),
+        "candidateRowsBeforeEvidenceFilterRaceCount": len({str(row.get("race_id")) for row in training_rows if row.get("race_id")}),
+        "eligibleTrainingRaceCount": len(eligible_race_ids),
         "actualTrainingSource": "restored local normalized real B/K cache plus official archived T-60 captures",
         "trainingMode": "experimental", "experimentalOnly": True})
     if not eligible_race_ids:
         report["training"]["reason"] = ("no_completed_real_K_results" if complete_k_count == 0
                                            else "no_complete_t60_training_cohort")
     else:
-        cohort_hash = hashlib.sha256("|".join(eligible_race_ids).encode("utf-8")).hexdigest()[:12]
-        model_id = f"boat-trifecta-exp-noweather-{end:%Y%m%d}-{cohort_hash}"
+        cohort_hash = _training_cohort_fingerprint(fit_rows, training_store,
+                                                   set(eligible_race_ids))
+        report["training"]["trainingCohortFingerprintSha256"] = cohort_hash
+        model_id = f"boat-trifecta-exp-noweather-{cohort_hash}"
         report["training"]["modelId"] = model_id
         existing = any(str(model.get("id")) == model_id for model in rows.get("models", []))
-        if existing or (Path(artifact_dir) / f"{model_id}.pkl").exists():
+        artifact_json = Path(artifact_dir) / f"{model_id}.json"
+        artifact_exists = (Path(artifact_dir) / f"{model_id}.pkl").exists()
+        if existing or artifact_exists:
             report["training"]["status"] = "artifact_already_exists_for_cohort"
+            if artifact_json.is_file():
+                try:
+                    prior_metadata = json.loads(artifact_json.read_text(encoding="utf-8"))
+                    shadow_report = prior_metadata.get("temporalShadowEvaluation")
+                    if isinstance(shadow_report, dict):
+                        report["training"]["temporalShadowEvaluation"] = shadow_report
+                except (OSError, ValueError):
+                    report["training"]["temporalShadowEvaluationStatus"] = "cached_report_unavailable"
         else:
-            result = _stage_call("model_fit", train_trifecta_experimental, training_rows, training_store,
-                                 model_id=model_id, artifact_dir=artifact_dir)
+            result = _stage_call("model_fit", train_trifecta_experimental, fit_rows, training_store,
+                                 model_id=model_id, artifact_dir=artifact_dir,
+                                 training_cohort_fingerprint=cohort_hash)
             report["training"].update({key: result.get(key) for key in (
                 "status", "reason", "nTrainRaces", "trainFrom", "trainTo", "trainedAt",
                 "ticketArtifactSha256", "artifactManifest", "artifactManifestSha256",
                 "artifactManifestData", "artifactCreated", "trainingEvidence", "metrics",
+                "temporalShadowEvaluation",
                 "status", "trainingMode", "experimentalOnly", "ticketModelSchemaVersion",
                 "ticketPredictionSemantics", "ticketBetType", "boatFeatureSchemaVersion",
                 "featureColumns", "algorithm", "trainedAt") if key in result})

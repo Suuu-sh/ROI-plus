@@ -26,6 +26,14 @@
 
 このサイクルは測定、レポート、候補作成までを自動化するもので、報告された誤差から自動で「自己修正」したり、本番モデルを自動昇格したりはしない。
 
+## 実験三連単の継続学習（weather-missing）
+
+- `.github/workflows/trifecta-experimental-pipeline.yml` は JST 09:50 / 13:20 / 23:50 に `learning_only` として動く。公式アーカイブ／結果ラベルの取り込み、既存の厳格なPIT証跡監査、学習・時間順レース日ブロックのshadow比較、候補artifact/report保存までを行い、レジストリ登録・予測・購入判断は行わない。手動 `train_and_forecast` と明示指定の `forecast_only` は別モードとして維持する。学習scheduleによる候補作成は既存の推論モデル切替を意味しない。
+- 学習cohort fingerprintは、適格な全training feature/outcome行と、そのレースの保存済みレース・艇・観測・結果・払戻・オッズ証跡をcanonical JSON化してSHA-256化する。同じfingerprintのartifactがcacheにあれば再学習をスキップする。証跡または訂正済み結果が変われば別の不変ID/artifactとなり、古いartifactは上書きしない。
+- Shadow評価は日付単位で最新側のdate blockをholdoutし、同日レースをtrain/testへ分割しない（cohortが十分な日数を持つ場合は複数日をholdout）。比較はtrain期間だけでfitした三連単モデルと、train期間だけの平滑化艇番順序基準の exact-order Log Loss / multiclass Brier / top-ticket ECEを記録する。holdoutが少数または日付幅が足りない場合は未評価／shadowの記述統計として明示する。最終artifactは全cohortでfitするため、shadow scoreはそのartifactの独立検証ではない。
+- weather-missing実験schemaは既定のPIT条件（実データ、出典と到着時刻、確認済みT-60、6艇、展示6艇、120オッズ、公式結果・払戻の一致）を緩めない。少数データの候補はexperiment-onlyで保存できるが、`evaluationQualified`, `promotionEligible`, `profitabilityProven` はfalseのまま。成果改善・収益・購入稼働を主張せず、自動昇格もしない。
+- 現時点でforecast送信403は未解決であり、この学習専用scheduleはそれを修復・回避しない。候補artifactが作成されても本番推論や仮想購入が稼働したことを意味しない。
+
 ## 初回ベースラインの検証・復元
 
 - `validate-initial-baseline` workflow は既存 candidate の JSON/pickle と、その作成時点のデータ cache を読み、再学習・データ収集なしで評価する。cache key は必ず完全一致で指定し、cache がなければ最新 cache へフォールバックせず失敗する。標準対象は `boat-win-lgbm-20261010-ee79bc87` と `daily-Linux-2026-10-10-38042505956`。
