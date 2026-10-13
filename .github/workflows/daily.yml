@@ -10,13 +10,9 @@ on:
     - cron: '0 4 * * *'  # 13:00 JST
     - cron: '30 14 * * *' # 23:30 JST
     # This established scheduled workflow also dispatches the isolated
-    # forecast workflow. Five staggered five-minute expressions cover each
-    # minute of the Japanese boat-racing day (10:00-23:59 JST).
-    - cron: '0-59/5 1-14 * * *'
-    - cron: '1-59/5 1-14 * * *'
-    - cron: '2-59/5 1-14 * * *'
-    - cron: '3-59/5 1-14 * * *'
-    - cron: '4-59/5 1-14 * * *'
+    # forecast workflow at GitHub's supported minimum five-minute cadence
+    # during the Japanese boat-racing day (10:00-23:59 JST).
+    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *'
   workflow_dispatch:
     inputs:
       validated_model_run_id:
@@ -32,27 +28,15 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: ${{ github.event_name == 'schedule' && (github.event.schedule == '0-59/5 1-14 * * *' || github.event.schedule == '1-59/5 1-14 * * *' || github.event.schedule == '2-59/5 1-14 * * *' || github.event.schedule == '3-59/5 1-14 * * *' || github.event.schedule == '4-59/5 1-14 * * *') && 'boat-experimental-forecast-trigger' || 'boat-learning-state' }}
+  group: ${{ github.event_name == 'schedule' && github.event.schedule == '3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *' && 'boat-experimental-forecast-trigger' || 'boat-learning-state' }}
   cancel-in-progress: false
 jobs:
   forecast:
-    if: >-
-      github.event_name == 'schedule' &&
-      (github.event.schedule == '0-59/5 1-14 * * *' ||
-      github.event.schedule == '1-59/5 1-14 * * *' ||
-      github.event.schedule == '2-59/5 1-14 * * *' ||
-      github.event.schedule == '3-59/5 1-14 * * *' ||
-      github.event.schedule == '4-59/5 1-14 * * *')
+    if: github.event_name == 'schedule' && github.event.schedule == '3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *'
     uses: ./.github/workflows/trifecta-experimental-forecast.yml
     secrets: inherit
   daily:
-    if: >-
-      github.event_name != 'schedule' ||
-      !(github.event.schedule == '0-59/5 1-14 * * *' ||
-      github.event.schedule == '1-59/5 1-14 * * *' ||
-      github.event.schedule == '2-59/5 1-14 * * *' ||
-      github.event.schedule == '3-59/5 1-14 * * *' ||
-      github.event.schedule == '4-59/5 1-14 * * *')
+    if: github.event_name != 'schedule' || github.event.schedule != '3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

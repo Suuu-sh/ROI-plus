@@ -308,9 +308,10 @@ def test_separate_minute_experimental_forecast_workflow_is_read_only_to_learning
     assert "workflow_call:" in workflow
     assert "uses: ./.github/workflows/trifecta-experimental-forecast.yml" in schedule
     assert "secrets: inherit" in schedule
-    for minute in range(5):
-        assert f"cron: '{minute}-59/5 1-14 * * *'" in schedule
-        assert schedule.count(f"github.event.schedule == '{minute}-59/5 1-14 * * *'") == 3
+    forecast_cron = "3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *"
+    assert f"cron: '{forecast_cron}'" in schedule
+    assert schedule.count(f"github.event.schedule == '{forecast_cron}'") == 2
+    assert schedule.count(f"github.event.schedule != '{forecast_cron}'") == 1
     assert "run-name: daily boat pipeline (${{ github.event.schedule || github.event_name }})" in schedule
     assert "boat-experimental-forecast-trigger" in schedule
     assert "group: boat-experimental-forecast" in workflow
