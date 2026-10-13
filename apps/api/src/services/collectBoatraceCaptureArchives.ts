@@ -13,6 +13,8 @@ const MAX_BODY_BYTES = 512 * 1024;
 const MAX_ARCHIVE_BYTES = 32 * 1024;
 const MAX_RACES_PER_TICK = 4;
 const MAX_CANDIDATES = 180;
+const ARCHIVE_REFRESH_INTERVAL_MS = 3 * 60_000;
+const TRUSTED_CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1';
 const SHA256 = /^[a-f0-9]{64}$/;
 
 export type SharedCaptureRequestBudget = { used: number; max: number };
@@ -61,9 +63,14 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
     FROM races r
     WHERE r.data_origin='real' AND r.sport='boat' AND r.status='scheduled' AND r.race_date=?
       AND r.post_time>=? AND r.post_time<=?
+      AND r.betting_cutoff_source=?
+      AND julianday(r.betting_cutoff_at)>=julianday(?) AND julianday(r.betting_cutoff_at)<=julianday(?)
       AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-      AND NOT EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives a WHERE a.race_id=r.id)
-    ORDER BY r.post_time ASC,r.id ASC LIMIT ?`, date, after, before, MAX_CANDIDATES);
+      AND NOT EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives a WHERE a.race_id=r.id
+        AND julianday(a.captured_at)>julianday(?))
+    ORDER BY r.post_time ASC,r.id ASC LIMIT ?`, date, after, before, TRUSTED_CUTOFF_SOURCE,
+      jstIso(at + 75_000), jstIso(at + 10 * 60_000 - 15_000),
+      jstIso(at - ARCHIVE_REFRESH_INTERVAL_MS), MAX_CANDIDATES);
   if (!candidates.length) return { status: 'skipped' as const, reason: 'no_due_races', targets: 0, attempted: 0, records: 0, failures: [] as Failure[], deferred: 0 };
 
   const budget = Math.max(0, Math.floor(requestBudget.max - requestBudget.used));

@@ -30,9 +30,10 @@ function oddsPage(day:string,raceNo:number){
 
 function addRace(raceNo=1,postOffsetMs=10*60_000){
   const date='2026-10-11',id=`boat-20261011-01-${String(raceNo).padStart(2,'0')}`;
+  const cutoff=['15:19','15:47','16:17','16:47','17:17','17:48','18:17','18:48','19:16','19:48','20:17','20:45'][raceNo-1];
   sqlite.prepare("INSERT OR IGNORE INTO venues(id,sport,name) VALUES('01','boat','Archive fixture')").run();
-  sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at) VALUES(?,'boat','01',?,?,?,'scheduled','real',?)")
-    .run(id,date,raceNo,jstIso(FIXED_NOW+postOffsetMs),jstIso(FIXED_NOW));
+  sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at,betting_cutoff_at,betting_cutoff_source,betting_cutoff_observed_at) VALUES(?,'boat','01',?,?,?,'scheduled','real',?,?, 'boatrace-racelist-cutoff-v1',?)")
+    .run(id,date,raceNo,jstIso(FIXED_NOW+postOffsetMs),jstIso(FIXED_NOW),`${date}T${cutoff}:00+09:00`,jstIso(FIXED_NOW));
   for(let lane=1;lane<=6;lane++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,features_json,available_at,data_origin) VALUES(?,?,?,?,?,?, 'real')")
     .run(`${id}-entry-${lane}`,id,lane,`Runner ${lane}`,JSON.stringify({racer_id:String(4000+lane)}),jstIso(FIXED_NOW-60_000));
   return id;
@@ -89,6 +90,41 @@ describe('data-only prerace capture archive',()=>{
     expect(Number((sqlite.prepare('SELECT COUNT(*) n FROM ticket_predictions').get() as any).n)).toBe(0);
     expect(Number((sqlite.prepare('SELECT COUNT(*) n FROM predictions').get() as any).n)).toBe(0);
     expect(Number((sqlite.prepare('SELECT COUNT(*) n FROM bets').get() as any).n)).toBe(0);
+  });
+
+  it('appends a fresh immutable archive after the three-minute refresh interval',async()=>{
+    const raceId=addRace();
+    const first=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{
+      now:()=>FIXED_NOW,sleep:async()=>{},fetch:fetchFor('2026-10-11',1),
+    });
+    expect(first).toMatchObject({status:'success',records:1});
+    const original=sqlite.prepare('SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=?').get(raceId) as any;
+    const calls:string[]=[];
+    const tooSoon=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW+2*60_000),{
+      now:()=>FIXED_NOW+2*60_000,sleep:async()=>{},fetch:async url=>{calls.push(url);return fetchFor('2026-10-11',1)(url);},
+    });
+    expect(tooSoon).toMatchObject({status:'skipped',reason:'no_due_races',records:0});
+    expect(calls).toHaveLength(0);
+    const refreshed=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW+4*60_000),{
+      now:()=>FIXED_NOW+4*60_000,sleep:async()=>{},fetch:async url=>{calls.push(url);return fetchFor('2026-10-11',1)(url);},
+    });
+    expect(refreshed).toMatchObject({status:'success',records:1});
+    const archives=sqlite.prepare('SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? ORDER BY captured_at').all(raceId) as any[];
+    expect(archives).toHaveLength(2);
+    expect(archives[0]).toEqual(original);
+    expect(archives[1].id).not.toBe(original.id);
+    expect(archives[1].captured_at).not.toBe(original.captured_at);
+    expect(calls).toHaveLength(3);
+  });
+
+  it('does not fetch races before the trusted cutoff is inside the source arrival window',async()=>{
+    addRace(2,10*60_000);
+    const calls:string[]=[];
+    const result=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{
+      now:()=>FIXED_NOW,sleep:async()=>{},fetch:async url=>{calls.push(url);return fetchFor('2026-10-11',2)(url);},
+    });
+    expect(result).toMatchObject({status:'skipped',reason:'no_due_races',records:0});
+    expect(calls).toHaveLength(0);
   });
 
   it('rejects incomplete markets, records a fixed failure reason, and rotates to the next race',async()=>{
