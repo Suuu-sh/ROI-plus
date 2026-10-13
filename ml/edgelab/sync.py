@@ -240,7 +240,7 @@ def collect_experimental_training_results(*, base_url: str | None = None,
         payload = json.loads(body.decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, ValueError, UnicodeDecodeError, OSError) as exc:
         raise RuntimeError("experimental result collection unavailable") from None
-    if not isinstance(payload, dict) or payload.get("status") not in {"success", "partial", "failed"}:
+    if not isinstance(payload, dict) or payload.get("status") not in {"success", "partial", "failed", "skipped"}:
         raise RuntimeError("experimental result collection response invalid")
     return {"status": "triggered", "collectorStatus": payload["status"],
             "targets": payload.get("targets", 0) if isinstance(payload.get("targets", 0), int) else 0,

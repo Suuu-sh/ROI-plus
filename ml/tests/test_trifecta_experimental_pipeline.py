@@ -193,3 +193,13 @@ def test_import_official_result_label_rejects_future_or_wrong_payout_proof():
         now=datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc))
     assert out["importedLabels"] == 0
     assert out["exclusions"] == {"result_source_time_invalid": 1}
+
+
+def test_label_collection_skipped_is_a_nonfatal_status_for_followup_export():
+    from unittest.mock import MagicMock
+    from edgelab.sync import collect_experimental_training_results
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b'{"status":"skipped"}'
+    with patch("edgelab.sync.urlopen", return_value=response):
+        result = collect_experimental_training_results(base_url="https://example.test", token="test-only")
+    assert result["collectorStatus"] == "skipped"
