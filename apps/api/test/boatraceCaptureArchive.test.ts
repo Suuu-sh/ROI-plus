@@ -133,16 +133,14 @@ describe('data-only prerace capture archive',()=>{
     expect(sqlite.prepare('SELECT race_id FROM boatrace_prerace_capture_archives').get()).toMatchObject({race_id:second});
   });
 
-  it('fails closed before fetching when the existing odds write allowance is exhausted',async()=>{
+  it('collects with an exhausted legacy allowance while preserving the capture lock',async()=>{
     const raceId=addRace();
     sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'")
       .run(JSON.stringify({date:'2026-10-11',reserved:4_000,oddsReserved:4_000,essentialReserved:0,optionalReserved:4_000,collectionReserved:0}));
-    let fetched=false;
-    const result=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{now:()=>FIXED_NOW,fetch:async()=>{fetched=true;throw new Error('unexpected');}});
-    expect(result).toMatchObject({status:'skipped',reason:'d1_write_budget_unavailable_or_exhausted',targets:1,attempted:0,records:0});
-    expect(fetched).toBe(false);
-    expect(sqlite.prepare('SELECT COUNT(*) n FROM boatrace_prerace_capture_archives').get()).toMatchObject({n:0});
-    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boatrace_capture_archive_lock'").get()).toMatchObject({n:0});
+    const result=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{now:()=>FIXED_NOW,fetch:fetchFor('2026-10-11',1),sleep:async()=>{}});
+    expect(result).toMatchObject({status:'success',targets:1,attempted:3,records:1});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM boatrace_prerace_capture_archives').get()).toMatchObject({n:1});
+    expect(sqlite.prepare("SELECT value FROM settings WHERE key='boatrace_capture_archive_lock'").get()).toMatchObject({value:''});
     expect(sqlite.prepare('SELECT id FROM races WHERE id=?').get(raceId)).toBeTruthy();
   });
 

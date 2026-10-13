@@ -97,21 +97,13 @@ describe('purchased real boat hourly results',()=>{
     sqlite.prepare("INSERT INTO data_repair_audit_marks(repair_id,race_id,record_type,record_id,reason,marked_at) VALUES('fixture',?,'bet',?,?,?)").run(id(6),`${id(6)}-bet`,'fixture',now.toISOString());
     expect((await selectResultsTargets(DB,now)).map(x=>x.id)).toEqual([id()]);
   });
-  it.each(['missing','invalid','exhausted'])('does not fetch, lock or log with %s daily allowance',async state=>{
-    seed();
-    if(state==='missing')sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();
-    else sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(state==='invalid'?'bad':JSON.stringify({date:'2026-10-11',reserved:20000,essentialReserved:16000,optionalReserved:4000,oddsReserved:0}));
-    const fetcher=vi.fn(fetchPage);expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({status:'skipped',attempted:0});expect(fetcher).not.toHaveBeenCalled();
-    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boat_results_hour'").get()).toMatchObject({n:0});expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:0});
-  });
-  it('fetches before reserving result writes and records a bounded failure when verified writes do not fit',async()=>{
-    seed();sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:'2026-10-11',reserved:15_950,oddsReserved:0,essentialReserved:15_950,optionalReserved:0,collectionReserved:0}));
+  it('collects purchased results with missing, invalid, or exhausted legacy reservation state',async()=>{
+    seed();sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();
     const fetcher=vi.fn(fetchPage);
-    expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({status:'failed',attempted:1,records:0});
+    expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({status:'success',attempted:1,verified:1});
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:0});
-    const log=sqlite.prepare('SELECT status,reason FROM collection_runs').get() as {status:string;reason:string};
-    expect(log.status).toBe('failed');expect(JSON.parse(log.reason).reason).toBe('daily-write-budget-exhausted');
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boat_results_hour'").get()).toMatchObject({n:1});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:6});
   });
   it('fails closed on malformed results without entry changes or settlement',async()=>{
     seed();const before=sqlite.prepare('SELECT features_json FROM entries ORDER BY number').all();
@@ -244,10 +236,11 @@ describe('purchased real boat hourly results',()=>{
     const settlement=await app.request('/api/admin/settle',init,env);
     expect(await settlement.json()).toEqual({settled:1});expect(sqlite.prepare('SELECT status,profit FROM bets').get()).toMatchObject({status:'won',profit:330});
   });
-  it('manual result mode preserves budget denial before lock or fetch',async()=>{
+  it('manual result mode runs with no legacy reservation ledger while preserving its lock',async()=>{
     seed();sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();const fetcher=vi.fn(fetchPage);
-    expect(await collectResults(DB,now,{mode:'manual',fetch:fetcher})).toMatchObject({status:'skipped',attempted:0});expect(fetcher).not.toHaveBeenCalled();
-    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boat_results_manual_until'").get()).toMatchObject({n:0});
+    expect(await collectResults(DB,now,{mode:'manual',fetch:fetcher})).toMatchObject({status:'success',attempted:1,verified:1});
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(Date.parse((sqlite.prepare("SELECT value FROM settings WHERE key='boat_results_manual_until'").get() as {value:string}).value)).toBeGreaterThan(now.getTime());
   });
   it('manual result mode blocks concurrent duplicate and throttles completed runs for sixty seconds',async()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);

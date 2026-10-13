@@ -1,4 +1,4 @@
-import { readWriteBudget, reserveWriteBudget, utcDate } from './writeBudget.js';
+import { reserveWriteBudget, utcDate } from './writeBudget.js';
 import { all, type Db, type Statement } from '../repo/db.js';
 import { parseTrifectaOdds, trifectaOddsUrl } from './boatraceTrifectaOdds.js';
 import { USER_AGENT } from './boatraceOdds.js';
@@ -73,10 +73,7 @@ export async function collectTrifectaOdds(db: Db, now: Date, opts: CollectTrifec
   }
   const admittedTargetsBase = targets.slice(0, maxRequests);
   if (!admittedTargetsBase.length) return { status: 'skipped' as const, records: 0, targets: 0, attempted: 0 };
-  const state=await readWriteBudget(db,utcDate(now));
-  const remaining=Math.min(state.remaining??0,state.oddsLimit-(state.oddsReserved??state.oddsLimit));
-  const admittedCount=Math.min(admittedTargetsBase.length,Math.max(0,Math.floor((remaining-16-32)/(120*5))));
-  if(!admittedCount||!await reserveWriteBudget(db,utcDate(now),16,'odds'))return {status:'skipped' as const,records:0,targets:0,attempted:0,reason:'daily D1 write budget unavailable or exhausted'};
+  const admittedCount=admittedTargetsBase.length;
   await db.prepare("INSERT INTO settings(key,value) VALUES('trifecta_odds_lock','') ON CONFLICT(key) DO NOTHING").run();
   const lock = await db.prepare("UPDATE settings SET value=? WHERE key='trifecta_odds_lock' AND value<?").bind(after, jstIso(at - 5 * 60_000)).run();
   if (!lock.meta?.changes) return { status: 'skipped' as const, records: 0, targets: 0, attempted: 0 };

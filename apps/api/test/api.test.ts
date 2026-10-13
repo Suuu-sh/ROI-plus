@@ -109,14 +109,16 @@ describe('EdgeLab API',()=>{
   expect(unverified.status).toBe(400);
   expect(sqlite.prepare('SELECT betting_cutoff_at,betting_cutoff_source FROM races WHERE id=?').get(race.id)).toMatchObject({betting_cutoff_at:null,betting_cutoff_source:null});
  });
- it('persists collection run logs from their protected reserve when optional D1 budget is exhausted',async()=>{
-  const day=new Date().toISOString().slice(0,10);
-  sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:day,reserved:4_000,oddsReserved:0,essentialReserved:0,optionalReserved:4_000}));
+ it('does not use the retired D1 reservation ledger when saving collection logs',async()=>{
+  const day=new Date().toISOString().slice(0,10), before=(sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value;
+  sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:day,reserved:20_000,oddsReserved:0,essentialReserved:16_000,optionalReserved:4_000}));
+  const full=(sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value;
   const row={id:'collection-log-budget-test',source:'daily-sync',sport:'boat',target_date:day,started_at:`${day}T00:00:00Z`,status:'success',records:1};
   const response=await app.request('/api/ingest/collection-runs',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify([row])},env());
   expect(response.status).toBe(200); expect(await response.json()).toMatchObject({changed:1});
   expect(sqlite.prepare('SELECT id,status FROM collection_runs WHERE id=?').get(row.id)).toMatchObject({id:row.id,status:'success'});
-  expect(await readWriteBudget(DB,day)).toMatchObject({reserved:4_013,essentialReserved:13,optionalReserved:4_000});
+  expect((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value).toBe(full);
+  expect(before).not.toBe(full);
  });
  it('does not spend D1 budget for no-op natural-key replays or synthetic timestamp/ID changes',async()=>{
   const raceId='boat-20990101-88-01', post=(endpoint:string,rows:unknown[])=>app.request(`/api/ingest/${endpoint}`,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:JSON.stringify(rows)},env());
@@ -131,40 +133,18 @@ describe('EdgeLab API',()=>{
   expect(after).toEqual(before);
   expect(sqlite.prepare('SELECT id FROM entries WHERE race_id=? AND number=1').get(raceId)).toMatchObject({id:'source-id-one'});
  });
- it('reports shared D1 budget and refuses missing state until an explicit full-day seed',async()=>{
+ it('reports application write reservations disabled and keeps obsolete management routes off',async()=>{
   const authHeader={authorization:'Bearer test-token','content-type':'application/json'};
   expect((await app.request('/api/ingest/write-budget',{},env())).status).toBe(401);
-  expect(await (await app.request('/api/ingest/write-budget',{headers:authHeader},env())).json()).toMatchObject({state:'known',limit:20000,essentialLimit:16000,optionalLimit:4000,oddsLimit:4000,remaining:20000,essentialRemaining:16000,optionalRemaining:4000});
+  expect(await (await app.request('/api/ingest/write-budget',{headers:authHeader},env())).json()).toMatchObject({enabled:false,state:'disabled',remaining:null,essentialRemaining:null,optionalRemaining:null});
   sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();
   const payload=[{id:'boat-20990101-09-01',sport:'boat',venue_id:'b01',race_date:'2099-01-01',race_no:9,status:'scheduled',data_origin:'real'}];
-  const denied=await app.request('/api/ingest/races',{method:'POST',headers:authHeader,body:JSON.stringify(payload)},env());
-  expect(denied.status).toBe(429); expect(await denied.json()).toMatchObject({code:'d1_write_budget_unavailable',budget:{state:'missing'}});
-  const seed=await app.request('/api/ingest/write-budget/seed',{method:'POST',headers:authHeader,body:JSON.stringify({date:new Date().toISOString().slice(0,10),confirmed:true})},env());
-  expect(seed.status).toBe(201); expect(await seed.json()).toMatchObject({state:'exhausted',remaining:0});
- });
- it('applies only the explicit one-day whitelist and preserves existing reservations',async()=>{
-  const today=new Date().toISOString().slice(0,10), tomorrow=new Date(`${today}T00:00:00.000Z`);
-  tomorrow.setUTCDate(tomorrow.getUTCDate()+1);
-  const auth={authorization:'Bearer test-token','content-type':'application/json'};
-  sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:today,reserved:19_946,oddsReserved:0}));
-  const allowance={date:today,confirmed:true,limit:30_000,essentialLimit:24_000,optionalLimit:6_000};
-  expect((await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(allowance)},env())).status).toBe(401);
-  expect((await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:auth,body:JSON.stringify({...allowance,confirmed:false})},env())).status).toBe(400);
-  expect((await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:auth,body:JSON.stringify({...allowance,priority:'essential'})},env())).status).toBe(400);
-  sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:today,reserved:20_000,oddsReserved:0}));
-  expect((await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:auth,body:JSON.stringify(allowance)},env())).status).toBe(409);
-  sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:today,reserved:19_946,oddsReserved:0}));
-  const applied=await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:auth,body:JSON.stringify(allowance)},env());
-  expect(applied.status).toBe(200);
-  expect(await applied.json()).toMatchObject({date:today,limit:30_000,essentialLimit:24_000,optionalLimit:6_000,reserved:19_948,essentialReserved:15_948,remaining:10_052,allowance:{date:today,limit:30_000}});
-  const stored=JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
-  expect(stored.reserved).toBe(19_948);
-  expect((await app.request('/api/ingest/write-budget',{headers:auth},env())).status).toBe(200);
-  expect(await reserveWriteBudget(DB,today,2_000,'optional')).toBe(true);
-  expect(await readWriteBudget(DB,today)).toMatchObject({reserved:21_948,optionalReserved:6_000,optionalRemaining:0});
-  // The override is date-scoped; the next UTC day uses the default ceilings.
-  const rollover=await readWriteBudget(DB,tomorrow.toISOString().slice(0,10));
-  expect(rollover).toMatchObject({limit:20_000,essentialLimit:16_000,optionalLimit:4_000,reserved:0,allowance:null});
+  const ingest=await app.request('/api/ingest/races',{method:'POST',headers:authHeader,body:JSON.stringify(payload)},env());
+  expect(ingest.status).toBe(200); expect(await ingest.json()).toMatchObject({changed:1});
+  const seed=await app.request('/api/ingest/write-budget/seed',{method:'POST',headers:authHeader,body:'{}'},env());
+  expect(seed.status).toBe(410); expect(await seed.json()).toMatchObject({code:'d1_write_budget_disabled',budget:{state:'disabled'}});
+  const allowance=await app.request('/api/ingest/write-budget/allowance',{method:'POST',headers:authHeader,body:'{}'},env());
+  expect(allowance.status).toBe(410); expect(await allowance.json()).toMatchObject({code:'d1_write_budget_disabled'});
  });
  it('serves only authenticated, current-JST, point-in-time-safe boat forecast inputs',async()=>{
   const nowMs=Date.now(), today=jstDate(new Date(nowMs)), cutoff=new Date(nowMs).toISOString(), raceId=`boat-${today.replaceAll('-','')}-98-01`;
@@ -211,10 +191,9 @@ describe('EdgeLab API',()=>{
   expect((await post('entries',[{id:'old-entry',race_id:raceId,number:1,name:'Lane 1',available_at:jstIso(),data_origin:'real'}])).status).toBe(200);
   expect((await post('results',[{race_id:raceId,finish_order:1,number:1,data_origin:'real'}])).status).toBe(200);
   expect((await post('payouts',[{race_id:raceId,bet_type:'win',selection:'1',payout:200,data_origin:'real'}])).status).toBe(200);
-  const ledger=JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
-  expect(ledger.essentialReserved).toBeGreaterThan(0); expect(ledger.optionalReserved).toBe(0);
+  expect(await readWriteBudget(DB)).toMatchObject({enabled:false,state:'disabled'});
  });
- it('charges current active predictions to essential and candidate predictions to optional in one reservation',async()=>{
+ it('ingests active and candidate predictions without a local write reservation',async()=>{
   const raceId=`boat-${jstDate().replaceAll('-','')}-01-01`, auth={authorization:'Bearer test-token','content-type':'application/json'};
   sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,status,data_origin,updated_at) VALUES(?,'boat','b01',?,1,'scheduled','real',?)").run(raceId,jstDate(),jstIso());
   sqlite.prepare("INSERT INTO models(id,sport,bet_type,version,algorithm,status) VALUES('boat-candidate-budget','boat','win','test','fixture','candidate')").run();
@@ -223,8 +202,7 @@ describe('EdgeLab API',()=>{
    {id:'candidate-current-p',race_id:raceId,model_id:'boat-candidate-budget',number:2,probability:0.5,predicted_at:jstIso(Date.now()-1000),data_origin:'real'},
   ])},env());
   expect(post.status).toBe(200);
-  const ledger=JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
-  expect(ledger.essentialReserved).toBeGreaterThan(0); expect(ledger.optionalReserved).toBeGreaterThan(0);
+  expect(await readWriteBudget(DB)).toMatchObject({enabled:false,state:'disabled',reserved:null});
  });
  it('ingests venues and payouts idempotently and finishes paid-out races',async()=>{
   const raceId='boat-20990101-01-01';
@@ -1070,7 +1048,7 @@ describe('collection status quality compatibility',()=>{
   expect(body.qualityExclusions.filter((e:any)=>e.source==='boatrace-odds-worker')).toHaveLength(2);
   expect(body.sources.find((s:any)=>s.source==='boatrace-odds-worker')).toMatchObject({enabled:true,qualityExclusions:3,successRate:0});
  });
- it('deletes only old pure quality-only logs in bounded optional-budget batches',async()=>{
+ it('deletes only old pure quality-only logs in bounded batches',async()=>{
   const now=Date.now(), iso=(minutesAgo:number)=>new Date(now-minutesAgo*60_000).toISOString();
   const insert=sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,records,error,reason) VALUES(?,'boatrace-odds-worker','boat','2026-10-11',?,?,?,?,?)");
   insert.run('expired-pure',iso(61),'failed',0,'race-a: odds pool not stable (overround out of range)',null);
@@ -1081,11 +1059,11 @@ describe('collection status quality compatibility',()=>{
   await cron(DB,false);
   expect(sqlite.prepare("SELECT id FROM collection_runs WHERE id LIKE 'expired-%' OR id LIKE '%-pure' ORDER BY id").all().map((r:any)=>r.id)).toEqual(['expired-mixed','expired-with-records','recent-pure','within-hour-pure']);
  });
- it('does not delete old quality logs when optional D1 budget is exhausted',async()=>{
+ it('deletes eligible old quality logs despite an exhausted legacy budget ledger',async()=>{
   sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,records,error) VALUES('budget-protected','boatrace-odds-worker','boat','2026-10-11',?,'failed',0,'race: odds pool not stable (overround out of range)')").run(new Date(Date.now()-2*60*60_000).toISOString());
   sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:new Date().toISOString().slice(0,10),reserved:20_000,oddsReserved:0,essentialReserved:16_000,optionalReserved:4_000}));
   await cron(DB,false);
-  expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE id='budget-protected'").get()).toMatchObject({n:1});
+  expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE id='budget-protected'").get()).toMatchObject({n:0});
  });
  it('limits each cleanup run to ten quality-only rows',async()=>{
   const insert=sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,records,error) VALUES(?,'boatrace-odds-worker','boat','2026-10-11',?,'failed',0,'race: odds pool not stable (overround out of range)')");

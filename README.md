@@ -110,14 +110,14 @@ GitHub Actions の `.github/workflows/deploy-workers.yml` は、`main` への pu
 ジョブは gate の fixture tests、workspace typecheck・tests、API Worker の dry-run、Web asset build を終えてから、D1 の `d1_migrations` に対する最大100件の read-only query でリポジトリ内 migration と適用 ledger の一致を確認します。不一致、未適用 migration、ledger の欠落、query エラーは Worker の deploy 前に fail closed します。0010 と 0011 を含む D1 migration は workflow では適用しないため、コードを取り込む前に別途レビュー済みの migration 作業と schema readiness が必要です。
 
 schema gate 通過後に API Worker を deploy し、公開 `/api/health` の HTTP status を確認してから、事前 build 済み Web Worker を deploy します。health check 失敗時は Web deploy を止めますが、API deploy の rollback は行いません。workflow は既存の `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets を使い、手動 dispatch trigger はありません。
-API Worker の日次 D1 書込予約は推定 20,000 unit 以内（essential 16,000、optional 合計4,000、オッズはoptional内数4,000）に分け、当日・前日の予測/結果と精算を優先します。昨日より古い履歴 backfill は、open bet の精算に必要な入力を除き API が拒否します。認証付き `GET /api/ingest/write-budget` で状態を確認してください。予算が欠落・破損している場合は fail-closed となり、初回 seed には人手による操作が必要です（詳細は [アーキテクチャ](docs/ARCHITECTURE.md#d1-日次書込予算)）。この Worker 内の推定予約であり、他アプリを含む Cloudflare アカウント全体の quota 残量や実際の行書込数は保証しません。
+API Worker のアプリ内 D1 推定書込予約は無効です。認証付き `GET /api/ingest/write-budget` は `state: disabled` として予約残量を表示しません。これは Cloudflare D1 provider quota や課金設定を変更せず、利用枠の残量も保証しません。履歴ガード・対象/fetch上限・競合ロック・冪等性・atomic batch は維持します（詳細は [アーキテクチャ](docs/ARCHITECTURE.md#d1-書込予約状態)）。
 
 ## データソースと制約
 
 | 競技 | ソース | 状態 |
 |---|---|---|
 | ボートレース | 公式ダウンロード（番組表 B / 競走成績 K） | 採用。過去データ・出走表・結果・払戻・展示タイム・気象を取得 |
-| ボートレース | 公式サイトの単勝オッズ | `apps/api/wrangler.toml` の取得フラグが有効な環境では Worker が収集します。毎分トリガー、締切まで15分以内、JST当日、最大30対象、取得間隔3秒以上・失敗時1回リトライです。同じトリガーの10分境界では精算・自動仮想購入・古いオッズ削除も行います。オッズ収集器内の推定予約上限はUTC日ごとに10,000行で、使い切ると停止します。日次同期・精算・他 Worker の書込は別で、この上限は Cloudflare アカウント全体の残量ではなく、頻度や15分前取得の完全な保証でもありません。README上の仕様とは異なる実装があり、許諾・本番稼働状態もコードからは確認できません。オッズが無い買い目は `INSUFFICIENT DATA` |
+| ボートレース | 公式サイトの単勝オッズ | `apps/api/wrangler.toml` の取得フラグが有効な環境では Worker が収集します。毎分トリガー、締切まで15分以内、JST当日、最大30対象、取得間隔3秒以上・失敗時1回リトライです。同じトリガーの10分境界では精算・自動仮想購入・古いオッズ削除も行います。アプリ内の日次推定書込予約による停止は無効です。毎分対象数・Cron試行数・fetch間隔の上限は維持しますが、Cloudflare D1 provider quotaや課金枠の残量は計測・保証しません。README上の仕様とは異なる実装があり、許諾・本番稼働状態もコードからは確認できません。オッズが無い買い目は `INSUFFICIENT DATA` |
 | 競馬 | netkeiba（keiba-scraping） | 不採用。利用規約がスクレイピングを禁止 |
 | 競馬 | JRA-VAN | 不採用。有料 |
 | 競馬 | ユーザー提供 CSV | 採用。`ml/edgelab/importers/horse_csv.py` で取り込み |
@@ -135,4 +135,4 @@ API Worker の日次 D1 書込予約は推定 20,000 unit 以内（essential 16,
 
 会場データの混同に対する停止・原本再構築・クリーンな単勝候補の検証・手動再開は [復旧手順](docs/RECOVERY.md) を参照してください。修正モデルでも正の期待値・利益を保証しません。
 
-三連単の収集も共有 D1 推定予約枠（UTC日ごと全Worker 20,000・オッズ10,000）の対象で、120組の書き込み増幅を予約できる対象数だけ取得する。枠が欠落・破損・枯渇している場合は外部fetchや収集用ロック更新より先に停止する。取得許諾は公式サイトオッズについてのユーザー申告に基づき、独立した許諾証明ではない。
+三連単の収集は既存の per-invocation fetch 上限・対象件数制限を守ります。アプリ内の日次推定書込予約による停止は無効ですが、Cloudflare D1 provider quotaや課金枠の残量は計測・保証しません。取得許諾は公式サイトオッズについてのユーザー申告に基づき、独立した許諾証明ではない。

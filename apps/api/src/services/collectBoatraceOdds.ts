@@ -1,7 +1,7 @@
 import { all, type Db, type Statement } from '../repo/db.js';
 import { isStablePool, oddsUrl, parseWinOdds, USER_AGENT } from './boatraceOdds.js';
 import { parseBoatraceCutoff, BOATRACE_CUTOFF_REFRESH_MS } from './boatraceCutoff.js';
-import { estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, utcDate } from './writeBudget.js';
+import { estimateWorkerWriteUnits, reserveWriteBudget, utcDate } from './writeBudget.js';
 
 type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string; betting_cutoff_at:string|null; betting_cutoff_source:string|null; betting_cutoff_observed_at:string|null };
 type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
@@ -32,15 +32,7 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
   const targets = await selectOddsTargets(db, now, maxRequests);
   // Empty runs are deliberately read-only: minute scheduling must not write a lock or run record.
   if (!targets.length) return { status: 'skipped' as const, records: 0, targets: 0 };
-  // D1's daily quota resets at UTC midnight. Reserve before lock writes so an
-  // exhausted budget causes no D1 writes at all; losing a later lock is charged conservatively.
-  // Reserve control writes first; actual snapshot units are reserved after
-  // comparing fetched markets so unchanged minute polls do not consume a
-  // phantom six-row reservation.
-  const budget=await readWriteBudget(db,utcDate(now));
-  const maxTargets=Math.min(targets.length,Math.max(0,Math.floor(((budget.remaining??0)-16-5)/(6*5))));
-  if (!maxTargets || !await reserveWriteBudget(db, utcDate(now), 16, 'odds'))
-    return { status: 'skipped' as const, records: 0, targets: 0, reason: 'daily D1 write budget unavailable or exhausted' };
+  const maxTargets=targets.length;
   // Cron の重複実行を避ける。正常終了時に解放し、異常終了時だけ5分で期限切れにする。
   const nowIso = jstIso(now.getTime()), staleIso = jstIso(now.getTime() - 5 * 60_000);
   await db.prepare(`INSERT INTO settings(key,value) VALUES('odds_lock','') ON CONFLICT(key) DO NOTHING`).run();

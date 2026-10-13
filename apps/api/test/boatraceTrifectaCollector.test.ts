@@ -80,12 +80,14 @@ describe('trifecta odds collector provenance',()=>{
     expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='boat-collector-test'").get()).toMatchObject({n:120});
     expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='boat-collector-test-2'").get()).toMatchObject({n:0});
   });
-  it('does not fetch or write when the shared D1 odds reservation is exhausted',async()=>{
+  it('continues bounded collection when the legacy D1 reservation is exhausted',async()=>{
     sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({date:new Date().toISOString().slice(0,10),reserved:10000,oddsReserved:10000}));
-    let fetched=false; const result=await collectTrifectaOdds(DB,new Date(),{fetch:async()=>{fetched=true;throw new Error('should not fetch');}});
-    expect(result).toMatchObject({status:'skipped',records:0,attempted:0});expect(fetched).toBe(false);
-    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='trifecta_odds_lock'").get()).toMatchObject({n:0});
-    expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs").get()).toMatchObject({n:0});
+    const date=sqlite.prepare("SELECT race_date FROM races WHERE id='boat-collector-test'").get() as {race_date:string};
+    const bytes=new TextEncoder().encode(livePage(date.race_date));let fetched=false;
+    const result=await collectTrifectaOdds(DB,new Date(),{fetch:async()=>{fetched=true;return {ok:true,status:200,arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)};},sleep:async()=>{}});
+    expect(result).toMatchObject({status:'success',records:120,attempted:1});expect(fetched).toBe(true);
+    expect(sqlite.prepare("SELECT value FROM settings WHERE key='trifecta_odds_lock'").get()).toMatchObject({value:''});
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM odds_snapshots WHERE race_id='boat-collector-test'").get()).toMatchObject({n:120});
   });
 
   it('keeps eligible minute fetches but avoids unchanged 120-row and repeated status writes',async()=>{

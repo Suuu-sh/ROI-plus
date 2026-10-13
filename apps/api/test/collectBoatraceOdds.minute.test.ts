@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import worker from '../src/index.js';
 import { collectOdds, selectOddsTargets } from '../src/services/collectBoatraceOdds.js';
-import { DAILY_COLLECTION_LOG_RESERVE, DAILY_D1_WRITE_BUDGET, DAILY_ESSENTIAL_WRITE_BUDGET, DAILY_ODDS_WRITE_BUDGET, DAILY_OPTIONAL_WRITE_BUDGET, readWriteBudget, reserveWriteBudget, reserveWriteBudgets } from '../src/services/writeBudget.js';
+import { readWriteBudget, reserveWriteBudget } from '../src/services/writeBudget.js';
 import { D1SqliteAdapter } from './d1-adapter.js';
 
 const root = resolve(import.meta.dirname, '../../..');
@@ -118,183 +118,23 @@ describe('minute odds collection controls', () => {
     expect((await selectOddsTargets(DB, now)).map(x => x.id)).toEqual(['stale-60s']);
   });
 
-  it('atomically reserves concurrent writes in the shared budget and caps odds at 4k', async () => {
-    const reserves = await Promise.all([
-      reserveWriteBudget(DB, now.toISOString().slice(0, 10), 20, 'odds'),
-      reserveWriteBudget(DB, now.toISOString().slice(0, 10), 20, 'odds'),
-    ]);
-    expect(reserves.filter(Boolean)).toHaveLength(2);
-    const stored = JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as { value: string }).value);
-    expect(stored).toEqual({ date: now.toISOString().slice(0, 10), reserved: 48, oddsReserved: 48, essentialReserved: 0, optionalReserved: 48, collectionReserved: 0 });
-    sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({ date: now.toISOString().slice(0, 10), reserved: 9_920, oddsReserved: 9_920 }));
-    expect(await reserveWriteBudget(DB, now.toISOString().slice(0, 10), 100, 'odds')).toBe(false);
-    expect(await reserveWriteBudget(DB, now.toISOString().slice(0, 10), 1, 'ingest')).toBe(false);
-    expect(DAILY_D1_WRITE_BUDGET).toBe(20_000);
-    expect(DAILY_ESSENTIAL_WRITE_BUDGET).toBe(16_000);
-    expect(DAILY_OPTIONAL_WRITE_BUDGET).toBe(4_000);
-    expect(DAILY_ODDS_WRITE_BUDGET).toBe(4_000);
+  it('reports reservations disabled and never reads or writes the legacy ledger', async () => {
+    const day=now.toISOString().slice(0,10);
+    sqlite.prepare("UPDATE settings SET value='corrupt' WHERE key='roi_d1_write_budget_utc'").run();
+    const before=(sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value;
+    expect(await reserveWriteBudget(DB,day,Number.MAX_SAFE_INTEGER,'optional')).toBe(true);
+    expect(await readWriteBudget(DB,day)).toMatchObject({enabled:false,state:'disabled',remaining:null,reserved:null,limit:0});
+    expect((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value).toBe(before);
   });
 
-  it.each([1, 2])('retries a lost budget CAS %i time(s) and preserves concurrent reservations', async (losses) => {
-    const day = now.toISOString().slice(0, 10);
-    await reserveWriteBudget(DB, day, 100, 'optional');
-    let failedCas = 0;
-    const racingDb = {
-      prepare(sql: string) {
-        const statement = DB.prepare(sql);
-        if (sql !== 'UPDATE settings SET value=? WHERE key=? AND value=?') return statement;
-        return {
-          bind(...values: unknown[]) { statement.bind(...values); return this; },
-          first: <T>() => statement.first<T>(),
-          all: <T>() => statement.all<T>(),
-          async run() {
-            if (failedCas < losses) {
-              failedCas += 1;
-              const current = JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
-              current.reserved += 12;
-              current.essentialReserved += 12;
-              sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify(current));
-            }
-            return statement.run();
-          },
-        };
-      },
-    } as any;
-    expect(await reserveWriteBudget(racingDb, day, 20, 'essential')).toBe(true);
-    expect(failedCas).toBe(losses);
-    expect(await readWriteBudget(DB, day)).toMatchObject({reserved: 100 + losses * 12 + 20 + losses * 8,
-      essentialReserved: losses * 12 + 20 + losses * 8, optionalReserved: 100});
-  });
-
-  it('fails closed after the bounded CAS retry count', async () => {
-    const day = now.toISOString().slice(0, 10);
-    let casAttempts = 0;
-    const contendedDb = {
-      prepare(sql: string) {
-        const statement = DB.prepare(sql);
-        if (sql !== 'UPDATE settings SET value=? WHERE key=? AND value=?') return statement;
-        return {
-          bind(...values: unknown[]) { statement.bind(...values); return this; },
-          first: <T>() => statement.first<T>(),
-          all: <T>() => statement.all<T>(),
-          async run() { casAttempts += 1; return {success:true,meta:{changes:0}}; },
-        };
-      },
-    } as any;
-    expect(await reserveWriteBudget(contendedDb, day, 20, 'essential')).toBe(false);
-    expect(casAttempts).toBe(4);
-    expect(await readWriteBudget(DB, day)).toMatchObject({reserved:0,essentialReserved:0,optionalReserved:0});
-  });
-
-  it.each(['optional', 'odds', 'collection'] as const)('charges %s retry overhead only to its own bucket', async (category) => {
-    const day = now.toISOString().slice(0, 10);
-    let lost = false;
-    const onceContendedDb = {
-      prepare(sql: string) {
-        const statement = DB.prepare(sql);
-        if (sql !== 'UPDATE settings SET value=? WHERE key=? AND value=?') return statement;
-        return {
-          bind(...values: unknown[]) { statement.bind(...values); return this; },
-          first: <T>() => statement.first<T>(),
-          all: <T>() => statement.all<T>(),
-          async run() { if (!lost) { lost=true; return {success:true,meta:{changes:0}}; } return statement.run(); },
-        };
-      },
-    } as any;
-    expect(await reserveWriteBudget(onceContendedDb, day, 3, category)).toBe(true);
-    const budget = await readWriteBudget(DB, day);
-    if (category === 'optional') expect(budget).toMatchObject({reserved:11,essentialReserved:0,optionalReserved:11,oddsReserved:0,collectionReserved:0});
-    if (category === 'odds') expect(budget).toMatchObject({reserved:11,essentialReserved:0,optionalReserved:11,oddsReserved:11,collectionReserved:0});
-    if (category === 'collection') expect(budget).toMatchObject({reserved:11,essentialReserved:11,optionalReserved:0,oddsReserved:0,collectionReserved:11});
-  });
-
-  it('protects the essential bucket from optional work and combines all optional caps', async () => {
-    const day = now.toISOString().slice(0, 10);
-    expect(await reserveWriteBudget(DB, day, DAILY_OPTIONAL_WRITE_BUDGET, 'optional')).toBe(true);
-    expect(await reserveWriteBudget(DB, day, 1, 'odds')).toBe(false);
-    expect(await reserveWriteBudget(DB, day, DAILY_ESSENTIAL_WRITE_BUDGET - DAILY_COLLECTION_LOG_RESERVE, 'essential')).toBe(true);
-    expect(await reserveWriteBudget(DB, day, 1, 'essential')).toBe(false);
-    const budget = await readWriteBudget(DB, day);
-    expect(budget).toMatchObject({ reserved: DAILY_D1_WRITE_BUDGET - DAILY_COLLECTION_LOG_RESERVE, essentialReserved: 15_500, optionalReserved: 4_000, state: 'known' });
-  });
-
-  it('reserves collection log capacity inside the existing essential cap, even after optional exhaustion', async () => {
-    const day = now.toISOString().slice(0, 10);
-    expect(await reserveWriteBudget(DB, day, DAILY_OPTIONAL_WRITE_BUDGET, 'optional')).toBe(true);
-    expect(await reserveWriteBudget(DB, day, 5, 'collection')).toBe(true);
-    const beforeEssentials = await readWriteBudget(DB, day);
-    expect(beforeEssentials).toMatchObject({ reserved: DAILY_OPTIONAL_WRITE_BUDGET + 5, essentialReserved: 5, optionalReserved: DAILY_OPTIONAL_WRITE_BUDGET });
-    // Regular essential work cannot consume the still-unused portion of the protected 500-unit log reserve.
-    expect(await reserveWriteBudget(DB, day, DAILY_ESSENTIAL_WRITE_BUDGET - 5, 'essential')).toBe(false);
-    expect(await reserveWriteBudget(DB, day, DAILY_ESSENTIAL_WRITE_BUDGET - DAILY_COLLECTION_LOG_RESERVE, 'essential')).toBe(true);
-    expect(await reserveWriteBudget(DB, day, 1, 'collection')).toBe(true);
-    expect(await readWriteBudget(DB, day)).toMatchObject({ essentialReserved: DAILY_ESSENTIAL_WRITE_BUDGET - DAILY_COLLECTION_LOG_RESERVE + 6, collectionReserved: 6, optionalReserved: DAILY_OPTIONAL_WRITE_BUDGET });
-  });
-
-  it('does not charge either bucket when a mixed request cannot reserve both', async () => {
-    const day = now.toISOString().slice(0, 10);
-    await reserveWriteBudget(DB, day, DAILY_OPTIONAL_WRITE_BUDGET, 'optional');
-    expect(await reserveWriteBudgets(DB, day, [{ units: 15, category: 'essential' }, { units: 1, category: 'optional' }])).toBe(false);
-    expect(await readWriteBudget(DB, day)).toMatchObject({ reserved: 4_000, essentialReserved: 0, optionalReserved: 4_000 });
-  });
-
-  it('keeps legacy current-day reservations and closes optional work conservatively', async () => {
-    const day = now.toISOString().slice(0, 10);
-    sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({ date: day, reserved: 19_946, oddsReserved: 10_000 }));
-    expect(await readWriteBudget(DB, day)).toMatchObject({ reserved: 19_946, remaining: 54, essentialReserved: 15_946, optionalReserved: 4_000, optionalRemaining: 0, state: 'known' });
-    expect(await reserveWriteBudget(DB, day, 1, 'optional')).toBe(false);
-    expect(await reserveWriteBudget(DB, day, 55, 'essential')).toBe(false);
-    expect(await reserveWriteBudget(DB, day, 54, 'essential')).toBe(true);
-    const stored = JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as { value: string }).value);
-    expect(stored).toMatchObject({ reserved: 20_000, essentialReserved: 16_000, optionalReserved: 4_000, oddsReserved: 10_000 });
-  });
-
-  it('does not write a lock or budget when the UTC-day budget is exhausted', async () => {
-    race('budget-exhausted');
-    const utcDay = now.toISOString().slice(0, 10);
-    sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({ date: utcDay, reserved: DAILY_D1_WRITE_BUDGET, oddsReserved: DAILY_ODDS_WRITE_BUDGET }));
-    const before = (sqlite.prepare('SELECT total_changes() changes').get() as { changes: number }).changes;
-    const fetch = vi.fn();
-    expect(await collectOdds(DB, now, { fetch })).toMatchObject({ status: 'skipped', targets: 0 });
-    expect(fetch).not.toHaveBeenCalled();
-    expect((sqlite.prepare('SELECT total_changes() changes').get() as { changes: number }).changes).toBe(before);
-    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='odds_lock'").get()).toMatchObject({ n: 0 });
-  });
-
-  it('rolls the reservation at UTC midnight, independently of the JST target date', async () => {
-    const boundary = new Date(`${today}T15:00:00.000Z`);
-    const utcDay = boundary.toISOString().slice(0, 10);
-    const previousUtcDay = new Date(Date.parse(`${utcDay}T00:00:00.000Z`) - 86_400_000).toISOString().slice(0, 10);
-    race('utc-rollover', boundary.getTime() + 5 * 60_000, jstDate(boundary));
-    sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({ date: previousUtcDay, reserved: DAILY_D1_WRITE_BUDGET, oddsReserved: DAILY_ODDS_WRITE_BUDGET }));
-    const fetch = vi.fn(async (url:string) => ({ ok: true, status: 200, text: async () => collectionPage(url) }));
-    const result = await collectOdds(DB, boundary, { fetch, sleep: async () => {} });
-    expect(result).toMatchObject({ status: 'success', targets: 1 });
+  it('collects despite missing, invalid, or exhausted legacy reservation state', async () => {
+    race('legacy-budget-disabled');
+    sqlite.prepare("UPDATE settings SET value='corrupt' WHERE key='roi_d1_write_budget_utc'").run();
+    const fetch=vi.fn(async(url:string)=>({ok:true,status:200,text:async()=>collectionPage(url)}));
+    const result=await collectOdds(DB,now,{fetch,sleep:async()=>{}});
+    expect(result).toMatchObject({status:'success',records:6,targets:1});
     expect(fetch).toHaveBeenCalledTimes(1);
-    const budget = JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as { value: string }).value);
-    expect(budget.date).toBe(utcDay);
-    expect(budget.reserved).toBeLessThan(DAILY_D1_WRITE_BUDGET);
-  });
-
-  it('fetches only after reservation and releases the lock on normal completion', async () => {
-    race('collect-me');
-    const fetch = vi.fn(async (url:string) => ({ ok: true, status: 200, text: async () => collectionPage(url) }));
-    const result = await collectOdds(DB, now, { fetch, sleep: async () => {} });
-    expect(result).toMatchObject({ status: 'success', records: 6, targets: 1 });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(sqlite.prepare("SELECT value FROM settings WHERE key='odds_lock'").get()).toMatchObject({ value: '' });
-    const budget = JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as { value: string }).value);
-    expect(budget.reserved).toBe(51);
-  });
-
-  it('does not fetch if budget initialization fails', async () => {
-    race('blocked');
-    sqlite.exec(`CREATE TRIGGER fail_odds_budget BEFORE UPDATE ON settings WHEN NEW.key='roi_d1_write_budget_utc'
-      BEGIN SELECT RAISE(ABORT, 'simulated D1 write quota'); END`);
-    const fetch = vi.fn();
-    await expect(collectOdds(DB, now, { fetch })).rejects.toThrow('simulated D1 write quota');
-    expect(fetch).not.toHaveBeenCalled();
-    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='odds_lock'").get()).toMatchObject({ n: 0 });
+    expect(sqlite.prepare("SELECT value FROM settings WHERE key='odds_lock'").get()).toMatchObject({value:''});
   });
 
   it('does not settle bets on an off-boundary minute event', async () => {

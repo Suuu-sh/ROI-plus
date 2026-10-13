@@ -9,7 +9,7 @@ import { collectBoatraceCaptureArchives } from './services/collectBoatraceCaptur
 import { collectResults, resultUrl, RESULTS_SOURCE } from './services/collectBoatraceResults.js';
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
-import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, seedUnknownWriteBudget, allowOneDayWriteBudget, ONE_DAY_ALLOWANCE, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
+import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
 interface Env { DB: Db; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; PROXY_TOKEN?: string; }
@@ -707,25 +707,11 @@ app.get('/ingest/write-budget', async c=>{
 });
 app.post('/ingest/write-budget/seed', async c=>{
   if (!auth(c)) return jsonError(c, 'unauthorized', 401);
-  const body = await c.req.json().catch(()=>null) as any;
-  if (!body || body.date !== utcDate() || body.confirmed !== true) return jsonError(c, 'explicit current-UTC-day budget seed confirmation is required');
-  const inserted = await seedUnknownWriteBudget(c.env.DB, body.date);
-  if (!inserted) return c.json({ error:'budget seed already exists or could not be written', code:'d1_write_budget_seed_conflict', budget:await readWriteBudget(c.env.DB) }, 409);
-  return c.json(await readWriteBudget(c.env.DB), 201);
+  return c.json({error:'application D1 write reservations are disabled',code:'d1_write_budget_disabled',budget:await readWriteBudget(c.env.DB)},410);
 });
 app.post('/ingest/write-budget/allowance', async c=>{
   if (!auth(c)) return jsonError(c, 'unauthorized', 401);
-  const body = await c.req.json().catch(()=>null) as any;
-  const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body).sort() : [];
-  const expectedKeys = ['confirmed','date','essentialLimit','limit','optionalLimit'];
-  if (!body || keys.length !== expectedKeys.length || keys.some((key, i)=>key !== expectedKeys[i]) ||
-      body.date !== utcDate() || body.confirmed !== true || body.limit !== ONE_DAY_ALLOWANCE.limit ||
-      body.essentialLimit !== ONE_DAY_ALLOWANCE.essentialLimit || body.optionalLimit !== ONE_DAY_ALLOWANCE.optionalLimit) {
-    return jsonError(c, 'explicit current-UTC-day one-day allowance confirmation and whitelisted limits are required');
-  }
-  const applied = await allowOneDayWriteBudget(c.env.DB, body.date);
-  if (!applied) return c.json({ error:'allowance requires a valid current-day ledger and may be applied only once', code:'d1_write_budget_allowance_conflict', budget:await readWriteBudget(c.env.DB) }, 409);
-  return c.json(await readWriteBudget(c.env.DB), 200);
+  return c.json({error:'application D1 write reservations are disabled',code:'d1_write_budget_disabled',budget:await readWriteBudget(c.env.DB)},410);
 });
 // Only settlement-relevant previous-day IDs are exported to the daily sync.
 // Learning history stays in the local dataset; this route does not mutate D1.
