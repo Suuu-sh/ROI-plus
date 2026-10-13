@@ -19,6 +19,30 @@ from edgelab.importers.boatrace_capture_archive import import_capture_archives
 from edgelab.storage import DEFAULT_STORE, load_rows, save_rows
 from edgelab.sync import fetch_prerace_capture_archives
 
+_SAFE_EXCEPTION_CLASSES = {"ValueError", "TypeError", "KeyError", "AttributeError", "IndexError",
+                           "OverflowError", "OSError", "RuntimeError", "ImportError", "AssertionError"}
+_SAFE_STAGES = {"input_validation", "credentials", "load_local_cache", "archive_export",
+                "archive_import", "save_local_cache", "training_row_build", "coverage_audit",
+                "model_fit", "report_write"}
+
+
+class PipelineStageFailure(Exception):
+    """Sanitized failure carrying only a fixed stage and allowlisted class name."""
+
+    def __init__(self, stage: str, exception_class: str):
+        self.stage = stage if stage in _SAFE_STAGES else "unknown_stage"
+        self.exception_class = (exception_class if exception_class in _SAFE_EXCEPTION_CLASSES
+                                else "OtherError")
+
+
+def _stage_call(stage: str, callback, *args, **kwargs):
+    try:
+        return callback(*args, **kwargs)
+    except Exception as exc:
+        if isinstance(exc, PipelineStageFailure):
+            raise
+        raise PipelineStageFailure(stage, type(exc).__name__) from None
+
 
 def _refresh_same_day_k(rows: dict[str, list[dict[str, Any]]], day: date,
                         cache_dir: str | Path = "data/raw/boatrace") -> dict[str, Any]:
@@ -75,13 +99,14 @@ def _refresh_same_day_k(rows: dict[str, list[dict[str, Any]]], day: date,
 def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
         report_path: str = "ml/data/learning/trifecta-experimental-report.json",
         artifact_dir: str = "ml/artifacts") -> dict[str, Any]:
-    start, end = date.fromisoformat(since), date.fromisoformat(until)
-    if start.isoformat() != since or end.isoformat() != until or end < start or (end - start).days > 31:
-        raise ValueError("date range must be ordered and at most 32 days")
+    start, end = _stage_call("input_validation", lambda: (date.fromisoformat(since), date.fromisoformat(until)))
+    if (start.isoformat() != since or end.isoformat() != until or end < start
+            or (end - start).days > 31):
+        raise PipelineStageFailure("input_validation", "ValueError")
     base_url, token = os.environ.get("EDGELAB_API_URL", "").rstrip("/"), os.environ.get("INGEST_TOKEN", "")
     if not base_url or not token:
-        raise RuntimeError("archive_export_credentials_unavailable")
-    rows = load_rows(store_path)
+        raise PipelineStageFailure("credentials", "RuntimeError")
+    rows = _stage_call("load_local_cache", load_rows, store_path)
     report: dict[str, Any] = {"schema": "trifecta-experimental-pipeline-v1",
         "range": {"since": since, "until": until}, "archiveDates": 0,
         "importedArchives": 0, "excludedArchives": 0,
@@ -91,8 +116,10 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
     day = start
     while day <= end:
         day_text = day.isoformat()
-        pages = fetch_prerace_capture_archives(day_text, base_url=base_url, token=token)
-        imported = import_capture_archives(rows, pages, day_text, allow_missing_weather=True)
+        pages = _stage_call("archive_export", fetch_prerace_capture_archives,
+                            day_text, base_url=base_url, token=token)
+        imported = _stage_call("archive_import", import_capture_archives,
+                               rows, pages, day_text, allow_missing_weather=True)
         report["archiveDates"] += 1
         report["importedArchives"] += int(imported.get("importedArchives", 0))
         report["excludedArchives"] += int(imported.get("excludedArchives", 0))
@@ -100,7 +127,7 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
             imported.get("weatherMissingArchivesImported", 0))
         day += timedelta(days=1)
     if report["importedArchives"]:
-        save_rows(rows, store_path)
+        _stage_call("save_local_cache", save_rows, rows, store_path)
 
     # Results may be published after the daily cache was restored. Refresh only
     # today's official K file, and only when no same-day completed result is in
@@ -112,7 +139,7 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
             k_refresh = {"status": "official_k_fetch_or_validation_failed", "completedRaces": 0}
         report["sameDayKCollection"] = k_refresh
         if k_refresh.get("status") == "fetched_and_validated":
-            save_rows(rows, store_path)
+            _stage_call("save_local_cache", save_rows, rows, store_path)
 
     from edgelab.cli import _make_training_rows
     from edgelab.features.boat import TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA
@@ -123,9 +150,9 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
     # history and today's not-yet-finished races are never given labels.
     complete_k_count = sum(1 for row in rows.get("results", []) if row.get("data_origin") == "real"
                            and row.get("finish_order") is not None)
-    training_rows = _make_training_rows(rows, "boat",
+    training_rows = _stage_call("training_row_build", _make_training_rows, rows, "boat",
         feature_schema=TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA, require_source_arrival=True)
-    coverage = audit_trifecta_coverage(rows, training_rows)
+    coverage = _stage_call("coverage_audit", audit_trifecta_coverage, rows, training_rows)
     report["coverage"] = {key: coverage.get(key) for key in (
         "finishedRealBoatRaces", "distinctRaceDates", "completeSixBoatResultRaces",
         "completeEvidenceRaces", "trainingRaceIdsPresentInStore", "counts", "exclusions")}
@@ -146,8 +173,8 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
         if existing or (Path(artifact_dir) / f"{model_id}.pkl").exists():
             report["training"]["status"] = "artifact_already_exists_for_cohort"
         else:
-            result = train_trifecta_experimental(training_rows, rows, model_id=model_id,
-                                                   artifact_dir=artifact_dir)
+            result = _stage_call("model_fit", train_trifecta_experimental, training_rows, rows,
+                                 model_id=model_id, artifact_dir=artifact_dir)
             report["training"].update({key: result.get(key) for key in (
                 "status", "reason", "nTrainRaces", "trainFrom", "trainTo", "trainedAt",
                 "ticketArtifactSha256", "artifactManifest", "artifactManifestSha256",
@@ -167,9 +194,9 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
                     f"{model_id}.pkl", f"{model_id}.json",
                     f"experimental-trifecta-{model_id}.manifest.json"]
     target = Path(report_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True,
-                                 allow_nan=False) + "\n", encoding="utf-8")
+    _stage_call("report_write", target.parent.mkdir, parents=True, exist_ok=True)
+    rendered = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    _stage_call("report_write", target.write_text, rendered, encoding="utf-8")
     return report
 
 
@@ -184,8 +211,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = run(since=args.since, until=args.until, store_path=args.store,
                      report_path=args.report, artifact_dir=args.artifact_dir)
+    except PipelineStageFailure as exc:
+        # Never expose remote response bodies, URLs, credential values, messages or traces.
+        report = {"schema": "trifecta-experimental-pipeline-v1",
+            "training": {"status": "failed", "error": "pipeline_stage_failed",
+                         "failureStage": exc.stage, "exceptionClass": exc.exception_class},
+            "promotion": "not_performed", "normalRegistrySync": "not_performed",
+            "virtualPurchase": "not_performed"}
+        target = Path(args.report)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                          encoding="utf-8")
     except Exception as exc:
-        # Never expose remote response bodies, URLs, credential values, or traces.
+        # Only fixed validation/credential classes are categorized; never expose exception text.
         report = {"schema": "trifecta-experimental-pipeline-v1",
             "training": {"status": "failed", "error": (
                 "invalid_date_range" if isinstance(exc, ValueError) else

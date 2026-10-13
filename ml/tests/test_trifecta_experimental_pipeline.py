@@ -1,10 +1,13 @@
 import json
+import io
 import os
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from edgelab.trifecta_experimental_pipeline import _refresh_same_day_k, run
+from edgelab.trifecta_experimental_pipeline import (PipelineStageFailure, _refresh_same_day_k,
+                                                   main, run)
 
 
 @patch.dict(os.environ, {"EDGELAB_API_URL": "https://example.test", "INGEST_TOKEN": "test-only"})
@@ -33,8 +36,9 @@ def test_experimental_pipeline_rejects_reversed_or_unbounded_range_before_networ
         for start, end in (("2026-10-14", "2026-10-13"), ("2026-01-01", "2026-02-02")):
             try:
                 run(since=start, until=end, store_path=str(Path(directory) / "rows.json"))
-            except ValueError:
-                pass
+            except PipelineStageFailure as exc:
+                assert exc.stage == "input_validation"
+                assert exc.exception_class == "ValueError"
             else:
                 raise AssertionError("invalid range was accepted")
 
@@ -73,3 +77,22 @@ def test_same_day_k_refresh_imports_only_outcome_labels_after_source_validation(
     assert result["sourceVerified"] is True
     assert not rows["races"] and not rows["entries"]
     assert rows["results"][0]["available_at"].endswith("+00:00")
+
+
+@patch.dict(os.environ, {"EDGELAB_API_URL": "https://example.test", "INGEST_TOKEN": "test-only"})
+@patch("edgelab.trifecta_experimental_pipeline.fetch_prerace_capture_archives",
+       side_effect=TypeError("private response or secret text"))
+def test_pipeline_failure_report_exposes_only_fixed_stage_and_allowlisted_class(fetch):
+    with TemporaryDirectory() as directory:
+        report_path = Path(directory) / "report.json"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = main(["--since", "2026-10-13", "--until", "2026-10-13",
+                           "--store", str(Path(directory) / "rows.json"),
+                           "--report", str(report_path)])
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert status == 2
+    assert report["training"] == {"status": "failed", "error": "pipeline_stage_failed",
+                                  "failureStage": "archive_export", "exceptionClass": "TypeError"}
+    assert "private" not in output.getvalue()
+    fetch.assert_called_once()
