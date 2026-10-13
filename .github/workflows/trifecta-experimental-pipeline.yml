@@ -123,37 +123,24 @@ jobs:
       - name: Register only the hash-bound experimental model
         if: success() && steps.model.outputs.model_id != ''
         env:
+          PYTHONPATH: ml
           EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
           MODEL_ID: ${{ steps.model.outputs.model_id }}
         run: |
           python - <<'PY'
-          import hashlib, json, os, urllib.error, urllib.request
-          from pathlib import Path
+          import json, os
+          from edgelab.experimental_registry import (ExperimentalModelRegistrationError,
+                                                       register_experimental_model)
           model_id = os.environ['MODEL_ID']
-          root = Path('ml/artifacts')
-          manifest_path = root / f'experimental-trifecta-{model_id}.manifest.json'
-          metadata_path = root / f'{model_id}.json'
-          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-          metadata_json = metadata_path.read_text(encoding='utf-8')
-          canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True,
-                                 separators=(',', ':'), allow_nan=False).encode('utf-8')
-          body = json.dumps({'manifest': manifest,
-                             'manifestSha256': hashlib.sha256(canonical).hexdigest(),
-                             'metadataJson': metadata_json}, ensure_ascii=False, allow_nan=False).encode('utf-8')
           base = os.environ.get('EDGELAB_API_URL', '').rstrip('/')
           token = os.environ.get('INGEST_TOKEN', '')
-          if not base or not token:
-              raise SystemExit('experimental model registration credentials unavailable')
-          request = urllib.request.Request(base + '/api/ingest/experimental-trifecta/model',
-              data=body, method='POST', headers={'Authorization': 'Bearer ' + token,
-              'Content-Type': 'application/json', 'Accept': 'application/json'})
           try:
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  result = json.loads(response.read(16384).decode('utf-8'))
-          except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
-              raise SystemExit('experimental model registration failed: ' + type(exc).__name__)
-          if not isinstance(result, dict) or result.get('id') != model_id:
+              result = register_experimental_model(model_id, artifact_dir='ml/artifacts',
+                                                   base_url=base, token=token)
+          except ExperimentalModelRegistrationError as exc:
+              raise SystemExit('experimental model registration failed: ' + exc.failure_category)
+          if result.get('modelId') != model_id:
               raise SystemExit('experimental model registration response was invalid')
           print('Experimental model registered in the isolated experiment registry.')
           PY
