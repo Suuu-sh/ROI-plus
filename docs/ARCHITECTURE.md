@@ -218,3 +218,9 @@ npm -w apps/web run deploy
 通常・実験の三連単自動仮想購入は、既存の締切60秒前±10秒の判断枠で公式120組市場を再取得し、そのオッズで期待値・購入額を判断する。保存済みオッズへのfallbackはしない。取得失敗・不完全・最終市場・判断枠超過は購入を見送る。予測時刻と特徴量の利用可能時刻は変えず、購入用市場の実リクエスト時刻・実取得完了時刻・URL・本文SHA256・120組をdecision snapshotの`purchaseOdds`に保存する（通常betの`odds_captured_at`も実取得時刻）。取得が正確に60秒前の瞬間だったとは表示しない。
 
 毎分Cronの既存49 fetch枠・最低3秒間隔を共有し、同一呼び出しでは通常／実験の同一レース市場を再利用する。本文上限512 KiB・判断枠残時間のtimeout・1レース1試行とし、retry待ちで他レースの判断枠を占有しない。設定フラグが無効なら取得せず購入しない。既存の予測用capture archiveは変更せず、遅延取得で予測時刻を付け替えない。実験購入のbankroll更新にもSQL実行時の締切枠・scheduled・隔離除外の再確認を追加した。SPECの低頻度取得記述とは差分があり、SPECは変更していない。
+
+### 承認付き通常購入履歴リセット
+
+`reset-normal-purchase-history.yml` はユーザーの明示承認を受けた通常購入・成績・残高のリセット専用operatorである。exact source SHAと `RESET NORMAL PURCHASE HISTORY ONLY` の確認を必須にし、INGEST_TOKEN認証のsnapshot routeで通常 `bets` / `daily_summaries` と保護対象（通常decision監査、実験購入・decision・bankroll）を一貫したD1 batchで取得する。秘密設定は取得せず、初期資金値だけを扱う。リセット前にアクセス制御されたActions artifactへsnapshotを30日保存し、upload成功後だけreset routeを呼ぶ。
+
+resetはsnapshot全行と初期資金を同じatomic D1 batchの先頭で照合し、購入・精算などの変更があればSQLエラーで全処理をrollbackする。削除は通常 `bets` / `daily_summaries` だけで、初期資金設定、通常decision監査、実験台帳・残高、レース・結果・予測・出所は変更しない。通常残高・成績はbetsから計算されるため初期資金／ゼロに戻る。実行後に保護対象の行数・SHA256を比較する。バックアップからの復元は自動化せず、artifactのJSON内の元列・元値を用いて別途人手レビューと明示承認を行う。SPECは変更していない。

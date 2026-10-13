@@ -1,3 +1,4 @@
+import { normalHistorySnapshot, resetNormalHistory, validSnapshot } from './services/resetNormalHistory.js';
 import { fetchPurchaseOdds, purchaseOddsContext, type PurchaseOdds, type PurchaseOddsContext } from './services/purchaseOdds.js';
 import { finalTrifectaOdds } from './services/finalTrifectaOdds.js';
 import { collectionIssues } from './services/collectionIssues.js';
@@ -867,6 +868,19 @@ app.get('/ingest/write-budget', async c=>{
   if (!auth(c)) return jsonError(c, 'unauthorized', 401);
   return c.json(await readWriteBudget(c.env.DB));
 });
+// Operator-only reset: exact protected backup snapshot required, no frontend access.
+app.get('/ingest/normal-history/snapshot', async c => {
+  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
+  return c.json(await normalHistorySnapshot(c.env.DB));
+});
+app.post('/ingest/normal-history/reset', async c => {
+  if (!auth(c)) return jsonError(c, 'unauthorized', 401);
+  const body = await c.req.json().catch(() => null);
+  if (body?.confirmation !== 'RESET NORMAL PURCHASE HISTORY ONLY' || !validSnapshot(body?.snapshot)) return jsonError(c, 'explicit confirmation and backup snapshot required', 400);
+  try { return c.json(await resetNormalHistory(c.env.DB, body.snapshot)); }
+  catch { return jsonError(c, 'reset refused: snapshot changed or atomic database unavailable', 409); }
+});
+
 app.post('/ingest/write-budget/seed', async c=>{
   if (!auth(c)) return jsonError(c, 'unauthorized', 401);
   return c.json({error:'application D1 write reservations are disabled',code:'d1_write_budget_disabled',budget:await readWriteBudget(c.env.DB)},410);
