@@ -72,6 +72,24 @@ describe('historical BASE dedicated T-60 virtual experiment', () => {
     sqlite.close()
   })
 
+  it('counts one placed race once when its virtual portfolio has multiple tickets', async () => {
+    const f = createFixture('2026-10-15T02:40:00+09:00')
+    const decisionAt = jst(f.now)
+    f.sqlite.prepare(`INSERT INTO historical_trifecta_experiment_decisions
+      (id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,snapshot_json)
+      VALUES(?,?,?,?,?,'placed',200,'{}')`)
+      .run('history-decision', 'boat-trifecta-historical-base-v1', f.raceId, 'boat-trifecta-historical-base-20261014', decisionAt)
+    const addBet = f.sqlite.prepare(`INSERT INTO historical_trifecta_experiment_bets
+      (id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+      VALUES(?,?,?,?,?,?,0.1,0.01,20,1,?,'open','real')`)
+    addBet.run('history-bet-1', 'history-decision', f.raceId, 'boat-trifecta-historical-base-20261014', '1-2-3', 100, decisionAt)
+    addBet.run('history-bet-2', 'history-decision', f.raceId, 'boat-trifecta-historical-base-20261014', '1-3-2', 100, decisionAt)
+
+    const performance = await historicalTrifectaExperimentPerformance(f.DB)
+    expect(performance.summary).toMatchObject({ decisions: 1, placed_races: 1, abstained_races: 0, bets: 2, total_stake: 200, open_bets: 2 })
+    f.sqlite.close()
+  })
+
   it('uses fresh official current odds and writes only its isolated virtual ledger', async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-15T03:00:00.000Z'))
     const f = createFixture(jst(Date.now() - 30_000))

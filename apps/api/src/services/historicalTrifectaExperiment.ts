@@ -170,8 +170,8 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
 
 export async function historicalTrifectaExperimentPerformance(db: Db) {
   const summary = await first<any>(db, `SELECT COUNT(DISTINCT d.race_id) decisions,
-    COALESCE(SUM(CASE WHEN d.outcome='placed' THEN 1 ELSE 0 END),0) placed_races,
-    COALESCE(SUM(CASE WHEN d.outcome='abstained' THEN 1 ELSE 0 END),0) abstained_races,
+    COUNT(DISTINCT CASE WHEN d.outcome='placed' THEN d.race_id END) placed_races,
+    COUNT(DISTINCT CASE WHEN d.outcome='abstained' THEN d.race_id END) abstained_races,
     COUNT(b.id) bets,COALESCE(SUM(b.stake),0) total_stake,COALESCE(SUM(b.profit),0) settled_profit,
     COALESCE(SUM(CASE WHEN b.status='open' THEN 1 ELSE 0 END),0) open_bets,
     (SELECT available_balance FROM historical_trifecta_experiment_bankroll WHERE experiment_key=?) available_balance
