@@ -75,6 +75,7 @@ export const api = {
   breakdown: (origin: OriginFilter) => req<Breakdown>(`/performance/breakdown${qs({ origin })}`),
   rankComparison: (origin: OriginFilter) => req<RankComparison>(`/performance/rank-comparison${qs({ origin })}`),
   experimentalPerformance: () => req<ExperimentalPerformance>('/performance/experimental'),
+  experimentalBets: () => req<ExperimentalBet[]>('/bets/experimental'),
   models: () => req<ModelInfo[]>('/models'),
   promote: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/promote`, { method: 'POST' }),
   promoteInitialBaseline: (id: string, validationFingerprint: string) =>
@@ -83,6 +84,32 @@ export const api = {
     }),
   rollback: (id: string) => req<ModelInfo>(`/models/${encodeURIComponent(id)}/rollback`, { method: 'POST' }),
   collection: () => req<CollectionStatus>('/collection/status'),
+}
+
+export interface ExperimentalBet {
+  id: string
+  recordKind: 'experimental_paper'
+  experimentKey: 'boat-trifecta-small-sample-v1'
+  decisionId: string
+  raceId: string
+  sport: 'boat'
+  betType: 'trifecta'
+  selection: string
+  stake: number
+  predictedProb: number | null
+  probabilityStd: number | null
+  oddsAtBet: number | null
+  expectedRoi: number | null
+  modelId: string
+  placedAt: string
+  status: 'open' | 'won' | 'lost'
+  payout: number | null
+  profit: number | null
+  settledAt: string | null
+  dataOrigin: 'real'
+  venueName: string | null
+  raceNo: number
+  raceDate: string
 }
 
 export interface ExperimentalPerformance {

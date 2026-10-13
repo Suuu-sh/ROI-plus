@@ -7,15 +7,17 @@ import { SportPage } from '../src/pages/SportPage'
 import { OverviewPage } from '../src/pages/Overview'
 import { api } from '../src/lib/api'
 import { OriginProvider } from '../src/lib/origin'
+import type { ExperimentalBet } from '../src/lib/api'
 import type { Bet } from '@edgelab/shared/src/types'
 
 const overview = { initialBankroll: 100000, bankroll: 100000, totalProfit: 0, roi: null, betCount: 0, settledCount: 0, hitRate: null, maxDrawdown: 0, maxDrawdownPct: 0, equityCurve: [] }
 const boatOverview = { ...overview, equityCurve: [{ at: '2026-10-01T00:00:00.000Z', bankroll: 100000 }, { at: '2026-10-02T00:00:00.000Z', bankroll: 100100 }] }
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
-function mockReads(purchasedBets: Bet[] = []) {
+function mockReads(purchasedBets: Bet[] = [], experimentalBets: ExperimentalBet[] = []) {
   const fetcher = vi.fn(async (url: string) => {
     if (url === '/api/races/detail-race') return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
     if (url === '/api/performance/experimental') return new Response(JSON.stringify({ experimentKey: 'boat-trifecta-small-sample-v1', state: 'unavailable', model: null, bankroll: { initial: 100000, available: 100000 }, metrics: { races: 0, bets: 0, stake: 0, payout: 0, profit: 0, roi: null }, decisions: [], sizing: { method: 'fractional-kelly-portfolio', perRaceCombinedCap: 1000, dailyCap: null, balanceGuard: 'nonnegative-virtual-balance' } }), { headers: { 'content-type': 'application/json' } })
+    if (url === '/api/bets/experimental') return new Response(JSON.stringify(experimentalBets), { headers: { 'content-type': 'application/json' } })
     if (url.startsWith('/api/bets')) return new Response(JSON.stringify(purchasedBets), { headers: { 'content-type': 'application/json' } })
     return new Response(JSON.stringify(url.includes('/performance/overview') ? url.includes('sport=boat') ? boatOverview : overview : []), { headers: { 'content-type': 'application/json' } })
   })
@@ -57,7 +59,23 @@ it('boat main page loads only real purchases and performance without exploration
   expect(screen.queryByRole('button', { name: '全期間の購入履歴' })).toBeNull()
   expect(screen.queryByText(/レースを調べる/)).toBeNull()
   expect(screen.queryByText(/レースを調べるから購入できます/)).toBeNull()
-  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets?sport=boat&origin=real', '/api/performance/overview?sport=boat&origin=real'])
+  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?sport=boat&origin=real', '/api/performance/overview?sport=boat&origin=real'])
+})
+it('boat purchase-history surface shows ticket-level experimental purchases in the separate ledger', async () => {
+  const experimentalBet: ExperimentalBet = {
+    id: 'experimental-ticket-boat-example', recordKind: 'experimental_paper', experimentKey: 'boat-trifecta-small-sample-v1', decisionId: 'decision-example',
+    raceId: 'boat-20261013-04-12', sport: 'boat', betType: 'trifecta', selection: '1-2-3', stake: 22,
+    predictedProb: 0.12, probabilityStd: 0.02, oddsAtBet: 9.5, expectedRoi: 0.14, modelId: 'experimental-model',
+    placedAt: '2026-10-13T03:00:00.000Z', status: 'open', payout: null, profit: null, settledAt: null,
+    dataOrigin: 'real', venueName: '平和島', raceNo: 12, raceDate: '2026-10-13',
+  }
+  const fetcher = mockReads([], [experimentalBet])
+  render(<MemoryRouter><SportPage sport="boat" /></MemoryRouter>)
+  expect(await screen.findByRole('heading', { name: '実験購入履歴（別台帳）' })).toBeTruthy()
+  expect(screen.getByRole('link', { name: /boat-20261013-04-12|平和島 12R/ })).toBeTruthy()
+  expect(screen.getByText('¥22')).toBeTruthy()
+  expect(fetcher).toHaveBeenCalledWith('/api/bets/experimental', expect.anything())
+  expect(screen.getByText(/通常の購入履歴・残高・成績とは別/)).toBeTruthy()
 })
 it('hides origin controls and sample notice on boat routes only', () => {
   const stored = new Map([['edgelab.origin', 'sample']])
@@ -95,9 +113,17 @@ it('board shows operational performance and only races with recorded purchases',
   expect(screen.getByRole('heading', { name: '運用成績' })).toBeTruthy()
   expect(screen.queryByText('競馬 vs ボートレースを比較')).toBeNull()
   await screen.findByText('実験用仮想残高')
-  expect(fetcher).toHaveBeenCalledTimes(3)
+  expect(fetcher).toHaveBeenCalledTimes(4)
   expect(fetcher.mock.calls.some(([url]) => /\/models|\/races\?|\/rankings|\/collection/.test(url))).toBe(false)
-  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets?origin=all', '/api/performance/experimental', '/api/performance/overview?origin=all'])
+  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?origin=all', '/api/performance/experimental', '/api/performance/overview?origin=all'])
+})
+it('does not request or show the real experimental ledger in sample origin on Overview', async () => {
+  vi.stubGlobal('localStorage', { getItem: (key: string) => key === 'edgelab.origin' ? 'sample' : null, setItem: vi.fn(), removeItem: vi.fn() })
+  const fetcher = mockReads()
+  render(<OriginProvider><MemoryRouter><OverviewPage /></MemoryRouter></OriginProvider>)
+  await screen.findByRole('heading', { name: '購入したレース' })
+  expect(screen.queryByRole('heading', { name: '実験購入履歴（別台帳）' })).toBeNull()
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/bets/experimental')).toBe(false)
 })
 it('board lists a bought race and links only that race to its detail', async () => {
   const bet: Bet = { id: 'bought-1', raceId: 'boat-20261011-18-07', sport: 'boat', betType: 'trifecta', selection: '1-2-3', stake: 100,

@@ -1197,6 +1197,46 @@ it('keeps the experimental trifecta model and performance ledger separate from n
  const normal=await app.request('/api/performance/overview',{},env());expect(((await normal.json()) as any).betCount).toBe(normalBefore);
 });
 
+it('lists placed experimental paper tickets separately from ordinary bet history and metrics',async()=>{
+ const placedRace='boat-20990101-99-41',abstainedRace='boat-20990101-99-42',modelId='boat-trifecta-history-fixture',artifactSha='a'.repeat(64);
+ addValidatedTrifectaFixture(placedRace,'history-normal-fixture');
+ addValidatedTrifectaFixture(abstainedRace,'history-abstained-fixture');
+ const artifactManifest={schema:'edgelab-experimental-trifecta-artifact-v1',modelId,trainingMode:'experimental',experimentalOnly:true,
+  files:{[`${modelId}.pkl`]:{sha256:artifactSha}}};
+ const metadata={experimentalOnly:true,trainingMode:'experimental',status:'candidate',
+  boatFeatureSchemaVersion:'boat-prerace-v2-no-weather-experimental-v1',ticketBetType:'trifecta',ticketArtifactSha256:artifactSha};
+ sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
+  VALUES(?,'candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
+  .run(modelId,artifactSha,'b'.repeat(64),'c'.repeat(64),jstIso(Date.now()-60_000),JSON.stringify(artifactManifest),JSON.stringify(metadata),jstIso());
+ const placedDecision='history-placed-decision',abstainedDecision='history-abstained-decision',placedAt=jstIso(Date.now()-2_000),settledAt=jstIso(Date.now()-1_000);
+ sqlite.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,sizing_method,snapshot_json)
+  VALUES(?,'boat-trifecta-small-sample-v1',?,?,?,'placed',150,'fractional-kelly-portfolio','{}'),
+        (?,'boat-trifecta-small-sample-v1',?,?,?,'abstained',0,'fractional-kelly-portfolio','{}')`)
+  .run(placedDecision,placedRace,modelId,placedAt,abstainedDecision,abstainedRace,modelId,placedAt);
+ const insertTicket=sqlite.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,payout,profit,settled_at,data_origin)
+  VALUES(?,?,?,?,?,?,?,0.01,20,1,?,?,?, ?,?,'real')`);
+ insertTicket.run('history-exp-1',placedDecision,placedRace,modelId,'1-2-3',100,0.2,placedAt,'won',500,400,settledAt);
+ insertTicket.run('history-exp-2',placedDecision,placedRace,modelId,'1-3-2',50,0.1,placedAt,'open',null,null,null);
+ const normalBefore=Number(((await (await app.request('/api/performance/overview',{},env())).json()) as any).betCount);
+
+ const response=await app.request('/api/bets/experimental',{},env());
+ expect(response.status).toBe(200);expect(response.headers.get('cache-control')).toBe('private, no-store');
+ const rows=await response.json() as any[];
+ expect(rows).toHaveLength(2);
+ expect(rows.map(row=>row.id)).toEqual(['history-exp-2','history-exp-1']);
+ expect(rows[0]).toEqual({id:'history-exp-2',recordKind:'experimental_paper',experimentKey:'boat-trifecta-small-sample-v1',decisionId:placedDecision,
+  raceId:placedRace,sport:'boat',betType:'trifecta',selection:'1-3-2',stake:50,predictedProb:0.1,probabilityStd:0.01,oddsAtBet:20,expectedRoi:1,
+  modelId,placedAt,status:'open',payout:null,profit:null,settledAt:null,dataOrigin:'real',venueName:'Ticket fixture',raceNo:41,raceDate:'2099-01-01'});
+ expect(rows[1]).toMatchObject({id:'history-exp-1',recordKind:'experimental_paper',status:'won',payout:500,profit:400,settledAt,
+  raceId:placedRace,raceNo:41,raceDate:'2099-01-01'});
+ expect(rows[0]).not.toHaveProperty('edgeLabel');expect(rows[0]).not.toHaveProperty('finalOdds');
+ expect(rows.some(row=>row.raceId===abstainedRace)).toBe(false);
+ const ordinary=await app.request('/api/bets?origin=all',{},env());
+ expect((await ordinary.json() as any[]).some(row=>String(row.id).startsWith('history-exp-'))).toBe(false);
+ const normalAfter=Number(((await (await app.request('/api/performance/overview',{},env())).json()) as any).betCount);
+ expect(normalAfter).toBe(normalBefore);
+});
+
 it('settles only fully evidenced experimental trifecta outcomes and credits the separate bankroll',async()=>{
  const raceId='boat-20990101-99-01',modelId='boat-trifecta-settlement-fixture';
  addValidatedTrifectaFixture(raceId,'normal-fixture-for-experimental-settlement');

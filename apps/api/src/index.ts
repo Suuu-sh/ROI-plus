@@ -1237,6 +1237,23 @@ async function quarantineSummary(db: Db, sport: string | null, origin: string | 
  return await first<any>(db, `SELECT COUNT(*) count,COALESCE(SUM(b.stake),0) stake,COALESCE(SUM(b.payout),0) payout,COALESCE(SUM(b.profit),0) profit FROM bets b WHERE EXISTS(SELECT 1 FROM data_repair_audit_marks q WHERE q.record_type='bet' AND q.record_id=b.id) AND (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?)`, sport, sport, origin, origin) ?? {count:0,stake:0,payout:0,profit:0};
 }
 app.get('/bets/quarantine-summary',async c=>{const sport=c.req.query('sport'),origin=originFilter(c.req.query('origin'));if(sport&&!validSport(sport))return jsonError(c,'invalid sport');return c.json(await quarantineSummary(c.env.DB,sport||null,origin));});
+app.get('/bets/experimental',async c=>{
+ const experimentKey='boat-trifecta-small-sample-v1';
+ const rows=await all<any>(c.env.DB,`SELECT b.id,b.decision_id,b.race_id,b.selection,b.stake,b.probability,b.prob_std,b.odds_at_bet,b.expected_roi,
+   b.model_id,b.placed_at,b.status,b.payout,b.profit,b.settled_at,d.experiment_key,v.name venue_name,r.race_no,r.race_date
+   FROM experimental_paper_bets b
+   JOIN experimental_paper_decisions d ON d.id=b.decision_id AND d.experiment_key=? AND d.outcome='placed'
+   JOIN races r ON r.id=b.race_id AND r.sport='boat' AND r.data_origin='real'
+   JOIN venues v ON v.id=r.venue_id AND v.sport='boat'
+   WHERE b.data_origin='real'
+   ORDER BY julianday(b.placed_at) DESC,b.id DESC LIMIT 500`,experimentKey);
+ c.header('Cache-Control','private, no-store');
+ return c.json(rows.map(row=>({id:row.id,recordKind:'experimental_paper',experimentKey:row.experiment_key,decisionId:row.decision_id,
+   raceId:row.race_id,sport:'boat',betType:'trifecta',selection:row.selection,stake:Number(row.stake),predictedProb:Number(row.probability),
+   probabilityStd:Number(row.prob_std),oddsAtBet:Number(row.odds_at_bet),expectedRoi:Number(row.expected_roi),modelId:row.model_id,
+   placedAt:row.placed_at,status:row.status,payout:row.payout==null?null:Number(row.payout),profit:row.profit==null?null:Number(row.profit),
+   settledAt:row.settled_at??null,dataOrigin:'real',venueName:row.venue_name,raceNo:Number(row.race_no),raceDate:row.race_date})));
+});
 app.get('/paper/decisions',async c=>{
  const date=c.req.query('date')??jstRaceDate();
  if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return jsonError(c,'date must be YYYY-MM-DD');

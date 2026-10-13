@@ -10,6 +10,7 @@ import { EdgeBadge, Empty, ErrorState, Loading, OriginBadge, ProbBar, Section, S
 import { BetSheet } from '../components/BetSheet'
 import { EquityChart } from '../components/EquityChart'
 import { betTypeLabel } from '../lib/betType'
+import { ExperimentalBetsHistory } from '../components/ExperimentalBetsHistory'
 
 function shiftDate(d: string, days: number) {
   const x = new Date(`${d}T00:00:00Z`)
@@ -53,6 +54,7 @@ export function SportPage({ sport }: { sport: Sport }) {
         error={bets.error}
         onRetry={() => { bets.reload(); setPerformanceVersion((v) => v + 1) }}
       />
+      {sport === 'boat' && <ExperimentalBetsHistory compact />}
 
       {(sport !== 'boat' || raceId) && <details className="card group" open={researchOpen || undefined} onToggle={(event) => setResearchOpen(event.currentTarget.open)}>
         <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold marker:content-none">レースを調べる <span className="ml-2 text-xs font-normal text-muted">期待値ランキング・出走表</span></summary>

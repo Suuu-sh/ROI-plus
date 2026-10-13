@@ -9,6 +9,7 @@ import { dateTime, pct, signedYen, tone, yen } from '../lib/format'
 import { t } from '../i18n'
 import { EquityChart } from '../components/EquityChart'
 import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
+import { ExperimentalBetsHistory } from '../components/ExperimentalBetsHistory'
 import { Empty, ErrorState, Kpi, Loading, Section, SportIcon } from '../components/ui'
 
 type PurchasedRace = {
@@ -71,6 +72,7 @@ export function OverviewPage() {
     </Section>
 
     <ExperimentalPerformance compact />
+    {origin !== 'sample' && <ExperimentalBetsHistory compact />}
 
     <Section title="購入したレース" right={<span className="text-xs text-muted">{purchasedRaces.length}レース · {bets.length}点</span>}>
       {!purchasedRaces.length ? <Empty>この表示条件では仮想購入がありません。未購入レースは表示しません。</Empty> : <div className="divide-y divide-line">
