@@ -13,6 +13,9 @@ describe('official BOAT RACE result parser', () => {
   it('parses a complete six-boat result and exact winning payouts', () => {
     expect(parseBoatraceResults(boatraceResultPage(identity), expected)).toEqual({
       results: [1, 2, 5, 3, 4, 6].map((number, index) => ({ number, finishOrder: index + 1 })),
+      terminalEntries: [],
+      refundTablePresent: true,
+      nonRefundableNumbers: [],
       payouts: [
         { betType: 'trifecta', selection: '1-2-5', payout: 3770 },
         { betType: 'win', selection: '1', payout: 430 },
@@ -50,7 +53,7 @@ describe('official BOAT RACE result parser', () => {
     const html = boatraceResultPage(identity);
     expect(() => parseBoatraceResults(html.replace('<td class="is-fs14">６</td>', '<td class="is-fs14">５</td>'), expected)).toThrow('official result page rejected');
     expect(() => parseBoatraceResults(html.replace('>4005</span>', '>9999</span>'), expected)).toThrow('official result page rejected');
-    expect(() => parseBoatraceResults(html.replace('>4005</span>', '>4005</span>失格'), expected)).toThrow('official result page rejected');
+    expect(() => parseBoatraceResults(html.replace('<td class="is-fs14">６</td>', '<td class="is-fs14">失格</td>'), expected)).toThrow('official result page rejected');
     expect(() => parseBoatraceResults(boatraceResultPage({ ...identity, finishOrder: [1, 1, 5, 3, 4, 6] }), expected)).toThrow('official result page rejected');
   });
 

@@ -119,8 +119,9 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
 // Official result pages use short markers in the finish column. Keep the
 // mapping explicit; these are terminal entrants, not inferred rank positions.
 function terminalFinishCode(value: string): string | null {
+  // Keep exceptional-result support deliberately narrow: only the official
+  // capsize marker has an implemented, provenance-backed no-refund path.
   if (value === '転') return '転覆';
-  if (['F','L','K','欠場','欠','失格','転覆','妨害','落水','エンスト','不完走'].includes(value) || /^K\d$/.test(value)) return value;
   return null;
 }
 
