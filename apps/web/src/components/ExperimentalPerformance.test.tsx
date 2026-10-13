@@ -16,7 +16,7 @@ describe('ExperimentalPerformance', () => {
       sizing: { method: 'fractional-kelly-portfolio', perRaceCombinedCap: 1000, dailyCap: null, balanceGuard: 'nonnegative-virtual-balance' },
       decisions: [{
         raceId: 'boat-20261013-04-12', raceDate: '2026-10-13', raceNo: 12, venueName: '平和島',
-        outcome: 'void', reason: 'invalid_stake_unit', stake: 22, modelId: 'experimental-model',
+        outcome: 'void', reason: 'invalid_stake_unit', stake: 0, modelId: 'experimental-model',
         decidedAt: '2026-10-13T04:00:00.000Z', probability: null, odds: null, uncertainty: null, expectedRoi: null,
       }],
     }

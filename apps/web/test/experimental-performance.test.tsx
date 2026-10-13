@@ -11,7 +11,7 @@ const payload = {
   bankroll: { initial: 100000 as const, available: 99800 },
   metrics: { races: 1, bets: 2, stake: 200, payout: 0, profit: -200, roi: 0 },
   decisions: [{ raceId: 'boat-1', raceDate: '2026-10-13', raceNo: 1, venueName: 'テスト場', outcome: 'placed' as const, reason: null, stake: 200, modelId: 'candidate-1', decidedAt: '2026-10-13T01:00:00Z', probability: 0.2, odds: 10, uncertainty: 0.1, expectedRoi: 1 }],
-  sizing: { method: 'fractional-kelly-portfolio' as const, perRaceCombinedCap: 1000 as const, dailyCap: null, balanceGuard: 'nonnegative-virtual-balance' as const },
+  sizing: { method: 'fractional-kelly-portfolio' as const, minimumTicketStake: 100 as const, stakeUnit: 100 as const, perRaceCombinedCap: 1000 as const, dailyCap: null, balanceGuard: 'nonnegative-virtual-balance' as const },
 }
 
 describe('experimental performance separation', () => {
@@ -21,7 +21,7 @@ describe('experimental performance separation', () => {
     render(<ExperimentalPerformance />)
     expect(await screen.findByText('実験判断履歴')).toBeTruthy()
     expect(screen.getByText(/通常の運用成績・資産とは別の仮想台帳/)).toBeTruthy()
-    expect(screen.getByText('1レース合計の購入額上限 ¥1,000 · 日次固定上限なし · 仮想残高は非負に制限')).toBeTruthy()
+    expect(screen.getByText('1券あたり¥100以上・¥100単位 · 1レース合計の購入額上限 ¥1,000 · 日次固定上限なし · 仮想残高は非負に制限')).toBeTruthy()
     expect(screen.getByText(/実験専用・未検証/)).toBeTruthy()
     expect(fetchMock).toHaveBeenCalledWith('/api/performance/experimental', expect.any(Object))
   })
