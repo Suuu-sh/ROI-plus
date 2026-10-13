@@ -48,7 +48,8 @@ def register_experimental_model(model_id: str, *, artifact_dir: str | Path,
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (OSError, ValueError, TypeError, UnicodeDecodeError):
         raise ExperimentalModelRegistrationError("artifact_invalid") from None
-    if len(body) > 2 * 1024 * 1024:
+    # Keep below the Worker's 128 KB Content-Length guard with headroom.
+    if len(body) > 120_000:
         raise ExperimentalModelRegistrationError("request_too_large")
     request = Request(base_url.rstrip("/") + "/api/ingest/experimental-trifecta/model",
         data=body, method="POST", headers={"Authorization": "Bearer " + token,
