@@ -12,11 +12,24 @@ import type { Bet } from '@edgelab/shared/src/types'
 
 const overview = { initialBankroll: 100000, bankroll: 100000, totalProfit: 0, roi: null, betCount: 0, settledCount: 0, hitRate: null, maxDrawdown: 0, maxDrawdownPct: 0, equityCurve: [] }
 const boatOverview = { ...overview, equityCurve: [{ at: '2026-10-01T00:00:00.000Z', bankroll: 100000 }, { at: '2026-10-02T00:00:00.000Z', bankroll: 100100 }] }
+const historicalTrifectaPerformance = {
+  model: {
+    experimentKey: 'boat-trifecta-historical-base-v1', id: 'boat-trifecta-historical-base-20261014',
+    immutableVersion: '2026-10-14.1', sourceArtifactSha256: 'b7688efcec865ce2bc9e770ec9e39631742481db5bc8a5f9b5a8b7ee2cbe0b3a',
+    featureSchemaVersion: 'boat-base-v1', featureColumns: ['lane', 'national_win_rate', 'local_win_rate', 'motor_2rate', 'boat_2rate', 'national_2rate', 'local_2rate', 'age', 'weight_carried', 'racer_class_code', 'history_starts', 'history_wins', 'history_win_rate'],
+    fitCount: 5, trainingRaces: 10508, validationRaces: 2213, testRaces: 2070,
+    candidateKind: 'historical_base_unverified', evaluationQualified: false, promotionEligible: false,
+    pointInTimeEvidenceComplete: false, profitabilityProven: false, exhibitionFeaturesUsed: false, selectionProfile: 'all-120',
+  },
+  summary: { decisions: 0, placed_races: 0, abstained_races: 0, bets: 0, total_stake: 0, settled_profit: 0, open_bets: 0, available_balance: 100000 },
+  decisions: [],
+}
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 function mockReads(purchasedBets: Bet[] = [], experimentalBets: ExperimentalBet[] = []) {
   const fetcher = vi.fn(async (url: string) => {
     if (url === '/api/races/detail-race') return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
     if (url === '/api/performance/experimental') return new Response(JSON.stringify({ experimentKey: 'boat-trifecta-small-sample-v1', state: 'unavailable', model: null, bankroll: { initial: 100000, available: 100000 }, metrics: { races: 0, bets: 0, stake: 0, payout: 0, profit: 0, roi: null }, decisions: [], sizing: { method: 'fractional-kelly-portfolio', perRaceCombinedCap: 1000, dailyCap: null, balanceGuard: 'nonnegative-virtual-balance' } }), { headers: { 'content-type': 'application/json' } })
+    if (url === '/api/performance/historical-trifecta-experiment') return new Response(JSON.stringify(historicalTrifectaPerformance), { headers: { 'content-type': 'application/json' } })
     if (url === '/api/bets/experimental') return new Response(JSON.stringify(experimentalBets), { headers: { 'content-type': 'application/json' } })
     if (url.startsWith('/api/bets')) return new Response(JSON.stringify(purchasedBets), { headers: { 'content-type': 'application/json' } })
     return new Response(JSON.stringify(url.includes('/performance/overview') ? url.includes('sport=boat') ? boatOverview : overview : []), { headers: { 'content-type': 'application/json' } })
@@ -114,9 +127,9 @@ it('board shows operational performance and only races with recorded purchases',
   expect(screen.getByRole('heading', { name: '運用成績' })).toBeTruthy()
   expect(screen.queryByText('競馬 vs ボートレースを比較')).toBeNull()
   await screen.findByText('実験用仮想残高')
-  expect(fetcher).toHaveBeenCalledTimes(4)
+  expect(fetcher).toHaveBeenCalledTimes(5)
   expect(fetcher.mock.calls.some(([url]) => /\/models|\/races\?|\/rankings|\/collection/.test(url))).toBe(false)
-  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?origin=all', '/api/performance/experimental', '/api/performance/overview?origin=all'])
+  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?origin=all', '/api/performance/experimental', '/api/performance/historical-trifecta-experiment', '/api/performance/overview?origin=all'])
 })
 it('does not request or show the real experimental ledger in sample origin on Overview', async () => {
   vi.stubGlobal('localStorage', { getItem: (key: string) => key === 'edgelab.origin' ? 'sample' : null, setItem: vi.fn(), removeItem: vi.fn() })

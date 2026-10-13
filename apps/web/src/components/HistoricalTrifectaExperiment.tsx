@@ -1,4 +1,4 @@
-import { api } from '../lib/api'
+import { api, type HistoricalTrifectaPerformance } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
 import { dateTime, yen } from '../lib/format'
 import { Empty, ErrorState, Loading, Section } from './ui'
@@ -7,6 +7,7 @@ export function HistoricalTrifectaExperiment({ compact = false }: { compact?: bo
   const q = useAsync(() => api.historicalTrifectaPerformance(), [])
   if (q.error) return <Section title="過去データ基礎モデル・未検証"><div className="p-4"><ErrorState error={q.error} onRetry={q.reload} /></div></Section>
   if (!q.data) return <Section title="過去データ基礎モデル・未検証"><div className="p-4"><Loading rows={compact ? 2 : 4} /></div></Section>
+  if (!isHistoricalTrifectaPerformance(q.data)) return <Section title="過去データ基礎モデル・未検証"><div className="p-4"><ErrorState error={new Error('実験データの形式が不正です。')} onRetry={q.reload} /></div></Section>
   const { model, summary, decisions } = q.data
   return <Section title="過去データ基礎モデル・未検証" right={<span className="text-xs text-muted">専用仮想実験</span>}>
     <div className="space-y-3 p-4">
@@ -38,6 +39,22 @@ export function HistoricalTrifectaExperiment({ compact = false }: { compact?: bo
       </div>}
     </div>
   </Section>
+}
+
+function isHistoricalTrifectaPerformance(value: unknown): value is HistoricalTrifectaPerformance {
+  if (!value || typeof value !== 'object') return false
+  const data = value as Partial<HistoricalTrifectaPerformance>
+  const model = data.model
+  const summary = data.summary
+  const finite = (number: unknown) => typeof number === 'number' && Number.isFinite(number)
+  return !!model && model.experimentKey === 'boat-trifecta-historical-base-v1'
+    && model.id === 'boat-trifecta-historical-base-20261014'
+    && model.sourceArtifactSha256 === 'b7688efcec865ce2bc9e770ec9e39631742481db5bc8a5f9b5a8b7ee2cbe0b3a'
+    && typeof model.immutableVersion === 'string'
+    && finite(model.trainingRaces) && finite(model.validationRaces) && finite(model.testRaces)
+    && !!summary && finite(summary.available_balance) && finite(summary.total_stake)
+    && finite(summary.bets) && finite(summary.open_bets)
+    && Array.isArray(data.decisions)
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
