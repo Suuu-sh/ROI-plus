@@ -34,10 +34,23 @@ def test_fetch_write_budget_validates_authoritative_contract(monkeypatch):
         "remaining": None, "state": "missing"}))
     assert sync.fetch_write_budget(base_url="https://example.test", token="t")["state"] == "missing"
 
+    disabled = {
+        "date": "2026-10-11", "enabled": False, "limit": 0,
+        "essentialLimit": 0, "optionalLimit": 0, "oddsLimit": 0,
+        "allowance": None, "reserved": None, "essentialReserved": None,
+        "optionalReserved": None, "oddsReserved": None, "collectionReserved": None,
+        "collectionRemaining": None, "remaining": None,
+        "essentialRemaining": None, "optionalRemaining": None, "state": "disabled",
+    }
+    monkeypatch.setattr(sync, "urlopen", lambda *_args, **_kwargs: _Response(disabled))
+    assert sync.fetch_write_budget(base_url="https://example.test", token="t")["state"] == "disabled"
+
     for bad in (
         {"date": "2026-2-3", "limit": 20_000, "reserved": 10, "remaining": 19_990, "state": "known"},
         {"date": "2026-10-11", "limit": 20_000, "reserved": None, "remaining": None, "state": "known"},
         {"date": "2026-10-11", "limit": 20_000, "reserved": 10, "remaining": 19_000, "state": "known"},
+        {**disabled, "enabled": True},
+        {**disabled, "remaining": 1},
     ):
         monkeypatch.setattr(sync, "urlopen", lambda *_args, _payload=bad, **_kwargs: _Response(_payload))
         with pytest.raises(RuntimeError):

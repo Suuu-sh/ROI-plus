@@ -91,8 +91,8 @@ def _artifact_pair(path: Path) -> tuple[Path, Path]:
 def allowance() -> dict[str, Any]:
     _today()
     current = fetch_write_budget()
-    if current.get("date") != DAY or current.get("state") not in {"known", "exhausted"}:
-        raise RuntimeError("today's valid existing D1 ledger is required")
+    if current.get("date") != DAY or current.get("state") not in {"known", "exhausted", "disabled"}:
+        raise RuntimeError("today's authoritative D1 write status is required")
     if current.get("allowance"):
         raise RuntimeError("today's one-time allowance is already applied")
     result = _request("POST", "ingest/write-budget/allowance", body={
@@ -200,8 +200,8 @@ def collect_odds() -> dict[str, Any]:
     if not model or model.get("status") != "active":
         raise RuntimeError("approved baseline must be active before odds collection")
     budget = fetch_write_budget()
-    if budget.get("date") != DAY or budget.get("state") not in {"known", "exhausted"}:
-        raise RuntimeError("today's valid write ledger is required")
+    if budget.get("date") != DAY or budget.get("state") not in {"known", "exhausted", "disabled"}:
+        raise RuntimeError("today's authoritative D1 write status is required")
     result = _request("POST", "ingest/collect-win-odds", body={"date": DAY, "confirmed": True})
     return {key: result.get(key) for key in ("status", "records", "targets", "failed", "excluded", "reason") if key in result}
 
@@ -220,8 +220,8 @@ def verify() -> dict[str, Any]:
         raise RuntimeError("current eligible race/entry coverage does not match synced active-model forecasts")
     if status.get("autoBetEnabled") != "false" or status.get("autoBetPaused") != "true":
         raise RuntimeError("auto-bet must remain disabled and paused pending root review")
-    if budget.get("date") != DAY or budget.get("state") not in {"known", "exhausted"}:
-        raise RuntimeError("today's write budget is unavailable or invalid")
+    if budget.get("date") != DAY or budget.get("state") not in {"known", "exhausted", "disabled"}:
+        raise RuntimeError("today's authoritative D1 write status is unavailable or invalid")
     return {key: status.get(key) for key in ("date", "cutoff", "model", "eligible", "predictions", "freshOfficialWinOdds", "autoBetEnabled", "autoBetPaused", "writeBudget")}
 
 

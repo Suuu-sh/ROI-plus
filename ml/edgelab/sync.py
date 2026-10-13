@@ -84,7 +84,7 @@ def fetch_write_budget(*, base_url: str | None = None, token: str | None = None)
     if not isinstance(payload, dict):
         raise RuntimeError("write budget response is invalid")
     state = payload.get("state")
-    if state not in {"known", "exhausted", "missing", "invalid"}:
+    if state not in {"known", "exhausted", "missing", "invalid", "disabled"}:
         raise RuntimeError("write budget response is invalid")
     day = payload.get("date")
     try:
@@ -102,6 +102,16 @@ def fetch_write_budget(*, base_url: str | None = None, token: str | None = None)
             raise RuntimeError("write budget response is incomplete")
         if remaining != limit - reserved or (state == "known" and remaining == 0) or (state == "exhausted" and remaining != 0):
             raise RuntimeError("write budget response is inconsistent")
+    elif state == "disabled":
+        # Disabled means there is no application reservation meter. It is not
+        # a zero-remaining quota and must not block ordinary ingest preflights.
+        if (payload.get("enabled") is not False
+                or any(payload.get(key) != 0 for key in ("limit", "essentialLimit", "optionalLimit", "oddsLimit"))
+                or any(payload.get(key) is not None for key in (
+                    "allowance", "reserved", "essentialReserved", "optionalReserved", "oddsReserved",
+                    "collectionReserved", "collectionRemaining", "remaining", "essentialRemaining",
+                    "optionalRemaining"))):
+            raise RuntimeError("disabled write budget response is invalid")
     return payload
 
 
