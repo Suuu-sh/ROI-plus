@@ -1,0 +1,75 @@
+import json
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from edgelab.trifecta_experimental_pipeline import _refresh_same_day_k, run
+
+
+@patch.dict(os.environ, {"EDGELAB_API_URL": "https://example.test", "INGEST_TOKEN": "test-only"})
+@patch("edgelab.trifecta_experimental_pipeline.fetch_prerace_capture_archives")
+def test_experimental_pipeline_reports_missing_actual_k_without_fabricating_a_model(fetch):
+    fetch.return_value = [{"schema": "boat-prerace-capture-export-v1", "date": "2026-10-13",
+                           "limit": 25, "archives": [], "nextCursor": None}]
+    with TemporaryDirectory() as directory:
+        report_path = Path(directory) / "trifecta-experimental-report.json"
+        result = run(since="2026-10-13", until="2026-10-13",
+                     store_path=str(Path(directory) / "rows.json"), report_path=str(report_path),
+                     artifact_dir=str(Path(directory) / "artifacts"))
+        persisted = json.loads(report_path.read_text(encoding="utf-8"))
+        assert not (Path(directory) / "artifacts").exists()
+    assert result["training"]["status"] == "insufficient_pit_evidence"
+    assert result["training"]["availableRealKResultRows"] == 0
+    assert result["training"]["reason"] == "no_completed_real_K_results"
+    assert result["promotion"] == "not_performed"
+    assert result["normalRegistrySync"] == "not_performed"
+    assert result["virtualPurchase"] == "not_performed"
+    assert persisted == result
+
+
+def test_experimental_pipeline_rejects_reversed_or_unbounded_range_before_network():
+    with TemporaryDirectory() as directory:
+        for start, end in (("2026-10-14", "2026-10-13"), ("2026-01-01", "2026-02-02")):
+            try:
+                run(since=start, until=end, store_path=str(Path(directory) / "rows.json"))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid range was accepted")
+
+
+@patch("edgelab.collectors.boatrace.fetch_boatrace_file")
+def test_same_day_k_refresh_skips_fetch_when_real_result_is_already_cached(fetch):
+    from datetime import date
+    rows = {"races": [{"id": "boat-20261013-01-01", "sport": "boat", "race_date": "2026-10-13"}],
+            "results": [{"race_id": "boat-20261013-01-01", "finish_order": 1, "data_origin": "real"}]}
+    result = _refresh_same_day_k(rows, date(2026, 10, 13))
+    assert result == {"status": "already_present", "completedRaces": 1}
+    fetch.assert_not_called()
+
+
+@patch("edgelab.collectors.boatrace.read_source_file_metadata", return_value={"sourceSha256": "a" * 64})
+@patch("edgelab.collectors.boatrace.read_lzh", return_value="official source")
+@patch("edgelab.collectors.boatrace.fetch_boatrace_file")
+def test_same_day_k_refresh_imports_only_outcome_labels_after_source_validation(fetch, read_lzh, metadata):
+    from datetime import date
+    from tempfile import NamedTemporaryFile
+    from edgelab.trifecta_experimental_pipeline import _refresh_same_day_k
+    race_id = "boat-20261013-01-01"
+    parsed = {"races": [{"id": race_id, "race_date": "2026-10-13"}],
+              "entries": [{"race_id": race_id, "number": 1, "available_at": "2026-10-13T00:00:00+09:00"}],
+              "results": [{"race_id": race_id, "number": 1, "finish_order": 1, "data_origin": "real"}],
+              "payouts": []}
+    with NamedTemporaryFile() as file:
+        fetch.return_value = file.name
+        with patch("edgelab.parsers.boatrace_k.parse_k", return_value=parsed) as parse:
+            rows = {"races": [], "entries": [], "results": [], "payouts": []}
+            result = _refresh_same_day_k(rows, date(2026, 10, 13))
+    fetch.assert_called_once()
+    assert fetch.call_args.kwargs["retries"] == 0
+    assert fetch.call_args.kwargs["refresh"] is True
+    assert result["status"] == "fetched_and_validated"
+    assert result["sourceVerified"] is True
+    assert not rows["races"] and not rows["entries"]
+    assert rows["results"][0]["available_at"].endswith("+00:00")

@@ -4,11 +4,14 @@ import pytest
 
 from edgelab.models.trifecta import (_captured_odds, _fit, _complete_race,
                                      ordered_triple_probabilities, train_trifecta,
+                                     train_trifecta_experimental, experimental_ticket_predictions,
                                      _proper_ticket_metrics, active_ticket_predictions,
                                      _consistent_payout,
                                      _select_runtime_like_tickets, _replay,
                                      REPLAY_SELECTION_POLICY)
-from edgelab.features.boat import BASE_FEATURE_COLUMNS
+from edgelab.features.boat import (BASE_FEATURE_COLUMNS,
+    TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+    TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
 
 # Every inline race/market/result below is synthetic and must remain sample
 # data. These rows exercise math and safety filters; they are never training
@@ -33,6 +36,38 @@ def test_complete_order_requires_six_unique_numbers_and_rank_values():
     assert not _complete_race(group[:-1])
     assert not _complete_race([{**r, "finish_order": 1} for r in group])
     assert not _complete_race([{**r, "number": r["number"] + 6} for r in group])
+
+
+def test_experimental_weatherless_schema_is_disjoint_from_weather_inputs():
+    assert TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA == "boat-prerace-v2-no-weather-experimental-v1"
+    assert not {"lane_wind_x", "lane_wind_y", "lane_wave_height"} & set(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
+    assert {"exhibition_time", "racer_history_starts", "lane"} <= set(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
+
+
+def test_experimental_training_does_not_create_artifact_from_unproven_rows(tmp_path):
+    rows = [{**row, "data_origin": "real"} for row in race("not-backed-by-store", "2026-01-01")]
+    result = train_trifecta_experimental(rows, {}, model_id="experimental-unproven", artifact_dir=tmp_path)
+    assert result["status"] == "insufficient_data"
+    assert result["artifactCreated"] is False
+    assert not list(tmp_path.iterdir())
+
+
+def test_experimental_forecast_is_separate_empty_envelope_without_eligible_live_inputs():
+    columns = list(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
+    fitted = _fit(race("test-fit", "2026-01-01"), columns)
+    artifact = {"metadata": {"id": "experimental-model", "status": "candidate",
+        "trainingMode": "experimental", "experimentalOnly": True,
+        "boatFeatureSchemaVersion": TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+        "ticketModelSchemaVersion": "ticket-selection-v1",
+        "ticketPredictionSemantics": "exact-selection-probability-v1",
+        "ticketBetType": "trifecta", "trainedAt": "2026-01-01T00:00:00+00:00",
+        "metrics": {"promotionEligible": False, "profitabilityProven": False}},
+        "model": fitted, "bootstrap_models": [], "columns": columns, "temperature": 1.0}
+    report = experimental_ticket_predictions({}, artifact=artifact, model_id="experimental-model",
+        cutoff="2026-01-02T00:00:00+00:00", artifact_sha256="a" * 64)
+    assert report["schema"] == "edgelab-experimental-trifecta-forecast-v1"
+    assert report["trainingMode"] == "experimental" and report["experimentalOnly"] is True
+    assert report["races"] == []
 
 
 def test_ordered_trifecta_probabilities_are_full_exact_order_distribution():

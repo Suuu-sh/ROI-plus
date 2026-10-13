@@ -1,0 +1,166 @@
+name: trifecta experimental model pipeline
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: First day of PIT archives to import (defaults to 31 days ago in JST)
+        required: false
+      until:
+        description: Last day of PIT archives to import (defaults to today in JST)
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: boat-learning-state
+  cancel-in-progress: false
+jobs:
+  experimental:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: ml/requirements.txt
+      - name: Install pinned ML dependencies
+        run: python -m pip install -r ml/requirements.txt
+      - name: Set cache date
+        id: cache-date
+        run: echo "date=$(TZ=Asia/Tokyo date +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore shared daily B/K data and model cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/raw/boatrace
+            ml/data
+            ml/artifacts
+          key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
+          restore-keys: |
+            daily-${{ runner.os }}-
+      - name: Validate bounded archive range
+        id: dates
+        env:
+          INPUT_SINCE: ${{ inputs.since }}
+          INPUT_UNTIL: ${{ inputs.until }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_SINCE" || -n "$INPUT_UNTIL" ]]; then
+            [[ -n "$INPUT_SINCE" && -n "$INPUT_UNTIL" ]] || { echo 'both dates are required' >&2; exit 2; }
+            since="$INPUT_SINCE"; until="$INPUT_UNTIL"
+          else
+            since="$(TZ=Asia/Tokyo date -d '31 days ago' +%F)"
+            until="$(TZ=Asia/Tokyo date +%F)"
+          fi
+          python - "$since" "$until" "$GITHUB_OUTPUT" <<'PY'
+          import datetime, re, sys
+          start, end, output = sys.argv[1:]
+          for value in (start, end):
+              if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) or datetime.date.fromisoformat(value).isoformat() != value:
+                  raise SystemExit("archive dates must be valid YYYY-MM-DD values")
+          if datetime.date.fromisoformat(end) < datetime.date.fromisoformat(start):
+              raise SystemExit("archive date range is reversed")
+          if (datetime.date.fromisoformat(end) - datetime.date.fromisoformat(start)).days > 31:
+              raise SystemExit("archive date range exceeds 32 days")
+          with open(output, "a", encoding="utf-8") as stream:
+              stream.write(f"since={start}\nuntil={end}\n")
+          PY
+      - name: Remove stale experiment reports
+        run: rm -f ml/data/learning/trifecta-experimental-report.json
+      - name: Import verified archives and train isolated experimental model
+        env:
+          PYTHONPATH: ml
+          EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+          EXPERIMENT_SINCE: ${{ steps.dates.outputs.since }}
+          EXPERIMENT_UNTIL: ${{ steps.dates.outputs.until }}
+        run: python -m edgelab.trifecta_experimental_pipeline --since "$EXPERIMENT_SINCE" --until "$EXPERIMENT_UNTIL"
+      - name: Identify generated experimental artifacts
+        id: model
+        if: always() && !cancelled() && hashFiles('ml/data/learning/trifecta-experimental-report.json') != ''
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path('ml/data/learning/trifecta-experimental-report.json').read_text(encoding='utf-8'))
+          training = report.get('training') or {}
+          if training.get('status') != 'completed_experimental_only' or training.get('artifactCreated') is not True:
+              print('No experimental model artifact was produced; inspect the coverage report.')
+              raise SystemExit(0)
+          model_id = training.get('modelId')
+          if not isinstance(model_id, str) or not model_id.startswith('boat-trifecta-exp-noweather-'):
+              raise SystemExit('Experimental model identity is invalid.')
+          files = [f'ml/artifacts/{model_id}.pkl', f'ml/artifacts/{model_id}.json',
+                   f"ml/artifacts/experimental-trifecta-{model_id}.manifest.json"]
+          if not all(Path(path).is_file() for path in files):
+              raise SystemExit('Experimental artifact bundle is incomplete.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+              stream.write(f'model_id={model_id}\n')
+          PY
+      - name: Archive experimental model and training evidence
+        if: always() && !cancelled() && steps.model.outputs.model_id != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: experimental-trifecta-model-${{ steps.model.outputs.model_id }}
+          path: |
+            ml/artifacts/${{ steps.model.outputs.model_id }}.pkl
+            ml/artifacts/${{ steps.model.outputs.model_id }}.json
+            ml/artifacts/experimental-trifecta-${{ steps.model.outputs.model_id }}.manifest.json
+            ml/data/learning/trifecta-experimental-report.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Archive experiment coverage report
+        if: always() && !cancelled() && hashFiles('ml/data/learning/trifecta-experimental-report.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: trifecta-experimental-report-${{ github.run_id }}
+          path: ml/data/learning/trifecta-experimental-report.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Register only the hash-bound experimental model
+        if: success() && steps.model.outputs.model_id != ''
+        env:
+          EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+          MODEL_ID: ${{ steps.model.outputs.model_id }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, urllib.error, urllib.request
+          from pathlib import Path
+          model_id = os.environ['MODEL_ID']
+          root = Path('ml/artifacts')
+          manifest_path = root / f'experimental-trifecta-{model_id}.manifest.json'
+          metadata_path = root / f'{model_id}.json'
+          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+          metadata_json = metadata_path.read_text(encoding='utf-8')
+          canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True,
+                                 separators=(',', ':'), allow_nan=False).encode('utf-8')
+          body = json.dumps({'manifest': manifest,
+                             'manifestSha256': hashlib.sha256(canonical).hexdigest(),
+                             'metadataJson': metadata_json}, ensure_ascii=False, allow_nan=False).encode('utf-8')
+          base = os.environ.get('EDGELAB_API_URL', '').rstrip('/')
+          token = os.environ.get('INGEST_TOKEN', '')
+          if not base or not token:
+              raise SystemExit('experimental model registration credentials unavailable')
+          request = urllib.request.Request(base + '/api/ingest/experimental-trifecta/model',
+              data=body, method='POST', headers={'Authorization': 'Bearer ' + token,
+              'Content-Type': 'application/json', 'Accept': 'application/json'})
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.loads(response.read(16384).decode('utf-8'))
+          except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+              raise SystemExit('experimental model registration failed: ' + type(exc).__name__)
+          if not isinstance(result, dict) or result.get('id') != model_id:
+              raise SystemExit('experimental model registration response was invalid')
+          print('Experimental model registered in the isolated experiment registry.')
+          PY
+      - name: Save shared learning cache
+        if: always() && !cancelled() && hashFiles('ml/data/rows.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/raw/boatrace
+            ml/data
+            ml/artifacts
+          key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}

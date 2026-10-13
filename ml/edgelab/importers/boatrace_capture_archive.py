@@ -92,7 +92,8 @@ def _real_race(store: Mapping[str, Any], race_id: str, archive_race: Mapping[str
 
 
 def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
-                      store: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+                      store: Mapping[str, Any], *, allow_missing_weather: bool = False
+                      ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     raw = wrapper.get("archiveJson")
     digest = wrapper.get("archiveSha256")
     if not isinstance(raw, str) or not isinstance(digest, str) or not _SHA256.fullmatch(digest):
@@ -177,12 +178,14 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
     if weather_at is not None:
         if _timestamp(weather_at) > before_at:
             raise ValueError("weather_observation_after_capture")
-    else:
+    elif not allow_missing_weather:
         raise ValueError("weather_observation_missing")
     weather_label = before.get("weatherObservationLabel")
     if weather_label is not None and not isinstance(weather_label, str):
         raise ValueError("weather_label_invalid")
     weather_values = before.get("weather")
+    if weather_values is None and allow_missing_weather and weather_at is None:
+        weather_values = {}
     if not isinstance(weather_values, dict):
         raise ValueError("weather_values_invalid")
     mapped_weather: dict[str, Any] = {}
@@ -249,7 +252,7 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
             "values_json": json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             "data_origin": "real",
         })
-    if mapped_weather or weather_at is not None or weather_label is not None:
+    if mapped_weather or weather_at is not None:
         observations.append({
             "id": f"{wrapper['id']}:weather", "race_id": race_id,
             "kind": "weather", "entry_number": 0,
@@ -267,7 +270,8 @@ def _validate_archive(wrapper: Mapping[str, Any], requested_date: str,
     } for selection, price in sorted(odds_by_selection.items())]
     manifest = {"id": wrapper["id"], "archive_sha256": digest, "race_id": race_id,
                 "race_date": requested_date, "captured_at": captured_at,
-                "schema": ARCHIVE_SCHEMA, "beforeinfo_captured_at": str(before["capturedAt"])}
+                "schema": ARCHIVE_SCHEMA, "beforeinfo_captured_at": str(before["capturedAt"]),
+                "weather_observation_missing": weather_at is None}
     manifest["_cutoff_at"] = str(before["cutoffAt"])
     manifest["_cutoff_observed_at"] = str(race_list["capturedAt"])
     return manifest, observations, market
@@ -283,7 +287,7 @@ def _row_map(rows: list[dict[str, Any]], keys: Sequence[str]):
 
 
 def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Sequence[Mapping[str, Any]],
-                            requested_date: str) -> dict[str, Any]:
+                            requested_date: str, *, allow_missing_weather: bool = False) -> dict[str, Any]:
     """Validate one-day export pages and append only immutable local evidence."""
     try:
         if date.fromisoformat(requested_date).isoformat() != requested_date:
@@ -294,6 +298,7 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
         store.setdefault(table, [])
     exclusion_counts: dict[str, int] = {}
     imported = already = excluded = observation_count = odds_count = 0
+    weather_missing_imported = 0
     cutoff_evidence_updated = cutoff_evidence_preserved = 0
     weather_diagnostics: list[dict[str, str | None]] = []
     manifests = _row_map(store["prerace_capture_archive_manifest"], ("id",))
@@ -316,7 +321,8 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
             known = manifests.get((archive_id,)) if isinstance(archive_id, str) else None
             digest = wrapper.get("archiveSha256")
             try:
-                manifest, new_observations, new_odds = _validate_archive(wrapper, requested_date, store)
+                manifest, new_observations, new_odds = _validate_archive(
+                    wrapper, requested_date, store, allow_missing_weather=allow_missing_weather)
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 reason = str(exc) if str(exc) else type(exc).__name__
                 exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
@@ -425,6 +431,7 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
             store["prerace_capture_archive_manifest"].append(manifest)
             manifests[(manifest["id"],)] = manifest
             imported += 1
+            weather_missing_imported += int(manifest.get("weather_observation_missing") is True)
     return {
         "status": ("partial" if imported and excluded else "imported" if imported
                    else "excluded" if excluded else "no_new_archives"),
@@ -433,6 +440,7 @@ def import_capture_archives(store: dict[str, list[dict[str, Any]]], pages: Seque
         "observationsAdded": observation_count, "oddsRowsAdded": odds_count,
         "cutoffEvidenceUpdated": cutoff_evidence_updated,
         "cutoffEvidencePreserved": cutoff_evidence_preserved,
+        "weatherMissingArchivesImported": weather_missing_imported,
         "weatherDiagnostics": weather_diagnostics,
         "oddsStorage": "local_only_prerace_capture_odds",
     }

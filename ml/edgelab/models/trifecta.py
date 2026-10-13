@@ -11,6 +11,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import pickle
 import random
 import re
@@ -22,7 +23,9 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from edgelab.features.boat import (BASE_FEATURE_COLUMNS, PRERACE_V2_FEATURE_COLUMNS,
-                                   PRERACE_V2_SCHEMA, build_boat_prerace_v2_features,
+                                   PRERACE_V2_SCHEMA, TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+                                   TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS,
+                                   build_boat_prerace_v2_features,
                                    completed_racer_history)
 from edgelab.models.compare import temporal_split
 from edgelab.models.trifecta_coverage import (audit_trifecta_coverage,
@@ -755,3 +758,253 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
     from edgelab.artifact_bundle import build_candidate_model_bundle
     meta["candidateBundle"] = build_candidate_model_bundle(model_id, out)
     return meta
+
+
+def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], *,
+                                model_id: str, artifact_dir: str | Path = "ml/artifacts") -> dict[str, Any]:
+    """Fit an explicitly experimental, weatherless model without relaxing candidate gates.
+
+    This separate path uses only real, complete outcomes whose own T-60 entry,
+    exhibition, odds, cutoff, and payout evidence is present. It deliberately
+    makes no independent-validation or profitability claim and never bundles a
+    registry candidate.
+    """
+    if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", model_id):
+        raise ValueError("experimental model ID is not a safe artifact filename")
+    safe_rows = [dict(row) for row in rows if row.get("data_origin") == "real"
+                 and row.get("race_id") and row.get("race_date") and row.get("predicted_at")
+                 and available_by(row, row["predicted_at"])]
+    complete = [group for group in _group_races(safe_rows) if _complete_race(group)]
+    complete_rows = [row for group in complete for row in group]
+    coverage = audit_trifecta_coverage(store, complete_rows, include_races=True)
+    evidence_by_id = {str(race["raceId"]): race for race in coverage.get("races", [])
+                      if isinstance(race, Mapping) and race.get("raceId")}
+    eligible_ids = {race_id for race_id, evidence in evidence_by_id.items()
+                    if evidence.get("completeResult") is True
+                    and evidence.get("verifiedT60Cutoff") is True
+                    and evidence.get("sixEntryAvailability") is True
+                    and evidence.get("sourceArrivalVerified") is True
+                    and evidence.get("freshExhibitionLanes") == [1, 2, 3, 4, 5, 6]
+                    and evidence.get("completeT60Odds") is True
+                    and evidence.get("consistentPayout") is True}
+    groups = [group for group in complete if str(group[0].get("race_id")) in eligible_ids]
+    training_rows = [row for group in groups for row in group]
+    coverage.pop("races", None)
+    out = Path(artifact_dir)
+    pkl_path, json_path = out / f"{model_id}.pkl", out / f"{model_id}.json"
+    manifest_path = out / f"experimental-trifecta-{model_id}.manifest.json"
+    if any(path.exists() for path in (pkl_path, json_path, manifest_path)):
+        raise FileExistsError(f"experimental artifact ID is immutable and already exists: {model_id}")
+    if not groups:
+        return {"id": model_id, "status": "insufficient_data", "trainingMode": "experimental",
+                "experimentalOnly": True, "reason": "no_races_with_complete_required_pit_evidence",
+                "nTrainRaces": 0, "coverage": coverage, "artifactCreated": False}
+
+    columns = list(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
+    model = _fit(training_rows, columns)
+    bootstrap_models = []
+    rng = random.Random(17013)
+    for replicate in range(4):
+        sampled = [rng.choice(groups) for _ in groups]
+        bootstrap_rows = [{**row, "race_id": f"{row['race_id']}#experimental-bootstrap-{replicate}-{i}"}
+                          for i, group in enumerate(sampled) for row in group]
+        try:
+            bootstrap_models.append(_fit(bootstrap_rows, columns))
+        except (ValueError, RuntimeError):
+            continue
+
+    race_ids = sorted({str(row["race_id"]) for row in training_rows})
+    dates = sorted({str(row["race_date"]) for row in training_rows})
+    training_digest = hashlib.sha256("|".join(race_ids).encode("utf-8")).hexdigest()
+    missing_weather = sum(not bool(evidence_by_id[race_id].get("freshWeather")) for race_id in race_ids)
+    training_evidence = {
+        "trainingRaceCount": len(groups), "trainingDateCount": len(dates),
+        "sourceArrivalVerifiedRaceCount": len(groups), "verifiedT60CutoffRaceCount": len(groups),
+        "sixFreshExhibitionRaceCount": len(groups), "complete120T60OddsRaceCount": len(groups),
+        "consistentPayoutRaceCount": len(groups), "weatherMissingRaceCount": missing_weather,
+        "raceIdSetSha256": training_digest,
+        "requirements": {"realCompletedSixBoatKOrder": True,
+            "officialRacelistCutoffObservedByT60": True,
+            "sixEntriesHaveArrivalTimestampAndSourceSha256ByT60": True,
+            "sixFreshExhibitionLanesByT60": True,
+            "coherentOfficial120TicketOddsByT60": True,
+            "exactMatchingPositiveTrifectaPayout": True,
+            "weatherFeaturesUsed": False},
+    }
+    provenance = {
+        "artifactRunId": os.environ.get("GITHUB_RUN_ID") if re.fullmatch(r"[0-9]+", os.environ.get("GITHUB_RUN_ID", "")) else None,
+        "artifactRunAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]) if re.fullmatch(r"[0-9]+", os.environ.get("GITHUB_RUN_ATTEMPT", "")) else None,
+        "artifactName": f"experimental-trifecta-model-{model_id}",
+        "workflowName": os.environ.get("GITHUB_WORKFLOW") or None,
+        "repository": os.environ.get("GITHUB_REPOSITORY") or None,
+        "commitSha": os.environ.get("GITHUB_SHA", "").lower() if re.fullmatch(r"[a-fA-F0-9]{40}", os.environ.get("GITHUB_SHA", "")) else None,
+    }
+    trained_at = datetime.now(timezone.utc).isoformat()
+    metadata = {
+        "id": model_id, "sport": "boat", "betType": "trifecta", "status": "candidate",
+        "trainingMode": "experimental", "experimentalOnly": True,
+        "ticketModelSchemaVersion": TICKET_SCHEMA, "ticketPredictionSemantics": PREDICTION_SEMANTICS,
+        "ticketBetType": "trifecta", "boatFeatureSchemaVersion": TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+        "featureColumns": columns,
+        "algorithm": "pairwise logistic ranking + Plackett-Luce exact-order distribution",
+        "trainFrom": dates[0], "trainTo": dates[-1], "validFrom": None, "validTo": None,
+        "testFrom": None, "testTo": None, "nTrainRaces": len(groups), "nValidRaces": 0,
+        "nTestRaces": 0, "temperature": 1.0, "calibration": "none; experimental model",
+        "trainedAt": trained_at, "nBootstrapModels": len(bootstrap_models),
+        "trainingEvidence": training_evidence,
+        "metrics": {"independentValidationPerformed": False, "evaluationQualified": False,
+                    "promotionEligible": False, "profitabilityProven": False,
+                    "pointInTimeEvidenceComplete": True, "ticketModelSchemaVersion": TICKET_SCHEMA,
+                    "ticketPredictionSemantics": PREDICTION_SEMANTICS,
+                    "ticketBetType": "trifecta", "boatFeatureSchemaVersion": TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+                    "trainingEvidence": training_evidence},
+        "artifactProvenance": provenance,
+        "notes": "Experimental-only low-data model. No independent validation, qualification, or profitability claim. Not eligible for normal candidate promotion.",
+    }
+    artifact = {"metadata": metadata, "model": model, "bootstrap_models": bootstrap_models,
+                "columns": columns, "temperature": 1.0}
+    pickle_bytes = pickle.dumps(artifact, protocol=pickle.HIGHEST_PROTOCOL)
+    artifact_sha = hashlib.sha256(pickle_bytes).hexdigest()
+    metadata["ticketArtifactSha256"] = artifact_sha
+    metadata["metrics"]["ticketArtifactSha256"] = artifact_sha
+    metadata_bytes = (json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    manifest = {"schema": "edgelab-experimental-trifecta-artifact-v1", "modelId": model_id,
+                "trainingMode": "experimental", "experimentalOnly": True,
+                "boatFeatureSchemaVersion": TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+                "trainingRaceIdSetSha256": training_digest,
+                "artifactProvenance": provenance,
+                "files": {pkl_path.name: {"sha256": artifact_sha, "sizeBytes": len(pickle_bytes)},
+                          json_path.name: {"sha256": hashlib.sha256(metadata_bytes).hexdigest(),
+                                           "sizeBytes": len(metadata_bytes)}}}
+    manifest_sha = hashlib.sha256(json.dumps(manifest, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+    manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    out.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = []
+    try:
+        for path, content in ((pkl_path, pickle_bytes), (json_path, metadata_bytes), (manifest_path, manifest_bytes)):
+            with path.open("xb") as stream:
+                stream.write(content)
+            created.append(path)
+    except OSError:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+    return {**metadata, "artifactManifest": str(manifest_path), "artifactManifestSha256": manifest_sha,
+            "artifactManifestData": manifest, "artifactCreated": True,
+            "coverage": coverage}
+
+
+def experimental_ticket_predictions(store: Mapping[str, Any], *, artifact: Mapping[str, Any],
+                                    model_id: str, cutoff: str, artifact_sha256: str,
+                                    race_date: str | None = None) -> dict[str, Any]:
+    """Generate isolated paper-only forecasts from a bound experimental artifact.
+
+    No rows are synced or persisted here. Every selected race must have actual
+    T-60 cutoff/source evidence, six hash-bound entries, six fresh exhibitions,
+    and a coherent 120-row official market already available at ``cutoff``.
+    """
+    meta = artifact.get("metadata") or {}
+    if (meta.get("id") != model_id or meta.get("status") != "candidate"
+            or meta.get("trainingMode") != "experimental" or meta.get("experimentalOnly") is not True
+            or meta.get("boatFeatureSchemaVersion") != TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA
+            or meta.get("ticketModelSchemaVersion") != TICKET_SCHEMA
+            or meta.get("ticketPredictionSemantics") != PREDICTION_SEMANTICS
+            or meta.get("ticketBetType") != "trifecta"
+            or meta.get("metrics", {}).get("promotionEligible") is not False
+            or meta.get("metrics", {}).get("profitabilityProven") is not False
+            or artifact.get("columns") != list(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
+            or not artifact.get("model")):
+        raise ValueError("artifact is not a recognized experimental-only trifecta model")
+    if not re.fullmatch(r"[a-f0-9]{64}", artifact_sha256):
+        raise ValueError("experimental artifact SHA-256 is invalid")
+    try:
+        as_of = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("prediction cutoff must be ISO-8601") from exc
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("prediction cutoff must include a timezone")
+    as_of = as_of.astimezone(timezone.utc)
+    trained_at = datetime.fromisoformat(str(meta.get("trainedAt", "")).replace("Z", "+00:00"))
+    if trained_at.tzinfo is None or trained_at.astimezone(timezone.utc) >= as_of:
+        raise ValueError("experimental artifact must be trained strictly before forecast cutoff")
+
+    from edgelab.features.boat import classify_prerace_observation
+    from edgelab.models.trifecta_coverage import _entry_coverage, _has_complete_market
+    races = {str(row.get("id")): row for row in store.get("races", [])
+             if row.get("sport") == "boat" and row.get("data_origin") == "real"
+             and row.get("status") == "scheduled"
+             and (race_date is None or row.get("race_date") == race_date)}
+    entries_by_race: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for entry in store.get("entries", []):
+        race_id = str(entry.get("race_id"))
+        if race_id in races and entry.get("data_origin") == "real":
+            entries_by_race[race_id].append(dict(entry))
+    observations_by_race: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for observation in store.get("prerace_observations", []):
+        if observation.get("data_origin") == "real":
+            observations_by_race[str(observation.get("race_id"))].append(observation)
+
+    history = completed_racer_history(store)
+    predictions_by_race: list[dict[str, Any]] = []
+    for race_id, race in sorted(races.items()):
+        try:
+            post = datetime.fromisoformat(str(race.get("post_time", "")).replace("Z", "+00:00"))
+            official_cutoff = datetime.fromisoformat(str(race.get("betting_cutoff_at", "")).replace("Z", "+00:00"))
+            cutoff_observed = datetime.fromisoformat(str(race.get("betting_cutoff_observed_at", "")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if (race.get("betting_cutoff_source") != "boatrace-racelist-cutoff-v1"
+                or post.tzinfo is None or official_cutoff.tzinfo is None or cutoff_observed.tzinfo is None):
+            continue
+        t60 = official_cutoff.astimezone(timezone.utc) - timedelta(seconds=60)
+        post = post.astimezone(timezone.utc)
+        cutoff_observed = cutoff_observed.astimezone(timezone.utc)
+        entries = entries_by_race.get(race_id, [])
+        complete, source_proven, _ = _entry_coverage(entries, as_of)
+        if (post <= as_of or as_of > t60 or cutoff_observed > as_of or cutoff_observed > t60
+                or not complete or not source_proven or not _has_complete_market(store, race, as_of)):
+            continue
+        fresh_lanes: set[int] = set()
+        fresh_observations = []
+        for observation in observations_by_race.get(race_id, []):
+            values, _reason = classify_prerace_observation(observation, race, t60)
+            if not values:
+                continue
+            try:
+                available = datetime.fromisoformat(str(observation.get("available_at", "")).replace("Z", "+00:00"))
+                lane = int(observation.get("entry_number", 0))
+            except (TypeError, ValueError):
+                continue
+            if available.tzinfo is None or available.astimezone(timezone.utc) > as_of:
+                continue
+            source_time = observation.get("source_observed_at") or observation.get("captured_at")
+            if source_time:
+                try:
+                    source_dt = datetime.fromisoformat(str(source_time).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if source_dt.tzinfo is None or source_dt.astimezone(timezone.utc) > as_of:
+                    continue
+            if observation.get("kind") == "exhibition" and 1 <= lane <= 6:
+                fresh_lanes.add(lane)
+                fresh_observations.append(observation)
+        if fresh_lanes != {1, 2, 3, 4, 5, 6} or len(entries) != 6:
+            continue
+        features = build_boat_prerace_v2_features(entries, race=race, predicted_at=as_of,
+            history=history, observations=observations_by_race.get(race_id, []))
+        group = [{**{key: value for key, value in entry.items()
+                     if key not in TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS}, **feature}
+                 for entry, feature in zip(entries, features)]
+        probabilities, deviations = ensemble_ordered_triples(artifact, group)
+        validate_ticket_probabilities(probabilities)
+        predictions_by_race.append({"raceId": race_id,
+            "predictedAt": as_of.isoformat().replace("+00:00", "Z"),
+            "predictions": [{"selection": selection, "probability": probability,
+                             "prob_std": deviations[selection]}
+                            for selection, probability in sorted(probabilities.items())]})
+    return {"schema": "edgelab-experimental-trifecta-forecast-v1", "modelId": model_id,
+            "artifactSha256": artifact_sha256, "trainingMode": "experimental", "experimentalOnly": True,
+            "ticketModelSchemaVersion": TICKET_SCHEMA, "ticketPredictionSemantics": PREDICTION_SEMANTICS,
+            "boatFeatureSchemaVersion": TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+            "races": predictions_by_race}

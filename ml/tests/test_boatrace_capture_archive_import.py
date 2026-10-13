@@ -142,6 +142,22 @@ def test_missing_weather_timestamp_exposes_only_bounded_safe_diagnostic():
     assert "private.example" not in json.dumps(result)
 
 
+def test_experimental_import_keeps_other_pit_facts_when_weather_source_time_is_missing():
+    wrapper = _archive("2026-10-11T15:17:03+09:00", 6.78)
+    archive = json.loads(wrapper["archiveJson"])
+    archive["beforeinfo"]["weatherObservedAt"] = None
+    archive["beforeinfo"]["weather"] = None
+    wrapper["archiveJson"] = json.dumps(archive, ensure_ascii=False, separators=(",", ":"))
+    wrapper["archiveSha256"] = hashlib.sha256(wrapper["archiveJson"].encode()).hexdigest()
+    store = _store()
+    result = import_capture_archives(store, [_page(wrapper)], DAY, allow_missing_weather=True)
+    assert result["importedArchives"] == 1
+    assert result["weatherMissingArchivesImported"] == 1
+    assert len(store["prerace_observations"]) == 6
+    assert not any(row.get("kind") == "weather" for row in store["prerace_observations"])
+    assert len(store["prerace_capture_odds"]) == 120
+
+
 def test_existing_earlier_cutoff_observation_survives_later_archive_import():
     store = _store()
     store["races"][0].update({"betting_cutoff_at": "2026-10-11T15:19:00+09:00",

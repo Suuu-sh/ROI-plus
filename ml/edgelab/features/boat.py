@@ -40,6 +40,7 @@ FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + PRE_RACE_FEATURE_COLUMNS
 # Versioned candidate schema. It cannot be confused with or passed into the
 # older boat-base-v1 / ticket model artifacts.
 PRERACE_V2_SCHEMA = "boat-prerace-v2"
+TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA = "boat-prerace-v2-no-weather-experimental-v1"
 PRERACE_V2_FEATURE_COLUMNS = (
     "lane", "national_win_rate", "local_win_rate", "motor_2rate", "boat_2rate",
     "national_2rate", "local_2rate", "age", "weight_carried", "racer_class_code",
@@ -47,6 +48,13 @@ PRERACE_V2_FEATURE_COLUMNS = (
     "exhibition_time", "tilt", "observed_weight", "start_exhibition",
     "start_exhibition_course", "start_exhibition_false_start",
     "lane_wind_x", "lane_wind_y", "lane_wave_height",
+)
+# Experimental tri forecasts intentionally exclude all weather interactions.
+# This is a distinct schema: weather absence is never silently imputed into a
+# production-qualified v2 model or confused with a weather-trained artifact.
+TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS = tuple(
+    column for column in PRERACE_V2_FEATURE_COLUMNS
+    if column not in {"lane_wind_x", "lane_wind_y", "lane_wave_height"}
 )
 _BEFOREINFO_URL = "https://www.boatrace.jp/owpc/pc/race/beforeinfo"
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")

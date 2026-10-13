@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import pickle
+import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -397,16 +398,18 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
     entries = [row for row in store.get("entries", [])
                if row.get("race_id") in races and row.get("data_origin") == "real"]
     if sport == "boat":
-        from edgelab.features.boat import (PRERACE_V2_SCHEMA, build_boat_features,
+        from edgelab.features.boat import (PRERACE_V2_SCHEMA, TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+                                           build_boat_features,
                                            build_boat_prerace_v2_features, completed_racer_history)
         grouped: dict[str, list[dict[str, Any]]] = {}
         for entry in entries:
             grouped.setdefault(str(entry["race_id"]), []).append(entry)
         enriched = []
-        history = completed_racer_history(store) if feature_schema == PRERACE_V2_SCHEMA else []
+        is_prerace_v2 = feature_schema in {PRERACE_V2_SCHEMA, TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA}
+        history = completed_racer_history(store) if is_prerace_v2 else []
         for race_id, group in grouped.items():
             race = races[race_id]
-            if feature_schema == PRERACE_V2_SCHEMA:
+            if is_prerace_v2:
                 # T-60 training inputs require the exact official racelist cutoff.
                 # B-file post_time is only a start-time approximation and is not
                 # promoted to a betting cutoff.
@@ -429,7 +432,11 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
                 features = build_boat_prerace_v2_features(group, race=race, predicted_at=predicted_at,
                     history=history, observations=store.get("prerace_observations", []))
                 from edgelab.features.boat import PRERACE_V2_FEATURE_COLUMNS
-                feature_columns = PRERACE_V2_FEATURE_COLUMNS
+                feature_columns = (TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS
+                                   if feature_schema == TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA
+                                   else PRERACE_V2_FEATURE_COLUMNS)
+                if feature_schema == TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA:
+                    features = [{key: row.get(key) for key in feature_columns} for row in features]
             else:
                 if feature_schema != "boat-base-v1":
                     raise ValueError(f"unsupported boat feature schema: {feature_schema}")
@@ -469,7 +476,7 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
                "finish_order": finish,
                "winner": str(finish) == "1", "target": str(finish) == "1"}
         post_time = race.get("post_time")
-        if feature_schema == "boat-prerace-v2":
+        if feature_schema in {"boat-prerace-v2", "boat-prerace-v2-no-weather-experimental-v1"}:
             cutoff = race.get("betting_cutoff_at")
             if race.get("betting_cutoff_source") == "boatrace-racelist-cutoff-v1" and cutoff:
                 try:
@@ -790,6 +797,18 @@ def _parser() -> argparse.ArgumentParser:
     trifecta.add_argument("--replay-race-budget", type=int, default=100,
                           help="integer-yen replay stake budget per race")
     trifecta.add_argument("--output", default="ml/data/learning/trifecta-report.json")
+    experimental = sub.add_parser("train-trifecta-experimental", help="fit a weatherless experimental trifecta model; never qualifies or promotes")
+    experimental.add_argument("--model-id", help="immutable experimental model ID")
+    experimental.add_argument("--artifact-dir", default="ml/artifacts")
+    experimental.add_argument("--store", default=str(DEFAULT_STORE))
+    experimental.add_argument("--output", default="ml/data/learning/trifecta-experimental-report.json")
+    experimental_predict = sub.add_parser("predict-trifecta-experimental", help="write a PIT-checked experimental paper forecast envelope locally")
+    experimental_predict.add_argument("--model-id", required=True)
+    experimental_predict.add_argument("--date", help="optional race date YYYY-MM-DD")
+    experimental_predict.add_argument("--as-of", required=True, help="actual forecast time ISO-8601 with timezone")
+    experimental_predict.add_argument("--artifact-dir", default="ml/artifacts")
+    experimental_predict.add_argument("--store", default=str(DEFAULT_STORE))
+    experimental_predict.add_argument("--output", default="ml/data/learning/trifecta-experimental-forecast.json")
     archives = sub.add_parser("import-prerace-archives", help="verify and import one date of prerace archives into the local offline store")
     archives.add_argument("--date", required=True, help="race date in YYYY-MM-DD")
     archives.add_argument("--store", default=str(DEFAULT_STORE), help="local JSON row store")
@@ -932,6 +951,51 @@ def main(argv: list[str] | None = None) -> int:
         result["reportPath"] = str(output)
         print(json.dumps(result, ensure_ascii=False, allow_nan=False))
         return 0 if result.get("status") == "candidate" else 2
+    if args.command == "train-trifecta-experimental":
+        from edgelab.models.trifecta import train_trifecta_experimental
+        from edgelab.features.boat import TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA
+        rows = load_rows(args.store)
+        training_rows = _make_training_rows(rows, "boat", feature_schema=TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+                                            require_source_arrival=True)
+        cohort = sorted({str(row.get("race_id")) for row in training_rows if row.get("race_id")})
+        digest = hashlib.sha256("|".join(cohort).encode("utf-8")).hexdigest()[:12]
+        model_id = args.model_id or f"boat-trifecta-exp-noweather-{datetime.now(timezone.utc):%Y%m%d}-{digest}"
+        if any(str(model.get("id")) == model_id for model in rows.get("models", [])):
+            raise RuntimeError("experimental model ID already exists locally; IDs are immutable")
+        result = train_trifecta_experimental(training_rows, rows, model_id=model_id, artifact_dir=args.artifact_dir)
+        result["localRegistryUpdated"] = False
+        result["normalRegistrySyncPerformed"] = False
+        result["remoteSyncPerformed"] = False
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        result["reportPath"] = str(output)
+        print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+        return 0 if result.get("artifactCreated") else 2
+    if args.command == "predict-trifecta-experimental":
+        from edgelab.models.trifecta import experimental_ticket_predictions
+        from edgelab.predict import load_artifact
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", args.model_id):
+            raise ValueError("experimental model ID is invalid")
+        artifact_dir = Path(args.artifact_dir)
+        pkl_path, json_path = artifact_dir / f"{args.model_id}.pkl", artifact_dir / f"{args.model_id}.json"
+        metadata = json.loads(json_path.read_text(encoding="utf-8"))
+        artifact_sha = hashlib.sha256(pkl_path.read_bytes()).hexdigest()
+        if (metadata.get("id") != args.model_id or metadata.get("trainingMode") != "experimental"
+                or metadata.get("experimentalOnly") is not True or metadata.get("status") != "candidate"
+                or metadata.get("ticketArtifactSha256") != artifact_sha):
+            raise RuntimeError("experimental artifact metadata or SHA-256 is invalid")
+        artifact = load_artifact(pkl_path)
+        report = experimental_ticket_predictions(load_rows(args.store), artifact=artifact,
+            model_id=args.model_id, cutoff=args.as_of, artifact_sha256=artifact_sha, race_date=args.date)
+        report["remoteSyncPerformed"] = False
+        report["localOnly"] = True
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        report["reportPath"] = str(output)
+        print(json.dumps(report, ensure_ascii=False, allow_nan=False))
+        return 0
     if args.command == "predict-trifecta":
         from edgelab.models.trifecta import active_ticket_predictions
         from edgelab.predict import load_artifact
