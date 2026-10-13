@@ -1174,6 +1174,24 @@ describe('collection status quality compatibility',()=>{
   expect(sqlite.prepare('SELECT race_id,outcome,reason FROM experimental_paper_decisions ORDER BY race_id').all()).toEqual(ticks.map((_,i)=>({
    race_id:`boat-${raceDate.replaceAll('-','')}-99-${String(i+1).padStart(2,'0')}`,outcome:'abstained',reason:'experimental_forecast_missing_or_invalid'})));
  });
+ it('reports only complete real current-day pre-cutoff forecast coverage',async()=>{
+  const modelId='boat-trifecta-exp-noweather-coverage',sha='a'.repeat(64),asOf=Date.now();
+  sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
+    VALUES(?,'candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
+    .run(modelId,sha,'b'.repeat(64),'c'.repeat(64),jstIso(asOf-300_000),'{}','{}',jstIso(asOf));
+  const raceId=`boat-${jstDate().replaceAll('-','')}-99-99`;
+  sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,status,data_origin,updated_at,betting_cutoff_at,betting_cutoff_source)
+    VALUES(?,'boat','b01',?,99,'scheduled','real',?,?,'boatrace-racelist-cutoff-v1')`).run(raceId,jstDate(),jstIso(asOf),jstIso(asOf+180_000));
+  const insert=sqlite.prepare(`INSERT INTO experimental_ticket_predictions(id,race_id,model_id,selection,probability,prob_std,predicted_at,feature_schema_version,artifact_sha256,data_origin)
+    VALUES(?,?,?,?,?,0.01,?,'ticket-selection-v1',?,'real')`);
+  for(let x=1;x<=6;x++)for(let y=1;y<=6;y++)for(let z=1;z<=6;z++)if(x!==y&&x!==z&&y!==z){
+    const selection=`${x}-${y}-${z}`;insert.run(selection,raceId,modelId,selection,1/120,jstIso(asOf),sha);
+  }
+  const read=async()=>await (await app.request('/api/performance/experimental',{},env())).json() as any;
+  expect((await read()).forecastCoverage).toMatchObject({date:jstDate(),storedRaceCount:1,races:[{raceId,predictedAt:jstIso(asOf),predictionCount:120}]});
+  sqlite.prepare("DELETE FROM experimental_ticket_predictions WHERE selection='1-2-3'").run();
+  expect((await read()).forecastCoverage.storedRaceCount).toBe(0);
+ });
  it('resolves the exact latest experimental decision model through an authenticated no-store endpoint',async()=>{
   const register=(id:string,status:string,registeredAt:string,sha:string)=>sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
    VALUES(?,?,'edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
