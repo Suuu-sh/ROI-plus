@@ -6,9 +6,12 @@ import { candidate, betId, payoutYen, settleValues, validateYenStake } from './s
 import { collectOdds } from './services/collectBoatraceOdds.js';
 import { collectTrifectaOdds } from './services/collectBoatraceTrifectaOdds.js';
 import { collectBoatraceCaptureArchives } from './services/collectBoatraceCaptureArchives.js';
+import { beforeinfoUrl } from './services/boatraceBeforeinfo.js';
+import { raceListUrl } from './services/boatraceRaceList.js';
 import { collectResults, resultUrl, RESULTS_SOURCE } from './services/collectBoatraceResults.js';
 import { BOATRACE_CUTOFF_MAX_AGE_MS } from './services/boatraceCutoff.js';
 import { canonicalTicketSelection, isCompleteTicketDistribution } from '@edgelab/shared';
+import { sizeExperimentalPortfolio } from './services/experimentalSizing.js';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
@@ -446,7 +449,111 @@ async function settleOpen(db: Db) {
       settled++;
     }
   }
-  return settled;
+  return settled + await settleExperimentalOpen(db);
+}
+async function settleExperimentalOpen(db: Db) {
+ const open=await all<any>(db,`SELECT b.* FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id
+   WHERE b.status='open' AND r.status='finished' AND r.data_origin='real'
+   AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
+   ORDER BY b.placed_at,b.id`);
+ let settled=0;
+ for(const bet of open){
+   const integrity=await first<any>(db,`SELECT
+      (SELECT COUNT(*) FROM entries WHERE race_id=? AND data_origin='real') entry_count,
+      (SELECT COUNT(*) FROM results WHERE race_id=? AND data_origin='real') result_count,
+      (SELECT COUNT(DISTINCT number) FROM results WHERE race_id=? AND data_origin='real') distinct_count,
+      (SELECT COUNT(DISTINCT finish_order) FROM results WHERE race_id=? AND data_origin='real') order_count,
+      (SELECT MIN(finish_order) FROM results WHERE race_id=? AND data_origin='real') min_order,
+      (SELECT MAX(finish_order) FROM results WHERE race_id=? AND data_origin='real') max_order,
+      (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin='real' AND ${terminalFinishCodeSql}) terminal_count`,
+     bet.race_id,bet.race_id,bet.race_id,bet.race_id,bet.race_id,bet.race_id,bet.race_id);
+   if(!integrity||integrity.entry_count!==6||integrity.result_count!==6||integrity.distinct_count!==6||integrity.order_count!==6
+      ||integrity.min_order!==1||integrity.max_order!==6||integrity.terminal_count!==0)continue;
+   const order=await all<any>(db,'SELECT number FROM results WHERE race_id=? AND data_origin=\'real\' ORDER BY finish_order',bet.race_id);
+   const winningSelection=order.slice(0,3).map((x:any)=>String(x.number)).join('-');
+   const payouts=await all<any>(db,"SELECT selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND payout>0",bet.race_id);
+   if(payouts.length!==1||payouts[0].selection!==winningSelection)continue;
+   const won=bet.selection===winningSelection,payout=won?payoutYen(Number(bet.stake),Number(payouts[0].payout)):0;
+   if(!await reserveWorkerWrites(db,2))break;
+   if(!db.batch)break;
+   const settledAt=now();
+   const results=await db.batch([
+     db.prepare("UPDATE experimental_paper_bets SET status=?,payout=?,profit=?,settled_at=? WHERE id=? AND status='open'").bind(won?'won':'lost',payout,payout-Number(bet.stake),settledAt,bet.id),
+     db.prepare("UPDATE experimental_bankroll SET available_balance=available_balance+?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND changes()>0").bind(payout,settledAt),
+   ]) as any[];
+   settled+=Number(results?.[0]?.meta?.changes??0);
+ }
+ return settled;
+}
+async function experimentalPaperDecision(db: Db, decisionAt=Date.now()) {
+ const report={evaluated:0,placedRaces:0,placedBets:0,abstainedByReason:{} as Record<string,number>};
+ const model=await first<any>(db,"SELECT * FROM experimental_models WHERE status IN ('candidate','experimental') ORDER BY registered_at DESC,id DESC LIMIT 1");
+ if(!model)return report;
+ let metadata:any;try{metadata=JSON.parse(model.manifest_json)}catch{return report;}
+ if(metadata.trainingMode!=='experimental'||metadata.experimentalOnly!==true||metadata.ticketArtifactSha256!==model.artifact_sha256
+    ||metadata.boatFeatureSchemaVersion!=='boat-prerace-v2-no-weather-experimental-v1')return report;
+ const date=jstRaceDate(new Date(decisionAt));
+ const races=await all<any>(db,"SELECT * FROM races WHERE sport='boat' AND data_origin='real' AND status='scheduled' AND race_date=? AND betting_cutoff_source=? ORDER BY betting_cutoff_at,id LIMIT 24",date,TRUSTED_CUTOFF_SOURCE);
+ for(const race of races){
+   const timing=primaryPaperTiming(race.betting_cutoff_at,decisionAt,race.betting_cutoff_source,race.betting_cutoff_observed_at);
+   if(!timing.eligible)continue;
+   const prior=await first<any>(db,'SELECT id FROM experimental_paper_decisions WHERE experiment_key=\'boat-trifecta-small-sample-v1\' AND race_id=?',race.id);
+   if(prior)continue;
+   report.evaluated++;
+   const targetAt=isoJstAt(Number(timing.targetMs));
+   const latest=await first<any>(db,`SELECT MAX(predicted_at) predicted_at FROM experimental_ticket_predictions WHERE race_id=? AND model_id=? AND data_origin='real'
+     AND feature_schema_version='ticket-selection-v1' AND artifact_sha256=? AND julianday(predicted_at)<=julianday(?) AND julianday(predicted_at)>=julianday(?)`,race.id,model.id,model.artifact_sha256,targetAt,isoJstAt(Number(timing.targetMs)-5*60_000));
+   const predictionAt=latest?.predicted_at??null;
+   let predictions:any[]=predictionAt?await all<any>(db,`SELECT selection,probability,prob_std,predicted_at FROM experimental_ticket_predictions WHERE race_id=? AND model_id=? AND data_origin='real' AND predicted_at=?`,race.id,model.id,predictionAt):[];
+   const lanes=await all<any>(db,"SELECT number,features_json FROM entries WHERE race_id=? AND data_origin='real' ORDER BY number",race.id),numbers=lanes.map(x=>Number(x.number));
+   let reason:string|null=null,archiveRow:any=null,archive:any=null,odds:any[]=[];
+   if(numbers.length!==6||numbers.some((x,i)=>x!==i+1))reason='official_entries_incomplete';
+   else if(predictions.length!==120||predictions.some((p:any)=>!Number.isFinite(p.probability)||!Number.isFinite(p.prob_std)||p.prob_std<0)
+       ||!isCompleteTicketDistribution('trifecta',numbers,predictions.map((p:any)=>p.selection),predictions.map((p:any)=>Number(p.probability))))reason='experimental_forecast_missing_or_invalid';
+   else if(Date.parse(model.trained_at)>=Date.parse(predictionAt))reason='forecast_predates_model';
+   if(!reason){
+     archiveRow=await first<any>(db,'SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin=\'real\' AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1',race.id,isoJstAt(decisionAt));
+     if(!archiveRow||decisionAt-Date.parse(archiveRow.captured_at)>5*60_000)reason='official_archive_missing_or_stale';
+     else{try{archive=JSON.parse(archiveRow.archive_json)}catch{reason='official_archive_invalid';}}
+   }
+   if(!reason){
+     if(!experimentalArchiveEvidenceValid(archive,race,lanes)||archive.trifectaOdds.capturedAt!==archiveRow.captured_at
+        ||Date.parse(archive.beforeinfo.capturedAt)>decisionAt||Date.parse(archive.raceList.capturedAt)>decisionAt
+        ||Date.parse(archive.trifectaOdds.capturedAt)>decisionAt)reason='official_archive_identity_or_odds_invalid';
+     else odds=archive.trifectaOdds.odds;
+   }
+   const oddsBySelection=new Map(odds.map((x:any)=>[x.selection,Number(x.odds)]));
+   const tickets=!reason?predictions.map((p:any)=>({selection:p.selection,probability:Number(p.probability),probStd:Number(p.prob_std),odds:Number(oddsBySelection.get(p.selection))})):[];
+   const balance=await first<any>(db,"SELECT available_balance FROM experimental_bankroll WHERE experiment_key='boat-trifecta-small-sample-v1'");
+   const stakes=reason?[]:sizeExperimentalPortfolio(tickets,Number(balance?.available_balance??0));
+   const totalStake=stakes.reduce((sum,x)=>sum+x.stake,0),outcome=totalStake?'placed':'abstained';
+   const abstentionReason=reason??(Number(balance?.available_balance??0)<=0?'virtual_balance_unavailable':'no_conservative_positive_edge');
+   const decisionId=crypto.randomUUID(),decidedAt=isoJstAt(decisionAt);
+   const snapshot={phase:'experimental_t60',cutoffAt:race.betting_cutoff_at,cutoffSource:race.betting_cutoff_source,cutoffObservedAt:race.betting_cutoff_observed_at,targetAt,predictedAt:predictionAt,
+     captureArchiveId:archiveRow?.id??null,sourceHashes:archive?{beforeinfo:archive.beforeinfo.sha256,racelist:archive.raceList.sha256,odds:archive.trifectaOdds.sha256}:null,
+     predictionCount:predictions.length,predictionDigest:predictions.length?await sha256Json(predictions):null,
+     sizing:{method:'fractional-kelly-portfolio',fraction:0.25,uncertaintyMultiplier:1.96,perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'},tickets:stakes};
+   if(!db.batch)return report;
+   const statements:Statement[]=[];
+   if(totalStake>0)statements.push(db.prepare(`UPDATE experimental_bankroll SET available_balance=available_balance-?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND available_balance>=? AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)`).bind(totalStake,decidedAt,totalStake,race.id));
+   statements.push(totalStake>0
+     ?db.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,capture_archive_id,decision_at,outcome,reason,total_stake,sizing_method,snapshot_json)
+       SELECT ?,'boat-trifecta-small-sample-v1',?,?,?,?,'placed',NULL,?,'fractional-kelly-portfolio',? WHERE changes()>0 AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)`).bind(decisionId,race.id,model.id,archiveRow.id,decidedAt,totalStake,JSON.stringify(snapshot),race.id)
+     :db.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,capture_archive_id,decision_at,outcome,reason,total_stake,sizing_method,snapshot_json)
+       VALUES(?,'boat-trifecta-small-sample-v1',?,?,?,?,?,?,0,'fractional-kelly-portfolio',?) ON CONFLICT(experiment_key,race_id) DO NOTHING`).bind(decisionId,race.id,model.id,archiveRow?.id??null,decidedAt,'abstained',abstentionReason,JSON.stringify(snapshot)));
+   if(totalStake>0){
+     const values:any[]=[];const cols='id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at';
+     const selects=stakes.map((x:any,index:number)=>{values.push(crypto.randomUUID(),decisionId,race.id,model.id,x.selection,x.stake,x.probability,x.probStd,x.odds,x.expectedRoi,decidedAt);return `SELECT ${index===0?cols.split(',').map((name:string)=>`? AS ${name}`).join(','):'?,?,?,?,?,?,?,?,?,?,?'}`;}).join(' UNION ALL ');
+     statements.push(db.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+       SELECT id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,'open','real' FROM (${selects}) WHERE EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE id=?)`).bind(...values,decisionId));
+   }
+   if(!await reserveWorkerWrites(db,predictions.length+stakes.length+3))continue;
+   const results=await db.batch(statements) as any[];
+   const decisionChanges=Number(results?.[totalStake>0?1:0]?.meta?.changes??0);
+   if(decisionChanges&&totalStake){report.placedRaces++;report.placedBets+=stakes.length;}
+   else if(decisionChanges){report.abstainedByReason[abstentionReason]=(report.abstainedByReason[abstentionReason]??0)+1;}
+ }
+ return report;
 }
 function primaryPaperTiming(cutoffAt: string | null | undefined, decisionAt: number, cutoffSource?: string | null, cutoffObservedAt?: string | null) {
   const cutoffMs = cutoffAt ? Date.parse(cutoffAt) : Number.NaN;
@@ -672,6 +779,7 @@ async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false, trifectaO
   // Evaluate against observations already available at decision time. A
   // collection pass in this invocation must not make a late snapshot eligible.
   const paper=await autoBetWithReport(db,autoEnabled);
+  const experimental=await experimentalPaperDecision(db,Date.now());
   await collectScheduledOdds(db, oddsEnabled, trifectaOddsEnabled);
   const settled=await settleOpen(db);
   const cutoff=new Date(Date.now()-30*86400000).toISOString();
@@ -679,7 +787,7 @@ async function cron(db: Db, autoEnabled: boolean, oddsEnabled = false, trifectaO
   const cleanupCount=Math.min(10,Number(oldRows?.count??0));
   if(cleanupCount>0&&await reserveOptionalWorkerWrites(db,cleanupCount)) await run(db, `DELETE FROM odds_snapshots WHERE rowid IN (SELECT rowid FROM odds_snapshots WHERE captured_at<? AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.race_id=odds_snapshots.race_id AND b.selection=odds_snapshots.selection AND b.odds_at_bet=odds_snapshots.odds AND b.placed_at>=odds_snapshots.captured_at) LIMIT 10)`, cutoff).catch(()=>{});
   await cleanupOldQualityRuns(db);
-  return {settled,bought:paper.bought,paperTiming:paper.report};
+  return {settled,bought:paper.bought,paperTiming:paper.report,experimental};
 }
 
 // Quality-only collector telemetry is short-lived. Preserve mixed runs and
@@ -1026,6 +1134,33 @@ function officialTrifectaUrl(sourceUrl: unknown, race: any): boolean {
       && u.searchParams.get('hd') === String(race.race_date).replaceAll('-', '');
   } catch { return false; }
 }
+function experimentalArchiveEvidenceValid(archive: any, race: any, entries: any[]) {
+ if(!archive||archive.schema!=='boat-prerace-capture-v1'||archive.race?.id!==race.id||archive.race?.date!==race.race_date
+    ||archive.race?.venueCode!==race.venue_id||Number(archive.race?.raceNo)!==Number(race.race_no)
+    ||!Array.isArray(archive.race?.lanes)||archive.race.lanes.length!==6||archive.race.lanes.some((x:any,i:number)=>Number(x)!==i+1)
+    ||archive.raceList?.cutoffAt!==race.betting_cutoff_at
+    ||archive.raceList?.url!==raceListUrl(Number(race.race_no),String(race.venue_id),String(race.race_date))
+    ||!Array.isArray(archive.raceList?.entries)||archive.raceList.entries.length!==6
+    ||archive.beforeinfo?.url!==beforeinfoUrl(Number(race.race_no),String(race.venue_id),String(race.race_date))
+    ||!Array.isArray(archive.beforeinfo?.exhibitions)||archive.beforeinfo.exhibitions.length!==6
+    ||!Array.isArray(archive.trifectaOdds?.odds)||archive.trifectaOdds.qualityStatus!=='verified-complete-v1'
+    ||archive.trifectaOdds.final!==false||archive.trifectaOdds.odds.length!==120
+    ||!isSha256(archive.beforeinfo?.sha256)||!isSha256(archive.raceList?.sha256)||!isSha256(archive.trifectaOdds?.sha256)
+    ||!officialTrifectaUrl(archive.trifectaOdds?.url,race))return false;
+ const savedRacers=new Map<number,string>();
+ for(const row of entries){let racerId='';try{const f=JSON.parse(row.features_json??'{}');if(typeof f.racer_id==='string')racerId=f.racer_id;}catch{return false;}
+   if(!Number.isInteger(Number(row.number))||!/^\d{4,5}$/.test(racerId))return false;savedRacers.set(Number(row.number),racerId);}
+ if(savedRacers.size!==6)return false;
+ const officialRacers=new Map<number,string>();
+ for(const row of archive.raceList.entries){if(!Number.isInteger(Number(row.lane))||typeof row.registrationNumber!=='string')return false;officialRacers.set(Number(row.lane),row.registrationNumber);}
+ if(officialRacers.size!==6||[1,2,3,4,5,6].some(n=>savedRacers.get(n)!==officialRacers.get(n)))return false;
+ const exhibitions=new Map<number,any>();
+ for(const row of archive.beforeinfo.exhibitions){if(!Number.isInteger(Number(row.lane))||!Number.isFinite(row.exhibitionTime)||row.exhibitionTime<=0)return false;exhibitions.set(Number(row.lane),row);}
+ if(exhibitions.size!==6||[1,2,3,4,5,6].some(n=>!exhibitions.has(n)))return false;
+ const odds=archive.trifectaOdds.odds;
+ return odds.every((x:any)=>x&&typeof x.selection==='string'&&Number.isFinite(x.odds)&&x.odds>1)
+   &&isCompleteTicketDistribution('trifecta',[1,2,3,4,5,6],odds.map((x:any)=>x.selection),odds.map(()=>1/odds.length));
+}
 async function ticketCandidatesForRace(db: Db, race: any, maxStd: number, decisionAt = Date.now(), cutoffAtOverride?: string | null): Promise<TicketCandidate[]> {
   // Initial support is exact-order trifecta only. Other ticket types stay absent
   // until a compatible model and audited odds source are registered.
@@ -1173,6 +1308,114 @@ app.get('/performance/overview',async c=>{
  let peak=initial,dd=0,ddPct=0;
  for(const e of equity){peak=Math.max(peak,e.bankroll);dd=Math.max(dd,peak-e.bankroll);if(peak>0)ddPct=Math.max(ddPct,(peak-e.bankroll)/peak);}
  return c.json({initialBankroll:initial,bankroll,totalProfit:bankroll-initial,roi:stake?payout/stake:null,betCount:bets.length,settledCount:settled,hitRate:scored?hits/scored:null,maxDrawdown:dd,maxDrawdownPct:ddPct,equityCurve:equity,quarantined:await quarantineSummary(db,sport||null,origin)});
+});
+app.post('/ingest/experimental-trifecta/model',async c=>{
+ if(!auth(c))return jsonError(c,'unauthorized',401);
+ if(Number(c.req.header('Content-Length')??0)>128_000)return jsonError(c,'experimental model metadata exceeds the request size limit',413);
+ const body=await c.req.json().catch(()=>null),manifest=body?.manifest;
+ if(!isRecord(manifest)||typeof body?.metadataJson!=='string'||manifest.schema!=='edgelab-experimental-trifecta-artifact-v1'
+    ||typeof manifest.modelId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(manifest.modelId)
+    ||manifest.trainingMode!=='experimental'||manifest.experimentalOnly!==true
+    ||manifest.boatFeatureSchemaVersion!=='boat-prerace-v2-no-weather-experimental-v1'
+    ||!isRecord(manifest.files)||!isRecord(manifest.files[`${manifest.modelId}.pkl`])||!isRecord(manifest.files[`${manifest.modelId}.json`])) return jsonError(c,'invalid experimental artifact manifest');
+ const modelId=manifest.modelId,pkl=manifest.files[`${modelId}.pkl`],metadataFile=manifest.files[`${modelId}.json`];
+ const manifestSha=await sha256Json(manifest),metadataSha=await sha256Text(body.metadataJson);
+ let metadata:any;try{metadata=JSON.parse(body.metadataJson)}catch{return jsonError(c,'experimental model metadata is invalid JSON');}
+ if(body.manifestSha256!==manifestSha||!isSha256(pkl.sha256)||!isSha256(metadataFile.sha256)
+    ||metadataFile.sha256!==metadataSha||metadata.id!==modelId||metadata.status!=='candidate'
+    ||metadata.trainingMode!=='experimental'||metadata.experimentalOnly!==true
+    ||metadata.sport!=='boat'||metadata.betType!=='trifecta'
+    ||metadata.boatFeatureSchemaVersion!=='boat-prerace-v2-no-weather-experimental-v1'
+    ||metadata.ticketModelSchemaVersion!=='ticket-selection-v1'
+    ||metadata.ticketPredictionSemantics!=='exact-selection-probability-v1'
+    ||metadata.ticketBetType!=='trifecta'||metadata.ticketArtifactSha256!==pkl.sha256
+    ||!isSha256(manifest.trainingRaceIdSetSha256)
+    ||!isRecord(metadata.metrics)||metadata.metrics.evaluationQualified!==false
+    ||metadata.metrics.independentValidationPerformed!==false||metadata.metrics.promotionEligible!==false||metadata.metrics.profitabilityProven!==false
+    ||metadata.metrics.pointInTimeEvidenceComplete!==true
+    ||!Array.isArray(metadata.featureColumns)||metadata.featureColumns.some((x:any)=>['lane_wind_x','lane_wind_y','lane_wave_height'].includes(x))
+    ||!isRecord(metadata.trainingEvidence)||metadata.trainingEvidence.raceIdSetSha256!==manifest.trainingRaceIdSetSha256
+    ||['sourceArrivalVerifiedRaceCount','verifiedT60CutoffRaceCount','sixFreshExhibitionRaceCount','complete120T60OddsRaceCount','consistentPayoutRaceCount']
+      .some((key:string)=>!Number.isInteger(metadata.trainingEvidence[key])||metadata.trainingEvidence[key]<1)
+    ||!metadata.trainedAt||!Number.isFinite(Date.parse(metadata.trainedAt))) return jsonError(c,'experimental model metadata, evidence, or artifact hashes are invalid');
+ const db=c.env.DB,existing=await first<any>(db,'SELECT manifest_sha256,metadata_sha256 FROM experimental_models WHERE id=?',modelId);
+ if(existing){if(existing.manifest_sha256===manifestSha&&existing.metadata_sha256===metadataSha)return c.json({modelId,status:'candidate',idempotent:true});return jsonError(c,'experimental model IDs are immutable',409);}
+ if(!await reserveWorkerWrites(db,1)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}
+ await run(db,`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
+   VALUES(?,'candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`,
+   modelId,pkl.sha256,manifestSha,metadataSha,metadata.trainedAt,JSON.stringify(manifest),body.metadataJson,now());
+ return c.json({modelId,status:'candidate',idempotent:false});
+});
+app.post('/ingest/experimental-trifecta/forecast',async c=>{
+ if(!auth(c))return jsonError(c,'unauthorized',401);
+ if(Number(c.req.header('Content-Length')??0)>512_000)return jsonError(c,'experimental forecast exceeds the request size limit',413);
+ const body=await c.req.json().catch(()=>null);
+ if(!isRecord(body)||body.schema!=='edgelab-experimental-trifecta-forecast-v1'||body.trainingMode!=='experimental'||body.experimentalOnly!==true
+    ||body.ticketModelSchemaVersion!=='ticket-selection-v1'||body.ticketPredictionSemantics!=='exact-selection-probability-v1'
+    ||body.boatFeatureSchemaVersion!=='boat-prerace-v2-no-weather-experimental-v1'||!isSha256(body.artifactSha256)
+    ||!Array.isArray(body.races)||body.races.length<1||body.races.length>4) return jsonError(c,'invalid experimental forecast envelope');
+ const db=c.env.DB,model=await first<any>(db,'SELECT * FROM experimental_models WHERE id=?',body.modelId);
+ if(!model||model.artifact_sha256!==body.artifactSha256)return jsonError(c,'experimental model or artifact SHA is not registered',409);
+ const decisionAt=Date.now(),accepted:any[]=[];
+ for(const forecast of body.races){
+   if(!isRecord(forecast)||typeof forecast.raceId!=='string'||typeof forecast.predictedAt!=='string'||!Number.isFinite(Date.parse(forecast.predictedAt))
+      ||Date.parse(forecast.predictedAt)>decisionAt||!Array.isArray(forecast.predictions)||forecast.predictions.length!==120) return jsonError(c,'experimental forecast timestamp or row count is invalid');
+   if(Date.parse(model.trained_at)>=Date.parse(forecast.predictedAt))return jsonError(c,'experimental forecast predates model training');
+   const race=await first<any>(db,'SELECT * FROM races WHERE id=?',forecast.raceId);
+   if(!race||race.sport!=='boat'||race.status!=='scheduled'||race.data_origin!=='real'||race.race_date!==jstRaceDate(new Date(decisionAt)))return jsonError(c,'experimental forecast race is not an eligible real race');
+   const cutoffMs=Date.parse(race.betting_cutoff_at),observedMs=Date.parse(race.betting_cutoff_observed_at),forecastMs=Date.parse(forecast.predictedAt),targetMs=cutoffMs-PRIMARY_PAPER_OFFSET_MS;
+   if(race.betting_cutoff_source!==TRUSTED_CUTOFF_SOURCE||!Number.isFinite(cutoffMs)||!Number.isFinite(observedMs)||observedMs>decisionAt+5_000
+      ||decisionAt-observedMs>BOATRACE_CUTOFF_MAX_AGE_MS||decisionAt>targetMs+PRIMARY_PAPER_TOLERANCE_MS||forecastMs>targetMs)
+      return jsonError(c,'experimental forecast is outside a verified pre-cutoff prediction window');
+   const archiveRow=await first<any>(db,'SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin=\'real\' ORDER BY captured_at DESC LIMIT 1',race.id);
+   if(!archiveRow||Date.parse(archiveRow.captured_at)>forecastMs||forecastMs-Date.parse(archiveRow.captured_at)>5*60_000)return jsonError(c,'official prerace archive is not fresh as of prediction time');
+   let archive:any;try{archive=JSON.parse(archiveRow.archive_json)}catch{return jsonError(c,'official prerace archive is invalid');}
+   const lanes=await all<any>(db,'SELECT number,features_json FROM entries WHERE race_id=? AND data_origin=\'real\' ORDER BY number',race.id),numbers=lanes.map(x=>Number(x.number));
+   if(numbers.length!==6||numbers.some((x,i)=>x!==i+1)||!experimentalArchiveEvidenceValid(archive,race,lanes)
+      ||archive.trifectaOdds.capturedAt!==archiveRow.captured_at||Date.parse(archive.beforeinfo.capturedAt)>forecastMs
+      ||Date.parse(archive.raceList.capturedAt)>forecastMs||Date.parse(archive.trifectaOdds.capturedAt)>forecastMs)return jsonError(c,'official archive identity, six-lane, or complete odds provenance is invalid');
+   const predictions=forecast.predictions;
+   if(predictions.some((row:any)=>!isRecord(row)||!Number.isFinite(row.probability)||row.probability<0||row.probability>1||!Number.isFinite(row.prob_std)||row.prob_std<0)
+      ||!isCompleteTicketDistribution('trifecta',numbers,predictions.map((row:any)=>row.selection),predictions.map((row:any)=>Number(row.probability))))return jsonError(c,'experimental forecast is not a complete normalized exact-order distribution');
+   accepted.push({race,forecast,predictions});
+ }
+ if(!db.batch)return jsonError(c,'atomic experimental forecast storage is unavailable',503);
+ const statements:Statement[]=[];
+ for(const item of accepted){
+   const {race,forecast,predictions}=item;
+   for(let offset=0;offset<predictions.length;offset+=50){
+     const chunk=predictions.slice(offset,offset+50),values:any[]=[];
+     for(const row of chunk)values.push(crypto.randomUUID(),race.id,model.id,row.selection,Number(row.probability),Number(row.prob_std),forecast.predictedAt,'ticket-selection-v1',model.artifact_sha256);
+     statements.push(db.prepare(`INSERT INTO experimental_ticket_predictions(id,race_id,model_id,selection,probability,prob_std,predicted_at,feature_schema_version,artifact_sha256,data_origin)
+       VALUES ${chunk.map(()=>"(?,?,?,?,?,?,?,?,?,'real')").join(',')} ON CONFLICT(race_id,model_id,selection,predicted_at) DO NOTHING`).bind(...values));
+   }
+ }
+ if(!await reserveWorkerWrites(db,accepted.length*120)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}
+ await db.batch(statements);
+ return c.json({experimentKey:'boat-trifecta-small-sample-v1',stored:accepted.map(x=>({raceId:x.race.id,modelId:model.id,predictedAt:x.forecast.predictedAt,predictionCount:120})),decision:'worker T-60 timing gate'});
+});
+app.get('/performance/experimental',async c=>{
+ const db=c.env.DB,experimentKey='boat-trifecta-small-sample-v1';
+ const model=await first<any>(db,'SELECT id,status,artifact_sha256,schema_version,trained_at FROM experimental_models ORDER BY registered_at DESC,id DESC LIMIT 1');
+ const balance=await first<any>(db,'SELECT initial_balance,available_balance FROM experimental_bankroll WHERE experiment_key=?',experimentKey);
+ const metric=await first<any>(db,`SELECT COUNT(DISTINCT race_id) races,COUNT(*) bets,COALESCE(SUM(stake),0) stake,
+   COALESCE(SUM(CASE WHEN status IN ('won','lost') THEN stake ELSE 0 END),0) settled_stake,
+   COALESCE(SUM(CASE WHEN status='won' THEN payout ELSE 0 END),0) payout,
+   COALESCE(SUM(CASE WHEN status IN ('won','lost') THEN profit ELSE 0 END),0) profit
+   FROM experimental_paper_bets`);
+ const rows=await all<any>(db,`SELECT d.race_id,r.race_date,r.race_no,v.name venue_name,d.outcome,d.reason,d.total_stake stake,d.model_id,d.decision_at decided_at,
+   (SELECT probability FROM experimental_paper_bets b WHERE b.decision_id=d.id ORDER BY b.stake DESC,b.selection LIMIT 1) probability,
+   (SELECT odds_at_bet FROM experimental_paper_bets b WHERE b.decision_id=d.id ORDER BY b.stake DESC,b.selection LIMIT 1) odds,
+   (SELECT prob_std FROM experimental_paper_bets b WHERE b.decision_id=d.id ORDER BY b.stake DESC,b.selection LIMIT 1) uncertainty,
+   (SELECT expected_roi FROM experimental_paper_bets b WHERE b.decision_id=d.id ORDER BY b.stake DESC,b.selection LIMIT 1) expected_roi
+   FROM experimental_paper_decisions d JOIN races r ON r.id=d.race_id JOIN venues v ON v.id=r.venue_id
+   ORDER BY d.decision_at DESC,d.id DESC LIMIT 100`);
+ const n=metric??{races:0,bets:0,stake:0,payout:0,profit:0};
+ return c.json({experimentKey,state:model?'ready':'unavailable',model:model?{id:model.id,status:model.status,artifactSha256:model.artifact_sha256,schemaVersion:model.schema_version,trainedAt:model.trained_at}:null,
+   bankroll:{initial:Number(balance?.initial_balance??100000),available:Number(balance?.available_balance??100000)},
+   metrics:{races:Number(n.races),bets:Number(n.bets),stake:Number(n.stake),payout:Number(n.payout),profit:Number(n.profit),roi:Number(n.settled_stake)>0?Number(n.payout)/Number(n.settled_stake):null},
+   decisions:rows.map((x:any)=>({raceId:x.race_id,raceDate:x.race_date,raceNo:Number(x.race_no),venueName:x.venue_name??null,outcome:x.outcome,reason:x.reason??null,stake:Number(x.stake),modelId:x.model_id,decidedAt:x.decided_at,probability:x.probability==null?null:Number(x.probability),odds:x.odds==null?null:Number(x.odds),uncertainty:x.uncertainty==null?null:Number(x.uncertainty),expectedRoi:x.expected_roi==null?null:Number(x.expected_roi)})),
+   sizing:{method:'fractional-kelly-portfolio',perRaceCombinedCap:1000,dailyCap:null,balanceGuard:'nonnegative-virtual-balance'}});
 });
 app.get('/performance/breakdown',async c=>{const db=c.env.DB,origin=originFilter(c.req.query('origin'));
  const O=`(? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet('b')}`;
@@ -1413,4 +1656,4 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
   }
   return;
 } };
-export { app, cron, settleOpen, autoBet, autoBetWithReport, primaryPaperTiming, recordPaperAbstention };
+export { app, cron, settleOpen, autoBet, autoBetWithReport, primaryPaperTiming, recordPaperAbstention, experimentalPaperDecision };
