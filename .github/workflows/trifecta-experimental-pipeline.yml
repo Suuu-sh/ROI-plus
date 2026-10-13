@@ -144,6 +144,28 @@ jobs:
               raise SystemExit('experimental model registration response was invalid')
           print('Experimental model registered in the isolated experiment registry.')
           PY
+      - name: Refresh current-day PIT archives immediately before forecast
+        if: success() && steps.model.outputs.model_id != ''
+        env:
+          PYTHONPATH: ml
+          EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+        run: |
+          python - <<'PY'
+          import datetime, json, os
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+          from edgelab.experimental_forecast_refresh import refresh_current_day_archives
+          today = datetime.datetime.now(ZoneInfo('Asia/Tokyo')).date().isoformat()
+          report = refresh_current_day_archives(today,
+              base_url=os.environ.get('EDGELAB_API_URL', ''),
+              token=os.environ.get('INGEST_TOKEN', ''))
+          path = Path('ml/data/learning/trifecta-experimental-forecast-input-refresh.json')
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + '\n',
+                          encoding='utf-8')
+          print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+          PY
       - name: Generate and submit only a current actual-time T-60 forecast
         if: success() && steps.model.outputs.model_id != ''
         env:
@@ -161,6 +183,11 @@ jobs:
 
           report_path = Path('ml/data/learning/trifecta-experimental-forecast-status.json')
           envelope_path = Path('ml/data/learning/trifecta-experimental-forecast.json')
+          refresh_path = Path('ml/data/learning/trifecta-experimental-forecast-input-refresh.json')
+          try:
+              input_refresh = json.loads(refresh_path.read_text(encoding='utf-8'))
+          except (OSError, ValueError):
+              input_refresh = {'status': 'unavailable', 'reason': 'refresh_report_missing'}
           model_id = os.environ['MODEL_ID']
           today = datetime.datetime.now(ZoneInfo('Asia/Tokyo')).date().isoformat()
           # Capture actual now immediately before inference. Never reconstruct T-60
@@ -172,7 +199,7 @@ jobs:
           run = subprocess.run(command, capture_output=True, text=True, check=False)
           status = {'schema': 'trifecta-experimental-forecast-status-v1', 'modelId': model_id,
                     'asOf': as_of, 'status': 'generation_unavailable',
-                    'reason': 'forecast_input_or_artifact_invalid'}
+                    'reason': 'forecast_input_or_artifact_invalid', 'inputArchiveRefresh': input_refresh}
           envelope = None
           if run.returncode == 0:
               try:
@@ -186,6 +213,7 @@ jobs:
                                  'reason': 'no_verified_actual_t60_forecast_available'})
               elif isinstance(races, list) and 1 <= len(races) <= 4:
                   status = {'schema': status['schema'], 'modelId': model_id, 'asOf': as_of,
+                            'inputArchiveRefresh': input_refresh,
                             **submit_forecasts(envelope,
                               base_url=os.environ.get('EDGELAB_API_URL', ''),
                               token=os.environ.get('INGEST_TOKEN', ''))}
@@ -208,6 +236,7 @@ jobs:
           path: |
             ml/data/learning/trifecta-experimental-forecast-status.json
             ml/data/learning/trifecta-experimental-forecast.json
+            ml/data/learning/trifecta-experimental-forecast-input-refresh.json
           if-no-files-found: warn
           retention-days: 90
       - name: Save shared learning cache
