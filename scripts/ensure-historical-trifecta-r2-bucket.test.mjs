@@ -36,3 +36,17 @@ test('disables and verifies an enabled dev URL before accepting private bucket',
   assert.equal(enabled, false)
   assert.equal(calls.some(args => args[2] === 'dev-url' && args[3] === 'disable'), true)
 })
+
+test('reports a safe operation stage and provider code without exposing command output', async () => {
+  try {
+    await ensurePrivateBucket(async args => {
+      if (args[2] === 'list') return 'name: roi-plus-trifecta-archive'
+      if (args[2] === 'dev-url') throw Object.assign(new Error('generic'), { providerCode: 10085 })
+      throw new Error('unexpected command')
+    })
+    assert.fail('expected setup failure')
+  } catch (error) {
+    assert.equal(error.provisionStage, 'dev-url-status')
+    assert.equal(error.providerCode, 10085)
+  }
+})

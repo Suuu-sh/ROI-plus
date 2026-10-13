@@ -61,34 +61,84 @@ export const noCustomDomains = output => {
 }
 
 export const ensurePrivateBucket = async run => {
-  if (!bucketExists(await run(['r2', 'bucket', 'list']))) {
-    try { await run(['r2', 'bucket', 'create', bucketName]) } catch { /* A concurrent create may have won; verify below. */ }
+  let stage = 'bucket-list'
+  const invoke = async (nextStage, args) => {
+    stage = nextStage
+    try { return await run(args) }
+    catch (cause) {
+      const error = new Error('R2 provisioning command failed')
+      error.provisionStage = stage
+      error.providerCode = Number.isInteger(cause?.providerCode) ? cause.providerCode : extractProviderCode(cause)
+      throw error
+    }
   }
-  if (!bucketExists(await run(['r2', 'bucket', 'list']))) throw new Error('bucket verification failed')
+  let listed = await invoke('bucket-list', ['r2', 'bucket', 'list'])
+  if (!bucketExists(listed)) {
+    try { await invoke('bucket-create', ['r2', 'bucket', 'create', bucketName]) }
+    catch (createError) {
+      listed = await invoke('bucket-verify-after-create-error', ['r2', 'bucket', 'list'])
+      if (!bucketExists(listed)) throw createError
+    }
+  }
+  listed = await invoke('bucket-verify', ['r2', 'bucket', 'list'])
+  if (!bucketExists(listed)) {
+    const error = new Error('R2 bucket verification failed')
+    error.provisionStage = stage
+    throw error
+  }
 
-  const firstPrivacy = devUrlEnabled(await run(['r2', 'bucket', 'dev-url', 'get', bucketName]))
-  if (firstPrivacy === null) throw new Error('public development URL status is unknown')
+  const firstPrivacy = devUrlEnabled(await invoke('dev-url-status', ['r2', 'bucket', 'dev-url', 'get', bucketName]))
+  if (firstPrivacy === null) {
+    const error = new Error('R2 public URL status unknown')
+    error.provisionStage = stage
+    throw error
+  }
   if (firstPrivacy) {
-    await run(['r2', 'bucket', 'dev-url', 'disable', bucketName, '--force'])
-    const verified = devUrlEnabled(await run(['r2', 'bucket', 'dev-url', 'get', bucketName]))
-    if (verified !== false) throw new Error('public development URL disable verification failed')
+    await invoke('dev-url-disable', ['r2', 'bucket', 'dev-url', 'disable', bucketName, '--force'])
+    const verified = devUrlEnabled(await invoke('dev-url-verify', ['r2', 'bucket', 'dev-url', 'get', bucketName]))
+    if (verified !== false) {
+      const error = new Error('R2 public URL disable verification failed')
+      error.provisionStage = stage
+      throw error
+    }
   }
 
-  const domains = await run(['r2', 'bucket', 'domain', 'list', bucketName])
-  if (!noCustomDomains(domains)) throw new Error('custom domain exposure cannot be ruled out')
+  const domains = await invoke('custom-domain-check', ['r2', 'bucket', 'domain', 'list', bucketName])
+  if (!noCustomDomains(domains)) {
+    const error = new Error('R2 custom domain exposure unknown')
+    error.provisionStage = stage
+    throw error
+  }
 }
 
-const runWrangler = args => execFileSync('npx', ['wrangler', ...args], {
-  cwd: 'apps/api', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-})
+const extractProviderCode = error => {
+  const output = `${error?.stderr ?? ''}\n${error?.stdout ?? ''}`
+  const match = /(?:error\s*code|code)\s*[:=]?\s*(\d{3,6})/i.exec(output)
+  return match ? Number(match[1]) : undefined
+}
+
+const runWrangler = args => {
+  try {
+    return execFileSync('npx', ['wrangler', ...args], {
+      cwd: 'apps/api', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (cause) {
+    const error = new Error('Wrangler command failed')
+    error.providerCode = extractProviderCode(cause)
+    throw error
+  }
+}
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     await ensurePrivateBucket(args => runWrangler(args))
     process.stdout.write('Private historical trifecta R2 bucket is ready.\n')
-  } catch {
+  } catch (error) {
     // Keep Wrangler stderr/stdout, API tokens, and account metadata out of logs.
-    process.stderr.write('Historical trifecta R2 bucket provisioning failed closed.\n')
+    const stage = /^[a-z-]{1,48}$/.test(error?.provisionStage ?? '') ? error.provisionStage : 'unknown'
+    const code = Number.isInteger(error?.providerCode) && error.providerCode >= 100 && error.providerCode <= 999999
+      ? ` Cloudflare error code ${error.providerCode}.` : ''
+    process.stderr.write(`Historical trifecta R2 bucket provisioning failed at ${stage}.${code}\n`)
     process.exitCode = 1
   }
 }

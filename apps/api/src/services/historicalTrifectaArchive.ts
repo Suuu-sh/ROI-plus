@@ -90,7 +90,7 @@ export async function persistHistoricalObservations(bucket: R2Bucket, db: Db, ob
 }
 
 export async function listHistoricalArchiveObjects(bucket: R2Bucket, date: string, cursor: string | undefined, limit: number) {
-  const listed = await bucket.list({ prefix: `${HISTORICAL_ARCHIVE_PREFIX}${date}/`, cursor, limit: Math.min(1000, limit) })
+  const listed = await bucket.list({ prefix: `${HISTORICAL_ARCHIVE_PREFIX}${date}/`, cursor, limit: Math.min(1000, limit), include: ['customMetadata'] })
   const objects = listed.objects.filter(object => parseHistoricalArchiveKey(object.key)?.raceDate === date)
   return { objects, truncated: listed.truncated, cursor: 'cursor' in listed ? listed.cursor : undefined }
 }
@@ -101,7 +101,7 @@ export async function historicalArchiveCoverage(db: Db, bucket: R2Bucket, date: 
       AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
     ORDER BY r.betting_cutoff_at,r.venue_id,r.race_no LIMIT 400`, date)
   const prefix = `${HISTORICAL_ARCHIVE_PREFIX}${date}/`
-  const listed = await bucket.list({ prefix, limit: 1000 })
+  const listed = await bucket.list({ prefix, limit: 1000, include: ['customMetadata'] })
   const byKey = new Map(listed.objects.map(object => [object.key, object]))
   const failed = await all<any>(db, `SELECT id,reason,started_at,finished_at FROM collection_runs
     WHERE source=? AND sport='boat' AND target_date=? AND status='failed' ORDER BY started_at DESC LIMIT 400`, HISTORICAL_ARCHIVE_SOURCE, date)
@@ -117,16 +117,18 @@ export async function historicalArchiveCoverage(db: Db, bucket: R2Bucket, date: 
         && parsed.modelId === 'boat-trifecta-historical-base-20261014' && !parsed.completeKey
     }), failure = failureByRace.get(race.id)
     const cutoffTrusted = race.betting_cutoff_source === 'boatrace-racelist-cutoff-v1' && Number.isFinite(Date.parse(race.betting_cutoff_at))
-    const status = object?.customMetadata?.status === 'complete' ? 'complete' : partial || object ? 'incomplete' : failure ? 'failed' : 'missing'
+    const status = object?.customMetadata?.status === 'complete' ? 'complete' : partial || object ? 'incomplete' : failure ? 'failed' : listed.truncated ? 'unknown' : 'missing'
     return { raceId: race.id, raceDate: race.race_date, venueId: race.venue_id, raceNo: Number(race.race_no), cutoffAt: race.betting_cutoff_at,
       archiveKey: object?.customMetadata?.status === 'complete' ? object.key : null, status, etag: object?.etag ?? null, uploadedAt: object?.uploaded.toISOString() ?? null,
-      cutoffTrusted, failureReason: !cutoffTrusted ? 'cutoff_unverified' : failure ? 'archive_write_failed' : partial || object ? 'complete_snapshot_unavailable' : 'archive_not_found' }
+      cutoffTrusted, failureReason: !cutoffTrusted ? 'cutoff_unverified' : failure ? 'archive_write_failed' : partial || object ? 'complete_snapshot_unavailable' : listed.truncated ? 'coverage_listing_truncated' : 'archive_not_found' }
   })
   return { schema: 'roi-plus-trifecta-archive-coverage-v1', date, expected: races.length,
     complete: entries.filter(item => item.status === 'complete').length,
     incomplete: entries.filter(item => item.status === 'incomplete').length,
     missing: entries.filter(item => item.status === 'missing').length,
     failed: entries.filter(item => item.status === 'failed').length,
+    unresolved: entries.filter(item => item.status === 'unknown').length,
+    coverageComplete: !listed.truncated,
     truncated: listed.truncated, entries }
 }
 
@@ -159,10 +161,10 @@ export async function listHistoricalLabelTargetRaceIds(bucket: R2Bucket, now = n
     }
   } catch { cursor = undefined }
   let page: R2Objects
-  try { page = await bucket.list({ prefix: HISTORICAL_ARCHIVE_PREFIX, cursor, limit: 80 }) }
+  try { page = await bucket.list({ prefix: HISTORICAL_ARCHIVE_PREFIX, cursor, limit: 80, include: ['customMetadata'] }) }
   catch {
     cursor = undefined
-    page = await bucket.list({ prefix: HISTORICAL_ARCHIVE_PREFIX, limit: 80 })
+    page = await bucket.list({ prefix: HISTORICAL_ARCHIVE_PREFIX, limit: 80, include: ['customMetadata'] })
   }
   const ids = [...new Set(page.objects.flatMap(object => {
     const identity = parseHistoricalArchiveKey(object.key), raceId = object.customMetadata?.raceId

@@ -1,19 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import { app } from '../src/index.js'
 import { historicalArchiveKey, listHistoricalArchiveObjects, parseHistoricalArchiveKey, persistHistoricalObservations,
-  matchesVerifiedResultPairs, type HistoricalObservation } from '../src/services/historicalTrifectaArchive.js'
+  listHistoricalLabelTargetRaceIds, matchesVerifiedResultPairs, type HistoricalObservation } from '../src/services/historicalTrifectaArchive.js'
 import type { Db } from '../src/repo/db.js'
 
 function fakeBucket(keys: string[]) {
   const objects=keys.sort().map((key,index)=>({key,version:'v1',size:100,etag:`e${index}`,httpEtag:`"e${index}"`,uploaded:new Date('2026-10-15T00:00:00Z'),
     customMetadata:{schema:'roi-plus-trifecta-observation-v1',raceId:`boat-20261015-${String(index+1).padStart(2,'0')}-01`,status:'complete',sourceArtifactSha256:'b'.repeat(64),predictedAt:'2026-10-15T03:00:00.000Z'}}))
   const writes=new Map<string,{bytes:Uint8Array;metadata:any}>()
+  const listCalls:any[]=[]
   const bucket={
-    objects,writes,
-    async list({prefix='',cursor,limit=1000}:{prefix?:string;cursor?:string;limit?:number}){
+    objects,writes,listCalls,
+    async list({prefix='',cursor,limit=1000,include=[]}:{prefix?:string;cursor?:string;limit?:number;include?:string[]}){
+      listCalls.push({prefix,cursor,limit,include})
       const rows=objects.filter(object=>object.key.startsWith(prefix)),offset=Number(cursor??0),page=rows.slice(offset,offset+limit)
       const truncated=offset+limit<rows.length
-      return {objects:page,delimitedPrefixes:[],truncated,...(truncated?{cursor:String(offset+limit)}:{})}
+      const listed=include.includes('customMetadata')?page:page.map(({customMetadata: _ignored,...object})=>object)
+      return {objects:listed,delimitedPrefixes:[],truncated,...(truncated?{cursor:String(offset+limit)}:{})}
     },
     async put(key:string,value:Uint8Array|string,_options:any){
       if(writes.has(key))return null
@@ -57,11 +60,20 @@ describe('private historical trifecta R2 archive',()=>{
     const first=await app.request('/api/ingest/historical-trifecta-archives?date=2026-10-15&limit=25',auth,env)
     const firstBody=await first.json() as any
     expect(firstBody.archives).toHaveLength(25)
+    expect(firstBody.archives.every((row:any)=>row.status==='complete')).toBe(true)
     expect(firstBody.nextCursor).toBeTruthy()
     const next=await app.request(`/api/ingest/historical-trifecta-archives?date=2026-10-15&limit=25&cursor=${firstBody.nextCursor}`,auth,env)
     const nextBody=await next.json() as any
     expect(nextBody.archives).toHaveLength(1)
     expect(new Set([...firstBody.archives,...nextBody.archives].map((row:any)=>row.key)).size).toBe(26)
+  })
+
+  it('requests custom metadata when selecting bounded label targets',async()=>{
+    const key=historicalArchiveKey('2026-10-15','01',1,'boat-trifecta-historical-base-20261014')
+    const bucket=fakeBucket([key])
+    const result=await listHistoricalLabelTargetRaceIds(bucket as unknown as R2Bucket,new Date('2026-10-15T03:00:00Z'))
+    expect(result.raceIds).toContain('boat-20261015-01-01')
+    expect(bucket.listCalls[0].include).toEqual(['customMetadata'])
   })
 
   it('rejects keys outside the exact archive prefix and model version',()=>{
@@ -76,5 +88,16 @@ describe('private historical trifecta R2 archive',()=>{
     expect(matchesVerifiedResultPairs(proof,saved)).toBe(true)
     expect(matchesVerifiedResultPairs([...proof.slice(0,5),proof[0]],saved)).toBe(false)
     expect(matchesVerifiedResultPairs(proof.map((row,index)=>index===0?{...row,finishOrder:0}:row),saved)).toBe(false)
+  })
+
+  it('reports unresolved coverage rather than calling truncated R2 listing missing',async()=>{
+    const keys=Array.from({length:1001},(_,index)=>
+      `historical-trifecta/v1/real/2026-10-15/01/1/boat-trifecta-historical-base-20261014/t-60-attempts/20261015${String(index).padStart(8,'0')}.json.gz`)
+    const bucket=fakeBucket(keys) as unknown as R2Bucket
+    const race={id:'boat-20261015-02-01',race_date:'2026-10-15',venue_id:'02',race_no:1,betting_cutoff_at:'2026-10-15T03:01:00+09:00',betting_cutoff_source:'boatrace-racelist-cutoff-v1'}
+    const db={prepare:()=>({bind:()=>({all:async()=>({results:[race]})})})} as unknown as Db
+    const coverage=await (await import('../src/services/historicalTrifectaArchive.js')).historicalArchiveCoverage(db,bucket,'2026-10-15')
+    expect(coverage).toMatchObject({truncated:true,coverageComplete:false,unresolved:1,missing:0})
+    expect(coverage.entries[0]).toMatchObject({status:'unknown',failureReason:'coverage_listing_truncated'})
   })
 })
