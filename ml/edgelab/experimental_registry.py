@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -18,6 +19,58 @@ class ExperimentalModelRegistrationError(RuntimeError):
                    "http_429", "http_5xx", "http_other", "transport_error",
                    "invalid_json", "oversized_response", "invalid_response"}
         self.failure_category = category if category in allowed else "transport_error"
+
+
+class ForecastOnlyArtifactError(ValueError):
+    """Safe validation failure for an explicitly pinned cached model artifact."""
+
+    def __init__(self, category: str):
+        allowed = {"invalid_model_id", "invalid_expected_sha256", "artifact_missing",
+                   "artifact_metadata_mismatch", "artifact_sha256_mismatch",
+                   "artifact_manifest_mismatch"}
+        self.failure_category = category if category in allowed else "artifact_metadata_mismatch"
+
+
+def validate_forecast_only_artifact(model_id: str, expected_sha256: str, *,
+                                    artifact_dir: str | Path) -> dict[str, str]:
+    """Require a specific pinned ID/SHA and fully matching cached sidecars; never fallback."""
+    if not isinstance(model_id, str) or not re.fullmatch(
+            r"boat-trifecta-exp-noweather-[A-Za-z0-9._-]{1,128}", model_id):
+        raise ForecastOnlyArtifactError("invalid_model_id")
+    if not isinstance(expected_sha256, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", expected_sha256):
+        raise ForecastOnlyArtifactError("invalid_expected_sha256")
+    root = Path(artifact_dir)
+    pkl_path, metadata_path = root / f"{model_id}.pkl", root / f"{model_id}.json"
+    manifest_path = root / f"experimental-trifecta-{model_id}.manifest.json"
+    try:
+        pkl_bytes, metadata_bytes = pkl_path.read_bytes(), metadata_path.read_bytes()
+        metadata = json.loads(metadata_bytes.decode("utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        raise ForecastOnlyArtifactError("artifact_missing") from None
+    actual = hashlib.sha256(pkl_bytes).hexdigest()
+    if actual != expected_sha256.lower():
+        raise ForecastOnlyArtifactError("artifact_sha256_mismatch")
+    if (not isinstance(metadata, dict) or metadata.get("id") != model_id
+            or metadata.get("status") != "candidate" or metadata.get("trainingMode") != "experimental"
+            or metadata.get("experimentalOnly") is not True
+            or metadata.get("boatFeatureSchemaVersion") != "boat-prerace-v2-no-weather-experimental-v1"
+            or metadata.get("ticketArtifactSha256") != actual):
+        raise ForecastOnlyArtifactError("artifact_metadata_mismatch")
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    manifest_file = files.get(pkl_path.name) if isinstance(files, dict) else None
+    metadata_file = files.get(metadata_path.name) if isinstance(files, dict) else None
+    if (not isinstance(manifest, dict) or manifest.get("schema") != "edgelab-experimental-trifecta-artifact-v1"
+            or manifest.get("modelId") != model_id or manifest.get("trainingMode") != "experimental"
+            or manifest.get("experimentalOnly") is not True
+            or manifest.get("boatFeatureSchemaVersion") != "boat-prerace-v2-no-weather-experimental-v1"
+            or not isinstance(manifest_file, dict) or manifest_file.get("sha256") != actual
+            or manifest_file.get("sizeBytes") != len(pkl_bytes)
+            or not isinstance(metadata_file, dict)
+            or metadata_file.get("sha256") != hashlib.sha256(metadata_bytes).hexdigest()
+            or metadata_file.get("sizeBytes") != len(metadata_bytes)):
+        raise ForecastOnlyArtifactError("artifact_manifest_mismatch")
+    return {"modelId": model_id, "artifactSha256": actual}
 
 
 def register_experimental_model(model_id: str, *, artifact_dir: str | Path,

@@ -4,6 +4,22 @@ on:
     - cron: '0 4 * * *' # 13:00 JST
   workflow_dispatch:
     inputs:
+      mode:
+        description: Run normal training plus forecast, or diagnose a pinned registered model only
+        required: true
+        default: train_and_forecast
+        type: choice
+        options:
+          - train_and_forecast
+          - forecast_only
+      model_id:
+        description: Required only for forecast_only; exact registered experimental model ID
+        required: false
+        type: string
+      artifact_sha256:
+        description: Required only for forecast_only; expected SHA-256 of the registered pickle
+        required: false
+        type: string
       since:
         description: First day of PIT archives to import (defaults to 31 days ago in JST)
         required: false
@@ -43,6 +59,7 @@ jobs:
             daily-${{ runner.os }}-
       - name: Validate bounded archive range
         id: dates
+        if: inputs.mode != 'forecast_only'
         env:
           INPUT_SINCE: ${{ inputs.since }}
           INPUT_UNTIL: ${{ inputs.until }}
@@ -69,8 +86,10 @@ jobs:
               stream.write(f"since={start}\nuntil={end}\n")
           PY
       - name: Remove stale experiment reports
+        if: inputs.mode != 'forecast_only'
         run: rm -f ml/data/learning/trifecta-experimental-report.json
       - name: Import verified archives and train isolated experimental model
+        if: inputs.mode != 'forecast_only'
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
@@ -80,28 +99,43 @@ jobs:
         run: python -m edgelab.trifecta_experimental_pipeline --since "$EXPERIMENT_SINCE" --until "$EXPERIMENT_UNTIL"
       - name: Identify generated experimental artifacts
         id: model
-        if: always() && !cancelled() && hashFiles('ml/data/learning/trifecta-experimental-report.json') != ''
+        if: always() && !cancelled() && (inputs.mode == 'forecast_only' || hashFiles('ml/data/learning/trifecta-experimental-report.json') != '')
+        env:
+          PYTHONPATH: ml
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_MODEL_ID: ${{ inputs.model_id }}
+          INPUT_ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
         run: |
           python - <<'PY'
-          import json, os
+          import json, os, re
           from pathlib import Path
-          report = json.loads(Path('ml/data/learning/trifecta-experimental-report.json').read_text(encoding='utf-8'))
-          training = report.get('training') or {}
-          if training.get('status') not in {'completed_experimental_only', 'artifact_already_exists_for_cohort'}:
-              print('No experimental model artifact was produced; inspect the coverage report.')
-              raise SystemExit(0)
-          model_id = training.get('modelId')
-          if not isinstance(model_id, str) or not model_id.startswith('boat-trifecta-exp-noweather-'):
-              raise SystemExit('Experimental model identity is invalid.')
-          files = [f'ml/artifacts/{model_id}.pkl', f'ml/artifacts/{model_id}.json',
-                   f"ml/artifacts/experimental-trifecta-{model_id}.manifest.json"]
-          if not all(Path(path).is_file() for path in files):
-              raise SystemExit('Experimental artifact bundle is incomplete.')
+          if os.environ.get('INPUT_MODE') == 'forecast_only':
+              from edgelab.experimental_registry import (ForecastOnlyArtifactError,
+                                                         validate_forecast_only_artifact)
+              model_id = os.environ.get('INPUT_MODEL_ID', '')
+              expected_sha = os.environ.get('INPUT_ARTIFACT_SHA256', '')
+              try:
+                  validate_forecast_only_artifact(model_id, expected_sha, artifact_dir='ml/artifacts')
+              except ForecastOnlyArtifactError as exc:
+                  raise SystemExit('Pinned forecast artifact rejected: ' + exc.failure_category)
+          else:
+              report = json.loads(Path('ml/data/learning/trifecta-experimental-report.json').read_text(encoding='utf-8'))
+              training = report.get('training') or {}
+              if training.get('status') not in {'completed_experimental_only', 'artifact_already_exists_for_cohort'}:
+                  print('No experimental model artifact was produced; inspect the coverage report.')
+                  raise SystemExit(0)
+              model_id = training.get('modelId')
+              if not isinstance(model_id, str) or not model_id.startswith('boat-trifecta-exp-noweather-'):
+                  raise SystemExit('Experimental model identity is invalid.')
+              files = [f'ml/artifacts/{model_id}.pkl', f'ml/artifacts/{model_id}.json',
+                       f"ml/artifacts/experimental-trifecta-{model_id}.manifest.json"]
+              if not all(Path(path).is_file() for path in files):
+                  raise SystemExit('Experimental artifact bundle is incomplete.')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
               stream.write(f'model_id={model_id}\n')
           PY
       - name: Archive experimental model and training evidence
-        if: always() && !cancelled() && steps.model.outputs.model_id != ''
+        if: always() && !cancelled() && inputs.mode != 'forecast_only' && steps.model.outputs.model_id != ''
         uses: actions/upload-artifact@v4
         with:
           name: experimental-trifecta-model-${{ steps.model.outputs.model_id }}
@@ -113,7 +147,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Archive experiment coverage report
-        if: always() && !cancelled() && hashFiles('ml/data/learning/trifecta-experimental-report.json') != ''
+        if: always() && !cancelled() && inputs.mode != 'forecast_only' && hashFiles('ml/data/learning/trifecta-experimental-report.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: trifecta-experimental-report-${{ github.run_id }}
@@ -121,7 +155,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Register only the hash-bound experimental model
-        if: success() && steps.model.outputs.model_id != ''
+        if: success() && inputs.mode != 'forecast_only' && steps.model.outputs.model_id != ''
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
@@ -151,6 +185,7 @@ jobs:
           EDGELAB_API_URL: ${{ secrets.EDGELAB_API_URL }}
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
         run: |
+          rm -f ml/data/learning/trifecta-experimental-forecast-input-refresh.json
           python - <<'PY'
           import datetime, json, os
           from pathlib import Path
