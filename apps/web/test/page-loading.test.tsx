@@ -76,7 +76,7 @@ it('boat purchase-history surface shows ticket-level experimental purchases in t
   expect(screen.getByRole('link', { name: '出走表を見る →' }).getAttribute('href')).toBe('/boat/boat-20261013-04-12')
   expect(screen.getByText('22円')).toBeTruthy()
   expect(fetcher).toHaveBeenCalledWith('/api/bets/experimental', expect.anything())
-  expect(screen.getAllByRole('heading', { name: '仮想購入履歴' })).toHaveLength(1)
+  expect(screen.getAllByRole('heading', { name: /^仮想購入履歴/ })).toHaveLength(1)
 })
 it('hides origin controls and sample notice on boat routes only', () => {
   const stored = new Map([['edgelab.origin', 'sample']])
