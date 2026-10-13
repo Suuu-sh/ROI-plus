@@ -35,6 +35,14 @@ SEND_ORDER = ("venues", "races", "prerace_observations", "models", "results", "p
 class WriteBudgetRefused(RuntimeError):
     """The API refused a write because shared UTC-day budget is unavailable."""
 
+    def __init__(self, message: str, *, table: str, completed_chunks: list[dict[str, Any]],
+                 chunk: int, total_chunks: int) -> None:
+        super().__init__(message)
+        self.table = table
+        self.completed_chunks = completed_chunks
+        self.chunk = chunk
+        self.total_chunks = total_chunks
+
 
 _SAFE_INGEST_ERROR_CODES = {
     "d1_write_budget_unavailable", "d1_write_budget_exhausted", "historical_ingest_disabled",
@@ -267,10 +275,15 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
                 except HTTPError as exc:
                     safe_code = _safe_ingest_error_code(exc)
                     if exc.code == 429:
+                        if safe_code not in {"d1_write_budget_unavailable", "d1_write_budget_exhausted"}:
+                            raise RuntimeError(f"ingest {table} failed: HTTP 429") from exc
                         # Never retry blindly: the reservation status may have
                         # changed and a partial prior sync must remain visible.
                         raise WriteBudgetRefused(
-                            f"ingest {table} refused: daily D1 write budget unavailable or exhausted (HTTP 429)") from exc
+                            f"ingest {table} refused: daily D1 write budget unavailable or exhausted (HTTP 429)",
+                            table=table, completed_chunks=responses.copy(),
+                            chunk=start // chunk_size + 1,
+                            total_chunks=(len(values) + chunk_size - 1) // chunk_size) from exc
                     if attempt == 0 and exc.code in {500, 502, 503, 504}:
                         # Natural-key upserts make a replay safe if the Worker
                         # committed before an upstream service error was returned.

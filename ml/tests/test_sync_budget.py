@@ -81,17 +81,77 @@ def test_ingest_noop_is_explicit_not_reported_as_changed(monkeypatch):
 
 
 def test_budget_refusal_stops_without_retry_or_fake_success(monkeypatch):
+    for code in ("d1_write_budget_unavailable", "d1_write_budget_exhausted"):
+        requests = []
+
+        def refused(req, **_kwargs):
+            requests.append(req)
+            body = json.dumps({"code": code}).encode()
+            raise HTTPError(req.full_url, 429, "Too Many Requests", {}, BytesIO(body))
+
+        monkeypatch.setattr(sync, "urlopen", refused)
+        with pytest.raises(sync.WriteBudgetRefused) as refusal:
+            sync.sync_rows({"races": [{"id": "r1"}], "entries": [{"id": "e1"}]},
+                           base_url="https://example.test", token="t")
+        assert len(requests) == 1
+        assert refusal.value.table == "races"
+        assert refusal.value.completed_chunks == []
+        assert (refusal.value.chunk, refusal.value.total_chunks) == (1, 1)
+
+
+def test_unknown_or_plain_text_429_is_not_a_budget_refusal(monkeypatch):
+    body = {"value": b"upstream rate limit"}
     requests = []
 
     def refused(req, **_kwargs):
         requests.append(req)
-        raise HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+        raise HTTPError(req.full_url, 429, "Too Many Requests", {}, BytesIO(body["value"]))
 
     monkeypatch.setattr(sync, "urlopen", refused)
-    with pytest.raises(sync.WriteBudgetRefused):
-        sync.sync_rows({"races": [{"id": "r1"}], "entries": [{"id": "e1"}]},
+    for payload in (b"upstream rate limit", b'{"code":"unknown_rate_limit"}'):
+        body["value"] = payload
+        requests.clear()
+        with pytest.raises(RuntimeError, match="HTTP 429") as refusal:
+            sync.sync_rows({"prerace_observations": [{"id": "observation"}]},
+                           base_url="https://example.test", token="t")
+        assert "write budget" not in str(refusal.value)
+        assert len(requests) == 1
+
+
+def test_forbidden_ingest_remains_fail_closed(monkeypatch):
+    requests = []
+
+    def forbidden(req, **_kwargs):
+        requests.append(req)
+        raise HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(sync, "urlopen", forbidden)
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        sync.sync_rows({"prerace_observations": [{"id": "observation"}]},
                        base_url="https://example.test", token="t")
     assert len(requests) == 1
+
+
+def test_budget_refusal_exposes_prior_successful_chunks_without_retry(monkeypatch):
+    requests = []
+
+    def one_chunk_then_refuse(req, **_kwargs):
+        requests.append(req.data)
+        if len(requests) == 1:
+            return _Response({"upserted": 50, "changed": 50})
+        body = json.dumps({"code": "d1_write_budget_exhausted"}).encode()
+        raise HTTPError(req.full_url, 429, "Too Many Requests", {}, BytesIO(body))
+
+    monkeypatch.setattr(sync, "urlopen", one_chunk_then_refuse)
+    with pytest.raises(sync.WriteBudgetRefused) as refused:
+        sync.sync_rows({"prerace_observations": [{"id": f"o{i}"} for i in range(56)]},
+                       base_url="https://example.test", token="t")
+    assert len(requests) == 2
+    assert refused.value.table == "prerace_observations"
+    assert refused.value.completed_chunks == [
+        {"status": 200, "upserted": 50, "changed": 50, "noop": False},
+    ]
+    assert (refused.value.chunk, refused.value.total_chunks) == (2, 2)
 
 
 def test_sync_prioritizes_parent_rows_then_results_and_payouts_before_entries(monkeypatch):
