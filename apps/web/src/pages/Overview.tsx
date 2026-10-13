@@ -101,10 +101,12 @@ export function OverviewPage() {
                 { value: 'lost', label: <>不的中 <span className="num ml-0.5 text-faint">{counts.lost}</span></> },
               ]} />
             </div>
-            {shown.length > 0 && <PurchasedRaceHeader />}
-            {!shown.length ? <Empty>この条件に該当するレースはありません。</Empty> : <div key={filter} className="stagger divide-y divide-line">
-              {shown.map((race, index) => <PurchasedRaceCard key={race.raceId} race={race} index={index % PAGE_SIZE} />)}
-            </div>}
+            <div className="race-list">
+              {shown.length > 0 && <PurchasedRaceHeader />}
+              {!shown.length ? <Empty>この条件に該当するレースはありません。</Empty> : <div key={filter} className="stagger divide-y divide-line">
+                {shown.map((race, index) => <PurchasedRaceCard key={race.raceId} race={race} index={index % PAGE_SIZE} />)}
+              </div>}
+            </div>
             {filtered.length > shown.length && <div className="border-t border-line p-3 text-center">
               <button className="btn-ghost h-9 text-xs" onClick={() => setVisible((n) => n + PAGE_SIZE)}>さらに表示（残り {(filtered.length - shown.length).toLocaleString()}レース）</button>
             </div>}
@@ -190,11 +192,11 @@ function SettledTicker({ bets }: { bets: Bet[] }) {
   </section>
 }
 
-// Shared by the column header and each row so wide screens read the purchases as one table.
-const raceRowGrid = 'md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(180px,1.5fr)_64px_68px_72px_84px] md:items-center md:gap-x-3'
+// Rows switch to table columns from the width of the list itself (see .race-list in index.css),
+// because the board's side column makes the viewport width a poor guide.
 
 function PurchasedRaceHeader() {
-  return <div aria-hidden="true" className={`hidden border-b border-ink/40 bg-raised/40 px-4 py-2 pl-5 text-[10px] font-bold text-muted ${raceRowGrid}`}>
+  return <div aria-hidden="true" className="race-head border-b border-ink/40 bg-raised/40 px-4 py-2 pl-5 text-[10px] font-bold text-muted">
     <span>レース</span><span>買い目</span><span className="text-right">購入額</span><span className="text-right">確定払戻</span><span className="text-right">確定損益</span><span className="text-right">精算状況</span>
   </div>
 }
@@ -213,18 +215,18 @@ function PurchasedRaceCard({ race, index }: { race: PurchasedRace; index: number
   const experimentalCount = race.bets.filter((bet) => bet.recordKind === 'experimental_paper').length
   // One label per race when the whole race is experimental; mixed races mark each experimental ticket.
   const allExperimental = experimentalCount === race.bets.length
-  return <article className={`group relative grid grid-cols-2 gap-x-4 p-4 pl-5 transition-colors duration-300 hover:bg-raised/40 md:py-3 ${raceRowGrid}`} style={{ ['--i' as string]: index }}>
+  return <article className="race-row group relative p-4 pl-5 transition-colors duration-300 hover:bg-raised/40" style={{ ['--i' as string]: index }}>
     <span aria-hidden="true" className={`absolute inset-y-3 left-0 w-1 rounded-r transition-[top,bottom] duration-300 group-hover:inset-y-0 ${strip}`} />
-    <div className="col-span-2 min-w-0 md:col-span-1">
+    <div className="race-main min-w-0">
       <Link to={target} className="flex items-center gap-2 font-bold hover:text-accent">
         <SportIcon sport={race.sport} className={`h-4 w-4 shrink-0 ${race.sport === 'boat' ? 'text-boat' : 'text-horse'}`} />
         <span className="min-w-0 truncate">{race.venueName ?? race.raceId}{race.raceNo != null ? ` ${race.raceNo}R` : ''}</span>
-        <span className="shrink-0 text-xs font-normal text-muted transition-transform duration-300 group-hover:translate-x-1 md:hidden">詳細 →</span>
+        <span className="shrink-0 text-xs font-normal text-muted transition-transform duration-300 group-hover:translate-x-1 race-wide-hidden">詳細 →</span>
       </Link>
       <div className="num mt-1 text-[11px] text-muted">{race.raceDate ?? '開催日不明'} · 購入 {race.bets.length}点 · {dateTime(race.latestPurchase)} 時点</div>
       {allExperimental && <span className="mt-1.5 inline-block whitespace-nowrap rounded-[3px] border border-dashed border-line px-1.5 py-0.5 text-[10px] font-bold text-muted">実験・通常成績対象外</span>}
     </div>
-    <div className="col-span-2 mb-1 mt-3 flex min-w-0 flex-wrap gap-1.5 md:col-span-1 md:mb-0 md:mt-0">
+    <div className="race-tickets flex min-w-0 flex-wrap gap-1.5">
       {race.bets.map((bet) => <div key={bet.id} className={`flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-[4px] border px-2 py-1 text-xs [&>span]:whitespace-nowrap ${bet.status === 'won' ? 'border-pos/50 bg-pos/10' : 'border-line bg-surface'}`}>
         {bet.recordKind === 'experimental_paper' && !allExperimental && <span className="rounded-[3px] border border-dashed border-line px-1 text-[10px] font-bold text-muted" title="実験・通常成績対象外">実験</span>}
         <span className="font-mono font-bold">{betTypeLabel[bet.betType]} {bet.selection}</span>
@@ -241,8 +243,8 @@ function PurchasedRaceCard({ race, index }: { race: PurchasedRace; index: number
 }
 
 function RowValue({ label, children }: { label: string; children: ReactNode }) {
-  return <div className="mt-2 flex items-baseline justify-between gap-3 text-xs md:mt-0 md:block md:text-right">
-    <span className="text-[10px] text-muted md:sr-only">{label}</span>
+  return <div className="race-value flex items-baseline justify-between gap-3 text-xs">
+    <span className="race-value-label text-[10px] text-muted">{label}</span>
     {children}
   </div>
 }
