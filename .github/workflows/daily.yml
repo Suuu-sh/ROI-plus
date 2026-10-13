@@ -46,7 +46,8 @@ jobs:
         id: cache-date
         run: echo "date=$(TZ=Asia/Tokyo date +%F)" >> "$GITHUB_OUTPUT"
       - name: Restore daily data and model cache
-        uses: actions/cache@v4
+        id: daily-cache-restore
+        uses: actions/cache/restore@v4
         with:
           path: |
             data/raw/boatrace
@@ -150,3 +151,16 @@ jobs:
           name: learning-feedback-${{ github.run_id }}
           path: ml/data/learning/report.json
           if-no-files-found: ignore
+
+      # A partial daily run can still have a complete normalized source cache:
+      # run_daily saves rows before the remote D1 ingest. Preserve it for the
+      # next retry without creating or changing the daily success marker.
+      - name: Save daily data and model cache
+        if: always() && !cancelled() && hashFiles('ml/data/rows.json') != '' && hashFiles('ml/data/boat-venue-v2.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/raw/boatrace
+            ml/data
+            ml/artifacts
+          key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}

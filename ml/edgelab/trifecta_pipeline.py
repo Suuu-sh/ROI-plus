@@ -18,6 +18,41 @@ from edgelab.importers.boatrace_capture_archive import import_capture_archives
 from edgelab.sync import fetch_prerace_capture_archives
 from edgelab.storage import DEFAULT_STORE, load_rows, save_rows
 
+SAFE_ARCHIVE_EXCLUSION_REASONS = frozenset({
+    "export_page_invalid", "archive_wrapper_invalid", "archive_checksum_missing",
+    "archive_checksum_mismatch", "archive_json_invalid", "archive_schema_invalid",
+    "timestamp_missing", "timestamp_timezone_missing",
+    "archive_race_invalid", "archive_date_mismatch", "race_identity_or_real_race_missing",
+    "archive_id_mismatch", "archive_sources_missing", "archive_parser_version_unsupported",
+    "archive_source_identity_mismatch", "source_checksum_invalid",
+    "racelist_beforeinfo_cutoff_mismatch", "archive_capture_or_cutoff_order_invalid",
+    "odds_market_not_verified_nonfinal", "exhibition_lanes_incomplete", "exhibition_lane_invalid",
+    "exhibition_lane_duplicate", "exhibition_value_invalid", "weather_observation_after_capture",
+    "weather_observation_missing", "weather_label_invalid", "weather_values_invalid",
+    "weather_field_unsupported", "weather_value_invalid", "racelist_entries_incomplete",
+    "racelist_cached_entries_incomplete", "racelist_entry_invalid", "racelist_entry_duplicate",
+    "racelist_entry_identity_mismatch", "odds_market_incomplete", "odds_row_invalid",
+    "cutoff_evidence_invalid", "cutoff_evidence_conflict", "immutable_capture_key_conflict",
+})
+
+
+def _safe_exclusion_counts(value: object) -> dict[str, int]:
+    """Expose fixed parser reason codes only, never arbitrary exception text."""
+    if not isinstance(value, dict):
+        return {}
+    counts: dict[str, int] = {}
+    unknown = 0
+    for reason, count in value.items():
+        amount = count if type(count) is int and count > 0 else 0
+        if reason in SAFE_ARCHIVE_EXCLUSION_REASONS:
+            if amount:
+                counts[reason] = counts.get(reason, 0) + amount
+        else:
+            unknown += amount
+    if unknown:
+        counts["other"] = unknown
+    return counts
+
 
 def fetch_archive_pages(day: str, *, base_url: str, token: str) -> list[dict]:
     """Reuse the bounded, authenticated export reader used by the sync layer."""
@@ -37,6 +72,8 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
     rows = load_rows(store_path)
     report: dict = {"schema": "trifecta-candidate-pipeline-v1", "range": {"since": since, "until": until},
                     "archiveDates": 0, "importedArchives": 0, "excludedArchives": 0,
+                    "archiveExclusionCounts": {},
+                    "archiveExclusionCountsByDate": {},
                     "training": {"status": "not_attempted"}, "promotion": "not_performed"}
     day = start
     while day <= end:
@@ -46,6 +83,10 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
         report["archiveDates"] += 1
         report["importedArchives"] += imported["importedArchives"]
         report["excludedArchives"] += imported["excludedArchives"]
+        safe_counts = _safe_exclusion_counts(imported.get("exclusionCounts"))
+        report["archiveExclusionCountsByDate"][day_text] = safe_counts
+        for reason, count in safe_counts.items():
+            report["archiveExclusionCounts"][reason] = report["archiveExclusionCounts"].get(reason, 0) + count
         day += timedelta(days=1)
     if report["importedArchives"]:
         save_rows(rows, store_path)
@@ -120,7 +161,8 @@ def main(argv: list[str] | None = None) -> int:
                     "archive_or_training_pipeline_error" if isinstance(exc, RuntimeError) else
                     "local_pipeline_error")
         result = {"schema": "trifecta-candidate-pipeline-v1", "training": {"status": "not_attempted"},
-                  "promotion": "not_performed", "error": category}
+                  "promotion": "not_performed", "archiveExclusionCounts": {},
+                  "archiveExclusionCountsByDate": {}, "error": category}
         target = Path(args.report).with_name("trifecta-pipeline-summary.json")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")

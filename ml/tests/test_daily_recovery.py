@@ -70,6 +70,12 @@ def test_missing_selected_artifact_keeps_collection_success_separate_from_foreca
 
 def test_daily_workflow_restores_pinned_bundle_and_skips_only_complete_forecasts():
     workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/daily.yml").read_text()
+    assert "uses: actions/cache/restore@v4" in workflow
+    assert "uses: actions/cache/save@v4" in workflow
+    save_step = workflow.split("- name: Save daily data and model cache", 1)[1]
+    assert "if: always() && !cancelled() && hashFiles('ml/data/rows.json') != '' && hashFiles('ml/data/boat-venue-v2.json') != ''" in save_step
+    assert "daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}" in save_step
+    assert "daily_ok_" not in save_step
     assert "if: github.event_name == 'schedule' && steps.guard.outputs.skip != 'true'" in workflow
     assert "candidate-model-artifact-boat-win-lgbm-20261010-14b4a90a" in workflow
     assert "run-id: '38053091327'" in workflow
