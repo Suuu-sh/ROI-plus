@@ -43,6 +43,7 @@ describe('ExperimentalBetsHistory', () => {
 
     expect(await screen.findByText('無効（返金）')).toBeTruthy()
     expect(screen.getByText(/返金済み · 購入額が100円単位の条件を満たさないため/)).toBeTruthy()
+    expect(screen.getByText('無効化した旧記録額')).toBeTruthy()
     expect(screen.queryByText('invalid_stake_unit')).toBeNull()
     expect(screen.getByText('¥22')).toBeTruthy()
   })
