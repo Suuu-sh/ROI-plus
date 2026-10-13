@@ -399,6 +399,7 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
                if row.get("race_id") in races and row.get("data_origin") == "real"]
     if sport == "boat":
         from edgelab.features.boat import (PRERACE_V2_SCHEMA, TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+                                           TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS,
                                            build_boat_features,
                                            build_boat_prerace_v2_features, completed_racer_history)
         grouped: dict[str, list[dict[str, Any]]] = {}

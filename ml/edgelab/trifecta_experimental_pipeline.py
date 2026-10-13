@@ -19,7 +19,7 @@ from edgelab.importers.boatrace_capture_archive import import_capture_archives
 from edgelab.storage import DEFAULT_STORE, load_rows, save_rows
 from edgelab.sync import fetch_prerace_capture_archives
 
-_SAFE_EXCEPTION_CLASSES = {"ValueError", "TypeError", "KeyError", "AttributeError", "IndexError",
+_SAFE_EXCEPTION_CLASSES = {"ValueError", "TypeError", "KeyError", "AttributeError", "IndexError", "NameError",
                            "OverflowError", "OSError", "RuntimeError", "ImportError", "AssertionError"}
 _SAFE_STAGES = {"input_validation", "credentials", "load_local_cache", "archive_export",
                 "archive_import", "save_local_cache", "training_row_build", "coverage_audit",

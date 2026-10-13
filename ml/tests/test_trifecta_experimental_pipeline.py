@@ -8,6 +8,9 @@ from unittest.mock import patch
 
 from edgelab.trifecta_experimental_pipeline import (PipelineStageFailure, _refresh_same_day_k,
                                                    main, run)
+from edgelab.cli import _make_training_rows
+from edgelab.features.boat import (TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS,
+                                   TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA)
 
 
 @patch.dict(os.environ, {"EDGELAB_API_URL": "https://example.test", "INGEST_TOKEN": "test-only"})
@@ -96,3 +99,32 @@ def test_pipeline_failure_report_exposes_only_fixed_stage_and_allowlisted_class(
                                   "failureStage": "archive_export", "exceptionClass": "TypeError"}
     assert "private" not in output.getvalue()
     fetch.assert_called_once()
+
+
+def test_training_row_builder_supports_weatherless_experimental_schema_with_real_shaped_rows():
+    race_id = "boat-20261013-01-01"
+    store = {
+        "races": [{"id": race_id, "sport": "boat", "data_origin": "real", "race_date": "2026-10-13",
+                   "status": "finished", "post_time": "2026-10-13T11:20:00+09:00",
+                   "betting_cutoff_at": "2026-10-13T11:00:00+09:00",
+                   "betting_cutoff_source": "boatrace-racelist-cutoff-v1",
+                   "betting_cutoff_observed_at": "2026-10-13T10:50:00+09:00"}],
+        "entries": [{"id": f"{race_id}-{lane}", "race_id": race_id, "number": lane,
+                     "available_at": "2026-10-13T10:00:00+09:00",
+                     "source_available_at": "2026-10-13T10:00:00+09:00",
+                     "source_sha256": "a" * 64, "data_origin": "real",
+                     "features_json": json.dumps({"racer_id": f"{10000 + lane}"})}
+                    for lane in range(1, 7)],
+        "results": [{"race_id": race_id, "number": lane, "finish_order": lane, "data_origin": "real"}
+                    for lane in range(1, 7)],
+        "prerace_observations": [],
+    }
+    features = [{"lane": lane, "exhibition_time": 6.0 + lane, "lane_wind_x": 99.0,
+                 "lane_wave_height": 99.0} for lane in range(1, 7)]
+    with patch("edgelab.features.boat.build_boat_prerace_v2_features", return_value=features):
+        rows = _make_training_rows(store, "boat", feature_schema=TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+                                   require_source_arrival=True)
+    assert len(rows) == 6
+    assert all(row["lane"] == row["number"] for row in rows)
+    assert "lane_wind_x" not in rows[0] and "lane_wave_height" not in rows[0]
+    assert "lane_wind_x" not in TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS
