@@ -519,7 +519,7 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now()) {
  const date=jstRaceDate(new Date(decisionAt));
  const eligibleCutoffFrom=isoJstAt(decisionAt+PRIMARY_PAPER_OFFSET_MS-PRIMARY_PAPER_TOLERANCE_MS);
  const eligibleCutoffTo=isoJstAt(decisionAt+PRIMARY_PAPER_OFFSET_MS+PRIMARY_PAPER_TOLERANCE_MS);
- const races=await all<any>(db,"SELECT * FROM races WHERE sport='boat' AND data_origin='real' AND status='scheduled' AND race_date=? AND betting_cutoff_source=? AND julianday(betting_cutoff_at) BETWEEN julianday(?) AND julianday(?) ORDER BY betting_cutoff_at,id LIMIT 1",date,TRUSTED_CUTOFF_SOURCE,eligibleCutoffFrom,eligibleCutoffTo);
+ const races=await all<any>(db,"SELECT * FROM races WHERE sport='boat' AND data_origin='real' AND status='scheduled' AND race_date=? AND betting_cutoff_source=? AND julianday(betting_cutoff_at) BETWEEN julianday(?) AND julianday(?) AND NOT EXISTS (SELECT 1 FROM experimental_paper_decisions d WHERE d.experiment_key='boat-trifecta-small-sample-v1' AND d.race_id=races.id) ORDER BY betting_cutoff_at,id LIMIT 180",date,TRUSTED_CUTOFF_SOURCE,eligibleCutoffFrom,eligibleCutoffTo);
  for(const race of races){
    const timing=primaryPaperTiming(race.betting_cutoff_at,decisionAt,race.betting_cutoff_source,race.betting_cutoff_observed_at);
    if(!timing.eligible)continue;
@@ -1462,8 +1462,17 @@ app.get('/performance/experimental',async c=>{
    (SELECT expected_roi FROM experimental_paper_bets b WHERE b.decision_id=d.id AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id) ORDER BY b.stake DESC,b.selection LIMIT 1) expected_roi
    FROM experimental_paper_decisions d JOIN races r ON r.id=d.race_id JOIN venues v ON v.id=r.venue_id
    ORDER BY d.decision_at DESC,d.id DESC LIMIT 100`);
+ const coverageDate=jstRaceDate(new Date());
+ const coverage=await all<any>(db,`SELECT p.race_id,MAX(p.predicted_at) predicted_at FROM (
+   SELECT ep.race_id,ep.predicted_at FROM experimental_ticket_predictions ep JOIN races r ON r.id=ep.race_id
+   WHERE ep.model_id=? AND ep.artifact_sha256=? AND ep.data_origin='real' AND r.data_origin='real' AND r.race_date=?
+     AND r.betting_cutoff_source=? AND julianday(ep.predicted_at)<=julianday(r.betting_cutoff_at,'-1 minute')
+     AND julianday(ep.predicted_at)>=julianday(r.betting_cutoff_at,'-6 minutes')
+   GROUP BY ep.race_id,ep.predicted_at HAVING COUNT(DISTINCT ep.selection)=120
+ ) p GROUP BY p.race_id ORDER BY p.race_id LIMIT 180`,model?.id??'',model?.artifact_sha256??'',coverageDate,TRUSTED_CUTOFF_SOURCE);
  const n=metric??{races:0,bets:0,stake:0,payout:0,profit:0};
  return c.json({experimentKey,state:model?'ready':'unavailable',model:model?{id:model.id,status:model.status,artifactSha256:model.artifact_sha256,schemaVersion:model.schema_version,trainedAt:model.trained_at}:null,
+   forecastCoverage:{date:coverageDate,storedRaceCount:coverage.length,races:coverage.map((x:any)=>({raceId:x.race_id,predictedAt:x.predicted_at,predictionCount:120}))},
    bankroll:{initial:Number(balance?.initial_balance??100000),available:Number(balance?.available_balance??100000)},
    metrics:{races:Number(n.races),bets:Number(n.bets),stake:Number(n.stake),payout:Number(n.payout),profit:Number(n.profit),roi:Number(n.settled_stake)>0?Number(n.payout)/Number(n.settled_stake):null},
    decisions:rows.map((x:any)=>({raceId:x.race_id,raceDate:x.race_date,raceNo:Number(x.race_no),venueName:x.venue_name??null,outcome:x.outcome,reason:x.reason??null,stake:Number(x.stake),modelId:x.model_id,decidedAt:x.decided_at,probability:x.probability==null?null:Number(x.probability),odds:x.odds==null?null:Number(x.odds),uncertainty:x.uncertainty==null?null:Number(x.uncertainty),expectedRoi:x.expected_roi==null?null:Number(x.expected_roi)})),

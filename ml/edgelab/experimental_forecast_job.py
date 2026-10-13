@@ -1,4 +1,4 @@
-"""Resolve and submit one bounded current-time experimental T-60 forecast."""
+"""Resolve and submit all bounded current-time experimental T-60 forecasts."""
 from __future__ import annotations
 
 import datetime as dt
@@ -63,8 +63,8 @@ def resolve_latest_forecast_model(base_url: str, token: str, *, opener=None) -> 
     return {"modelId": model["modelId"], "artifactSha256": model["artifactSha256"].lower()}
 
 
-def _worker_first_forecast(envelope: dict[str, Any], store: dict[str, Any]) -> dict[str, Any] | None:
-    """Limit submission to the single race the Worker would inspect first."""
+def _eligible_forecasts(envelope: dict[str, Any], store: dict[str, Any]) -> dict[str, Any] | None:
+    """Keep every eligible race in cutoff order; the API still receives one race per call."""
     forecast_races = envelope.get("races")
     if not isinstance(forecast_races, list) or len(forecast_races) > 180:
         raise ExperimentalForecastJobError("invalid_forecast_envelope")
@@ -89,7 +89,7 @@ def _worker_first_forecast(envelope: dict[str, Any], store: dict[str, Any]) -> d
         return None
     eligible.sort(key=lambda row: (row[0], row[1]))
     return {**{key: value for key, value in envelope.items() if key != "races"},
-            "races": [eligible[0][2]]}
+            "races": [row[2] for row in eligible]}
 
 
 def run_forecast_job(*, base_url: str, token: str, artifact_dir: str | Path = "ml/artifacts",
@@ -97,7 +97,7 @@ def run_forecast_job(*, base_url: str, token: str, artifact_dir: str | Path = "m
                      refresh: Callable[..., dict[str, Any]] = refresh_current_day_archives,
                      predictor: Callable[..., Any] = subprocess.run,
                      submitter: Callable[..., dict[str, Any]] = submit_forecasts) -> dict[str, Any]:
-    """Refresh PIT inputs, capture actual post-refresh time, and submit at most one race."""
+    """Refresh PIT inputs, capture actual post-refresh time, and submit every eligible race independently."""
     model = resolve_latest_forecast_model(base_url, token, opener=opener)
     try:
         validate_forecast_only_artifact(model["modelId"], model["artifactSha256"], artifact_dir=artifact_dir)
@@ -125,24 +125,71 @@ def run_forecast_job(*, base_url: str, token: str, artifact_dir: str | Path = "m
                 or envelope.get("artifactSha256") != model["artifactSha256"]
                 or envelope.get("trainingMode") != "experimental" or envelope.get("experimentalOnly") is not True):
             raise ValueError
-        selected = _worker_first_forecast(envelope, load_rows(store_path))
+        selected = _eligible_forecasts(envelope, load_rows(store_path))
     except (OSError, ValueError, TypeError, KeyError):
         raise ExperimentalForecastJobError("invalid_forecast_envelope") from None
     if selected is None:
         return {"status": "no_eligible_forecast", "reason": "no_actual_t60_race_in_window",
                 "modelId": model["modelId"], "asOf": as_of,
                 "archiveRefresh": refreshed.get("status")}
-    result = submitter(selected, base_url=base_url, token=token)
-    if result.get("status") != "forecast_stored" or result.get("storedRaceCount") != 1:
-        raise ExperimentalForecastJobError("submission_failed")
-    return {"status": "forecast_stored", "modelId": model["modelId"], "asOf": as_of,
-            "raceIds": result.get("raceIds", []), "archiveRefresh": refreshed.get("status")}
+    stored: list[str] = []
+    failures: list[dict[str, Any]] = []
+    metadata = {key: value for key, value in selected.items() if key != "races"}
+    for forecast in selected["races"]:
+        result = submitter({**metadata, "races": [forecast]}, base_url=base_url, token=token)
+        if result.get("status") == "forecast_stored" and result.get("storedRaceCount") == 1:
+            stored.extend(result.get("raceIds", [forecast["raceId"]]))
+        else:
+            # One rejected or expired race must not starve other simultaneous races.
+            failures.append({"raceId": forecast["raceId"], "reason": "submission_failed"})
+    return {"status": "partially_stored" if failures and stored else
+                      "forecast_failed" if failures else "forecast_stored",
+            "modelId": model["modelId"], "asOf": as_of, "raceIds": stored,
+            "eligibleRaceCount": len(selected["races"]), "storedRaceCount": len(stored),
+            "failures": failures, "archiveRefresh": refreshed.get("status")}
+
+
+def run_forecast_loop(*, duration_minutes: int, interval_seconds: int = 60,
+                      job: Callable[..., dict[str, Any]] = run_forecast_job,
+                      monotonic=None, sleep=None, emit=None, **kwargs) -> dict[str, int]:
+    """Reuse one initialized runner, refresh inputs/time every tick, and recover next tick.
+
+    Execution latency is not a guarantee: all PIT and pre-cutoff API gates remain.
+    Missed ticks are skipped rather than replayed with historical timestamps.
+    """
+    import time
+    if not 1 <= duration_minutes <= 300 or not 1 <= interval_seconds <= 60:
+        raise ValueError("invalid bounded forecast loop duration or interval")
+    monotonic = monotonic or time.monotonic
+    sleep = sleep or time.sleep
+    emit = emit or (lambda result: print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True))
+    deadline = monotonic() + duration_minutes * 60
+    ticks = failures = 0
+    while monotonic() < deadline:
+        started = monotonic()
+        try:
+            result = job(**kwargs)
+        except ExperimentalForecastJobError as exc:
+            result = {"status": "forecast_failed", "reason": exc.failure_category}
+        emit(result)
+        ticks += 1
+        failures += result.get("status") in {"forecast_failed", "partially_stored"}
+        remaining = min(deadline - monotonic(), interval_seconds - (monotonic() - started))
+        if remaining > 0:
+            sleep(remaining)
+    return {"ticks": ticks, "failedTicks": failures}
+
 
 
 def main() -> int:
     import os
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--duration-minutes", type=int, default=0)
+    args = parser.parse_args()
     try:
-        result = run_forecast_job(base_url=os.environ.get("EDGELAB_API_URL", ""),
+        operation = run_forecast_job if not args.duration_minutes else lambda **kwargs: run_forecast_loop(duration_minutes=args.duration_minutes, **kwargs)
+        result = operation(base_url=os.environ.get("EDGELAB_API_URL", ""),
             token=os.environ.get("INGEST_TOKEN", ""), artifact_dir=os.environ.get("EXPERIMENTAL_ARTIFACT_DIR", "ml/artifacts"),
             store_path=os.environ.get("EXPERIMENTAL_STORE_PATH", str(DEFAULT_STORE)))
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))

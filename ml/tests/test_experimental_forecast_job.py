@@ -5,7 +5,7 @@ from urllib.error import HTTPError
 import pytest
 
 from edgelab.experimental_forecast_job import (ExperimentalForecastJobError,
-                                               _worker_first_forecast,
+                                               _eligible_forecasts,
                                                resolve_latest_forecast_model)
 
 
@@ -54,7 +54,7 @@ def test_model_resolution_fails_closed_without_local_fallback_or_remote_details(
     assert "private" not in str(error.value)
 
 
-def test_forecast_job_bounds_busy_window_to_worker_first_cutoff_even_with_more_than_four_races():
+def test_forecast_job_keeps_all_overlapping_races_even_with_more_than_four():
     model_id = "boat-trifecta-exp-noweather-test"
     sha = "a" * 64
     forecasts = [{"raceId": f"race-{index}", "predictedAt": "2026-10-13T04:00:00Z",
@@ -62,13 +62,77 @@ def test_forecast_job_bounds_busy_window_to_worker_first_cutoff_even_with_more_t
     store = {"races": [{"id": f"race-{index}", "sport": "boat", "status": "scheduled",
                         "data_origin": "real", "betting_cutoff_at": f"2026-10-13T04:{5-index:02d}:00Z"}
                        for index in range(6)]}
-    selected = _worker_first_forecast({"modelId": model_id, "artifactSha256": sha, "races": forecasts}, store)
+    selected = _eligible_forecasts({"modelId": model_id, "artifactSha256": sha, "races": forecasts}, store)
     assert selected is not None
-    assert len(selected["races"]) == 1
+    assert len(selected["races"]) == 6
     assert selected["races"][0]["raceId"] == "race-5"
 
 
 def test_forecast_job_rejects_pathologically_unbounded_envelope():
     with pytest.raises(ExperimentalForecastJobError) as error:
-        _worker_first_forecast({"races": [{"raceId": str(i)} for i in range(181)]}, {"races": []})
+        _eligible_forecasts({"races": [{"raceId": str(i)} for i in range(181)]}, {"races": []})
     assert error.value.failure_category == "invalid_forecast_envelope"
+
+
+def test_loop_refreshes_each_tick_and_recovers_from_safe_failure():
+    from edgelab.experimental_forecast_job import run_forecast_loop
+    clock = [0.0]
+    emitted = []
+    calls = []
+    def job(**kwargs):
+        calls.append(clock[0])
+        if len(calls) == 1:
+            raise ExperimentalForecastJobError("archive_refresh_unavailable")
+        return {"status": "no_eligible_forecast"}
+    result = run_forecast_loop(duration_minutes=2, job=job,
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0]+seconds),
+        emit=emitted.append)
+    assert calls == [0.0, 60.0]
+    assert result == {"ticks": 2, "failedTicks": 1}
+    assert emitted[0]["reason"] == "archive_refresh_unavailable"
+
+
+def test_slow_loop_skips_missed_ticks_without_replaying_backdated_jobs():
+    from edgelab.experimental_forecast_job import run_forecast_loop
+    clock = [0.0]
+    calls = []
+    def job(**kwargs):
+        calls.append(clock[0])
+        clock[0] += 75
+        return {"status": "forecast_stored"}
+    run_forecast_loop(duration_minutes=2, job=job, monotonic=lambda: clock[0],
+                      sleep=lambda _: pytest.fail("must not sleep after a slow tick"), emit=lambda _: None)
+    assert calls == [0.0, 75.0]
+
+
+def test_job_submits_all_races_independently_after_one_rejection(monkeypatch, tmp_path):
+    import edgelab.experimental_forecast_job as module
+    model_id = "boat-trifecta-exp-noweather-test"
+    digest = "a" * 64
+    forecasts = [{"raceId": f"race-{i}", "predictedAt": "2026-10-13T04:00:00Z",
+                  "predictions": [{"selection": "1-2-3"}] * 120} for i in range(6)]
+    envelope = {"modelId": model_id, "artifactSha256": digest,
+                "trainingMode": "experimental", "experimentalOnly": True, "races": forecasts}
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "ml/data/learning/trifecta-experimental-forecast.json"
+    output.parent.mkdir(parents=True)
+    output.write_text(json.dumps(envelope))
+    monkeypatch.setattr(module, "validate_forecast_only_artifact", lambda *a, **k: None)
+    monkeypatch.setattr(module, "load_rows", lambda *_: {"races": [{"id": f"race-{i}",
+        "sport": "boat", "status": "scheduled", "data_origin": "real",
+        "betting_cutoff_at": "2026-10-13T04:05:00Z"} for i in range(6)]})
+    calls = []
+    def submit(envelope, **kwargs):
+        assert len(envelope["races"]) == 1
+        race_id = envelope["races"][0]["raceId"]
+        calls.append(race_id)
+        return {"status": "submission_failed"} if race_id == "race-0" else {
+            "status": "forecast_stored", "storedRaceCount": 1, "raceIds": [race_id]}
+    from types import SimpleNamespace
+    result = module.run_forecast_job(base_url="https://api.example", token="test-only",
+        opener=lambda *a, **k: _Response({"model": {"modelId": model_id, "artifactSha256": digest}}),
+        refresh=lambda *a, **k: {"status": "refreshed"},
+        predictor=lambda *a, **k: SimpleNamespace(returncode=0), submitter=submit)
+    assert calls == [f"race-{i}" for i in range(6)]
+    assert result["status"] == "partially_stored"
+    assert result["storedRaceCount"] == 5

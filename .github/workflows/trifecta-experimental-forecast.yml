@@ -10,7 +10,7 @@ concurrency:
 jobs:
   forecast:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 320
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,4 +40,4 @@ jobs:
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
           EXPERIMENTAL_ARTIFACT_DIR: ml/artifacts
           EXPERIMENTAL_STORE_PATH: ml/data/rows.json
-        run: python -m edgelab.experimental_forecast_job
+        run: python -u -m edgelab.experimental_forecast_job --duration-minutes 300

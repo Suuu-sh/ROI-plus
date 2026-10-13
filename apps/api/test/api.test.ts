@@ -1145,7 +1145,7 @@ describe('collection status quality compatibility',()=>{
   await cron(DB,false);
   expect(sqlite.prepare("SELECT COUNT(*) n FROM collection_runs WHERE id LIKE 'batch-%'").get()).toMatchObject({n:2});
  });
- it('evaluates registered experimental T-60 decisions once on :00, :01, and hourly :05 ticks',async()=>{
+ it('evaluates all overlapping experimental T-60 races once including :00, :01 and :05 ticks',async()=>{
   const raceDate=jstDate(new Date()),base=Date.parse(`${raceDate}T10:00:00+09:00`),modelId='boat-trifecta-schedule-fixture',artifactSha='a'.repeat(64),manifestSha='b'.repeat(64),metadataSha='c'.repeat(64);
   const metadata={id:modelId,status:'candidate',trainingMode:'experimental',experimentalOnly:true,sport:'boat',betType:'trifecta',boatFeatureSchemaVersion:'boat-prerace-v2-no-weather-experimental-v1',ticketBetType:'trifecta',ticketArtifactSha256:artifactSha};
   const manifest={schema:'edgelab-experimental-trifecta-artifact-v1',modelId,trainingMode:'experimental',experimentalOnly:true,
@@ -1154,7 +1154,7 @@ describe('collection status quality compatibility',()=>{
    VALUES(?,'candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
    .run(modelId,artifactSha,manifestSha,metadataSha,jstIso(base-300_000),JSON.stringify(manifest),JSON.stringify(metadata),jstIso(base-300_000));
   sqlite.prepare("INSERT OR IGNORE INTO venues(id,sport,name) VALUES('99','boat','Experimental schedule fixture')").run();
-  const ticks=[base,base+60_000,base+5*60_000];
+  const ticks=[base,base,base,base,base,base+60_000,base+5*60_000];
   ticks.forEach((tick,i)=>{
    const raceId=`boat-${raceDate.replaceAll('-','')}-99-${String(i+1).padStart(2,'0')}`;
    sqlite.prepare(`INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,status,data_origin,updated_at,betting_cutoff_at,betting_cutoff_source,betting_cutoff_observed_at)
@@ -1170,7 +1170,7 @@ describe('collection status quality compatibility',()=>{
    await worker.scheduled({cron:'* * * * *',scheduledTime:tick} as ScheduledController,
     env({ENABLE_BOATRACE_RESULTS_SCRAPE:tick===ticks[2]?'true':'false'}));
   }
-  expect(modelLookups).toBe(3); // exactly once per tick, including :00 maintenance and :05 early return
+  expect(modelLookups).toBe(ticks.length); // repeated ticks must not starve undecided races
   expect(sqlite.prepare('SELECT race_id,outcome,reason FROM experimental_paper_decisions ORDER BY race_id').all()).toEqual(ticks.map((_,i)=>({
    race_id:`boat-${raceDate.replaceAll('-','')}-99-${String(i+1).padStart(2,'0')}`,outcome:'abstained',reason:'experimental_forecast_missing_or_invalid'})));
  });

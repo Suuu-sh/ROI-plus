@@ -9,10 +9,9 @@ on:
     - cron: '0 2 * * *'  # 11:00 JST
     - cron: '0 4 * * *'  # 13:00 JST
     - cron: '30 14 * * *' # 23:30 JST
-    # This established scheduled workflow also dispatches the isolated
-    # forecast workflow at GitHub's supported minimum five-minute cadence
-    # during the Japanese boat-racing day (10:00-23:59 JST).
-    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *'
+    # Start a five-hour warm forecast loop through the established schedule.
+    # GitHub schedule/runner delay remains best effort; ticks use actual time.
+    - cron: '40 0,5,10 * * *'
   workflow_dispatch:
     inputs:
       validated_model_run_id:
@@ -28,15 +27,15 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: ${{ github.event_name == 'schedule' && github.event.schedule == '3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *' && 'boat-experimental-forecast-trigger' || 'boat-learning-state' }}
+  group: ${{ github.event_name == 'schedule' && github.event.schedule == '40 0,5,10 * * *' && 'boat-experimental-forecast-trigger' || 'boat-learning-state' }}
   cancel-in-progress: false
 jobs:
   forecast:
-    if: github.event_name == 'schedule' && github.event.schedule == '3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *'
+    if: github.event_name == 'schedule' && github.event.schedule == '40 0,5,10 * * *'
     uses: ./.github/workflows/trifecta-experimental-forecast.yml
     secrets: inherit
   daily:
-    if: github.event_name != 'schedule' || github.event.schedule != '3,8,13,18,23,28,33,38,43,48,53,58 1-14 * * *'
+    if: github.event_name != 'schedule' || github.event.schedule != '40 0,5,10 * * *'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
