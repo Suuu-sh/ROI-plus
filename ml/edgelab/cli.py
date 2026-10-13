@@ -391,8 +391,13 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
 def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
                        feature_schema: str = "boat-base-v1",
                        require_source_arrival: bool = False) -> list[dict[str, Any]]:
+    result_source_races = None
+    if feature_schema == "boat-prerace-v2-no-weather-experimental-v1":
+        from edgelab.importers.experimental_result_labels import verified_experimental_result_race_ids
+        result_source_races = verified_experimental_result_race_ids(store)
     outcomes = {(row.get("race_id"), row.get("number")): row.get("finish_order")
-                for row in store.get("results", []) if row.get("data_origin") == "real"}
+                for row in store.get("results", []) if row.get("data_origin") == "real"
+                and (result_source_races is None or str(row.get("race_id")) in result_source_races)}
     races = {row.get("id"): row for row in store.get("races", [])
              if row.get("sport") == sport and row.get("data_origin") == "real"}
     entries = [row for row in store.get("entries", [])

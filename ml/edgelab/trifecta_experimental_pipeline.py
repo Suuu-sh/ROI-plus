@@ -16,14 +16,18 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from edgelab.importers.boatrace_capture_archive import import_capture_archives
+from edgelab.importers.experimental_result_labels import import_experimental_result_labels
 from edgelab.storage import DEFAULT_STORE, load_rows, save_rows
-from edgelab.sync import fetch_prerace_capture_archives
+from edgelab.sync import (collect_experimental_training_results,
+                          fetch_experimental_training_result_labels,
+                          fetch_prerace_capture_archives)
 
 _SAFE_EXCEPTION_CLASSES = {"ValueError", "TypeError", "KeyError", "AttributeError", "IndexError", "NameError",
                            "OverflowError", "OSError", "RuntimeError", "ImportError", "AssertionError"}
 _SAFE_STAGES = {"input_validation", "credentials", "load_local_cache", "archive_export",
                 "archive_import", "save_local_cache", "training_row_build", "coverage_audit",
-                "model_fit", "report_write"}
+                "model_fit", "report_write", "official_result_collection", "result_label_export",
+                "result_label_import"}
 
 
 class PipelineStageFailure(Exception):
@@ -140,6 +144,33 @@ def run(*, since: str, until: str, store_path: str = str(DEFAULT_STORE),
         report["sameDayKCollection"] = k_refresh
         if k_refresh.get("status") == "fetched_and_validated":
             _stage_call("save_local_cache", save_rows, rows, store_path)
+
+        # Ask the result worker for a small, label-only pass, then import only
+        # rows whose official source hash/time and race identity validate. This
+        # never changes or retimestamps pre-race features. The worker itself
+        # limits targets to races with verified archived T-60 evidence.
+        try:
+            collection = _stage_call("official_result_collection", collect_experimental_training_results)
+            pages = _stage_call("result_label_export", fetch_experimental_training_result_labels,
+                                end.isoformat())
+            label_import = _stage_call("result_label_import", import_experimental_result_labels,
+                                       rows, pages, end.isoformat())
+            report["sameDayOfficialResultLabels"] = {
+                **collection,
+                "status": "imported" if label_import["importedLabels"] else "no_verified_labels",
+                "importedLabels": label_import["importedLabels"],
+                "excludedLabels": label_import["excludedLabels"],
+                "exclusions": label_import["exclusions"],
+                "featureRowsModified": 0,
+            }
+            if label_import["importedLabels"]:
+                _stage_call("save_local_cache", save_rows, rows, store_path)
+        except PipelineStageFailure as exc:
+            report["sameDayOfficialResultLabels"] = {
+                "status": "unavailable", "failureStage": exc.stage,
+                "exceptionClass": exc.exception_class,
+                "featureRowsModified": 0,
+            }
 
     from edgelab.cli import _make_training_rows
     from edgelab.features.boat import TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA

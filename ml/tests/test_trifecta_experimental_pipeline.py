@@ -15,7 +15,13 @@ from edgelab.features.boat import (TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLU
 
 @patch.dict(os.environ, {"EDGELAB_API_URL": "https://example.test", "INGEST_TOKEN": "test-only"})
 @patch("edgelab.trifecta_experimental_pipeline.fetch_prerace_capture_archives")
-def test_experimental_pipeline_reports_missing_actual_k_without_fabricating_a_model(fetch):
+@patch("edgelab.trifecta_experimental_pipeline.collect_experimental_training_results",
+       return_value={"status": "triggered", "collectorStatus": "success", "targets": 0,
+                     "verified": 0, "attempted": 0})
+@patch("edgelab.trifecta_experimental_pipeline.fetch_experimental_training_result_labels",
+       return_value=[{"schema": "boat-official-k-result-label-export-v1", "date": "2026-10-13",
+                      "limit": 5, "labels": [], "nextCursor": None}])
+def test_experimental_pipeline_reports_missing_actual_k_without_fabricating_a_model(labels, collect, fetch):
     fetch.return_value = [{"schema": "boat-prerace-capture-export-v1", "date": "2026-10-13",
                            "limit": 25, "archives": [], "nextCursor": None}]
     with TemporaryDirectory() as directory:
@@ -105,6 +111,7 @@ def test_training_row_builder_supports_weatherless_experimental_schema_with_real
     race_id = "boat-20261013-01-01"
     store = {
         "races": [{"id": race_id, "sport": "boat", "data_origin": "real", "race_date": "2026-10-13",
+                   "venue_id": "01", "race_no": 1,
                    "status": "finished", "post_time": "2026-10-13T11:20:00+09:00",
                    "betting_cutoff_at": "2026-10-13T11:00:00+09:00",
                    "betting_cutoff_source": "boatrace-racelist-cutoff-v1",
@@ -115,8 +122,18 @@ def test_training_row_builder_supports_weatherless_experimental_schema_with_real
                      "source_sha256": "a" * 64, "data_origin": "real",
                      "features_json": json.dumps({"racer_id": f"{10000 + lane}"})}
                     for lane in range(1, 7)],
-        "results": [{"race_id": race_id, "number": lane, "finish_order": lane, "data_origin": "real"}
+        "results": [{"race_id": race_id, "number": lane, "finish_order": lane, "data_origin": "real",
+                     "available_at": "2026-10-13T11:25:00+09:00",
+                     "source_available_at": "2026-10-13T11:25:00+09:00",
+                     "source_sha256": "b" * 64,
+                     "source_url": f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=01&hd=20261013",
+                     "source_quality": "verified-official-outcome-v2"}
                     for lane in range(1, 7)],
+        "payouts": [{"race_id": race_id, "bet_type": "trifecta", "selection": "1-2-3",
+                     "payout": 1000, "data_origin": "real", "source_available_at": "2026-10-13T11:25:00+09:00",
+                     "source_sha256": "b" * 64,
+                     "source_url": f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=01&hd=20261013",
+                     "source_quality": "verified-official-outcome-v2"}],
         "prerace_observations": [],
     }
     features = [{"lane": lane, "exhibition_time": 6.0 + lane, "lane_wind_x": 99.0,
@@ -128,3 +145,51 @@ def test_training_row_builder_supports_weatherless_experimental_schema_with_real
     assert all(row["lane"] == row["number"] for row in rows)
     assert "lane_wind_x" not in rows[0] and "lane_wave_height" not in rows[0]
     assert "lane_wind_x" not in TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS
+
+
+def test_import_official_result_label_changes_only_targets_and_proves_source():
+    from datetime import datetime, timezone
+    from edgelab.importers.experimental_result_labels import (
+        import_experimental_result_labels, verified_experimental_result_race_ids)
+    race_id = "boat-20261013-01-01"
+    result_url = "https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=01&hd=20261013"
+    store = {"races": [{"id": race_id, "sport": "boat", "data_origin": "real",
+                        "race_date": "2026-10-13", "venue_id": "01", "race_no": 1,
+                        "post_time": "2026-10-13T11:20:00+09:00"}],
+             "entries": [{"race_id": race_id, "number": 1, "features_json": "unchanged"}],
+             "results": [], "payouts": [], "prerace_observations": [], "odds": []}
+    page = {"schema": "boat-official-k-result-label-export-v1", "date": "2026-10-13", "limit": 5,
+            "labels": [{"raceId": race_id, "raceDate": "2026-10-13", "venueId": "01", "raceNo": 1,
+                        "results": [{"number": lane, "finishOrder": lane} for lane in range(1, 7)],
+                        "payouts": [{"betType": "trifecta", "selection": "1-2-3", "payout": 1000}],
+                        "source": {"url": result_url, "sha256": "c" * 64,
+                                   "fetchedAt": "2026-10-13T11:25:00+09:00",
+                                   "quality": "verified-official-outcome-v2"}}], "nextCursor": None}
+    before_features = [dict(row) for row in store["entries"]]
+    out = import_experimental_result_labels(store, [page], "2026-10-13",
+        now=datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc))
+    assert out["importedLabels"] == 1 and out["featureRowsModified"] == 0
+    assert store["entries"] == before_features
+    assert verified_experimental_result_race_ids(store,
+        now=datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc)) == {race_id}
+
+
+def test_import_official_result_label_rejects_future_or_wrong_payout_proof():
+    from datetime import datetime, timezone
+    from edgelab.importers.experimental_result_labels import import_experimental_result_labels
+    race_id = "boat-20261013-01-01"
+    label = {"raceId": race_id, "raceDate": "2026-10-13", "venueId": "01", "raceNo": 1,
+             "results": [{"number": lane, "finishOrder": lane} for lane in range(1, 7)],
+             "payouts": [{"betType": "trifecta", "selection": "1-2-3", "payout": 1000}],
+             "source": {"url": "https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=01&hd=20261013",
+                        "sha256": "d" * 64, "fetchedAt": "2026-10-13T12:25:00+09:00",
+                        "quality": "verified-official-outcome-v2"}}
+    store = {"races": [{"id": race_id, "sport": "boat", "data_origin": "real",
+                        "race_date": "2026-10-13", "venue_id": "01", "race_no": 1,
+                        "post_time": "2026-10-13T11:20:00+09:00"}], "entries": [], "results": [], "payouts": []}
+    page = {"schema": "boat-official-k-result-label-export-v1", "date": "2026-10-13", "limit": 5,
+            "labels": [label], "nextCursor": None}
+    out = import_experimental_result_labels(store, [page], "2026-10-13",
+        now=datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc))
+    assert out["importedLabels"] == 0
+    assert out["exclusions"] == {"result_source_time_invalid": 1}

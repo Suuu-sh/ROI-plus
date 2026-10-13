@@ -49,6 +49,8 @@ _SAFE_INGEST_ERROR_CODES = {
 }
 _MAX_CAPTURE_EXPORT_PAGE_BYTES = 2 * 1024 * 1024
 _MAX_CAPTURE_EXPORT_PAGES = 250
+_MAX_EXPERIMENTAL_LABEL_PAGE_BYTES = 512 * 1024
+_MAX_EXPERIMENTAL_LABEL_PAGES = 10
 
 
 def _safe_ingest_error_code(exc: HTTPError) -> str | None:
@@ -219,6 +221,78 @@ def fetch_prerace_capture_archives(target_date: str, *, base_url: str | None = N
         seen_cursors.add(next_cursor)
         cursor = next_cursor
     raise RuntimeError("archive export exceeded the page safety limit")
+
+
+def collect_experimental_training_results(*, base_url: str | None = None,
+                                          token: str | None = None) -> dict[str, Any]:
+    """Request a bounded, official-source-validated label-only collection pass."""
+    base_url = (base_url or os.environ.get("EDGELAB_API_URL", "")).rstrip("/")
+    token = token or os.environ.get("INGEST_TOKEN", "")
+    if not base_url or not token:
+        raise RuntimeError("experimental result collection credentials unavailable")
+    request = Request(base_url + "/api/admin/collect-boat-results",
+        data=json.dumps({"confirmed": True, "labelOnly": True}).encode("utf-8"), method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 "Accept": "application/json", "User-Agent": "EdgeLab-ML/0.1"})
+    try:
+        with urlopen(request, timeout=45) as response:
+            body = response.read(16_384)
+        payload = json.loads(body.decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, ValueError, UnicodeDecodeError, OSError) as exc:
+        raise RuntimeError("experimental result collection unavailable") from None
+    if not isinstance(payload, dict) or payload.get("status") not in {"success", "partial", "failed"}:
+        raise RuntimeError("experimental result collection response invalid")
+    return {"status": "triggered", "collectorStatus": payload["status"],
+            "targets": payload.get("targets", 0) if isinstance(payload.get("targets", 0), int) else 0,
+            "verified": payload.get("verified", 0) if isinstance(payload.get("verified", 0), int) else 0,
+            "attempted": payload.get("attempted", 0) if isinstance(payload.get("attempted", 0), int) else 0}
+
+
+def fetch_experimental_training_result_labels(target_date: str, *, base_url: str | None = None,
+                                              token: str | None = None, opener=None
+                                              ) -> list[dict[str, Any]]:
+    """Fetch bounded authenticated pages of official result labels only."""
+    try:
+        if date.fromisoformat(target_date).isoformat() != target_date:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise ValueError("experimental label date must be YYYY-MM-DD") from exc
+    base_url = (base_url or os.environ.get("EDGELAB_API_URL", "")).rstrip("/")
+    token = token or os.environ.get("INGEST_TOKEN", "")
+    if not base_url or not token:
+        raise RuntimeError("experimental label export credentials unavailable")
+    open_request = opener or urlopen
+    pages, labels, seen_cursors = [], [], set()
+    cursor = None
+    for _ in range(_MAX_EXPERIMENTAL_LABEL_PAGES):
+        params = {"date": target_date, "limit": "5"}
+        if cursor:
+            params["cursor"] = cursor
+        request = Request(f"{base_url}/api/ingest/experimental-trifecta/training-results?{urlencode(params)}",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                     "User-Agent": "EdgeLab-ML/0.1"}, method="GET")
+        try:
+            with open_request(request, timeout=30) as response:
+                body = response.read(_MAX_EXPERIMENTAL_LABEL_PAGE_BYTES + 1)
+            if not body or len(body) > _MAX_EXPERIMENTAL_LABEL_PAGE_BYTES:
+                raise RuntimeError("experimental label page size invalid")
+            payload = json.loads(body.decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, ValueError, UnicodeDecodeError, OSError) as exc:
+            raise RuntimeError("experimental label export unavailable") from None
+        if (not isinstance(payload, dict) or payload.get("schema") != "boat-official-k-result-label-export-v1"
+                or payload.get("date") != target_date or payload.get("limit") != 5
+                or not isinstance(payload.get("labels"), list) or len(payload["labels"]) > 5):
+            raise RuntimeError("experimental label page envelope invalid")
+        pages.append(payload)
+        labels.extend(payload["labels"])
+        next_cursor = payload.get("nextCursor")
+        if next_cursor is None:
+            return pages
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+            raise RuntimeError("experimental label cursor invalid or repeated")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    raise RuntimeError("experimental label export exceeded the page safety limit")
 
 
 def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False,

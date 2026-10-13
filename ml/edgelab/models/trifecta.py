@@ -777,10 +777,15 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
     complete = [group for group in _group_races(safe_rows) if _complete_race(group)]
     complete_rows = [row for group in complete for row in group]
     coverage = audit_trifecta_coverage(store, complete_rows, include_races=True)
+    # Outcome labels must carry their own verified official-result fetch proof.
+    # A historic K row alone is not evidence that this label was source-verified.
+    from edgelab.importers.experimental_result_labels import verified_experimental_result_race_ids
+    verified_result_ids = verified_experimental_result_race_ids(store)
     evidence_by_id = {str(race["raceId"]): race for race in coverage.get("races", [])
                       if isinstance(race, Mapping) and race.get("raceId")}
     eligible_ids = {race_id for race_id, evidence in evidence_by_id.items()
-                    if evidence.get("completeResult") is True
+                    if race_id in verified_result_ids
+                    and evidence.get("completeResult") is True
                     and evidence.get("verifiedT60Cutoff") is True
                     and evidence.get("sixEntryAvailability") is True
                     and evidence.get("sourceArrivalVerified") is True
@@ -822,6 +827,7 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
         "sourceArrivalVerifiedRaceCount": len(groups), "verifiedT60CutoffRaceCount": len(groups),
         "sixFreshExhibitionRaceCount": len(groups), "complete120T60OddsRaceCount": len(groups),
         "consistentPayoutRaceCount": len(groups), "weatherMissingRaceCount": missing_weather,
+        "officialOutcomeSourceVerifiedRaceCount": len(groups),
         "raceIdSetSha256": training_digest,
         "requirements": {"realCompletedSixBoatKOrder": True,
             "officialRacelistCutoffObservedByT60": True,
@@ -829,6 +835,7 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
             "sixFreshExhibitionLanesByT60": True,
             "coherentOfficial120TicketOddsByT60": True,
             "exactMatchingPositiveTrifectaPayout": True,
+            "officialOutcomeSourceHashAndFetchTimeVerified": True,
             "weatherFeaturesUsed": False},
     }
     provenance = {
