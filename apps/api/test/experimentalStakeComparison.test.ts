@@ -23,6 +23,8 @@ describe('buildExperimentalStakeComparison', () => {
       .toMatchObject({ excludedRaceCount: 1, settledRaceCount: 0 })
     expect(buildExperimentalStakeComparison([ticket({ status: 'won', payout: 100, reconciled: true })]))
       .toMatchObject({ excludedRaceCount: 1, settledRaceCount: 0 })
+    expect(buildExperimentalStakeComparison([ticket({ status: 'open', payout: null, reconciled: true })]))
+      .toMatchObject({ excludedRaceCount: 1, pendingRaceCount: 0, settledRaceCount: 0 })
   })
 
   it('excludes invalid stake units and non-integral, missing, or zero winning payouts', () => {

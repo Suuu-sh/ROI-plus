@@ -36,12 +36,12 @@ export function buildExperimentalStakeComparison(rows: ExperimentalStakeComparis
   }
 
   for (const tickets of races.values()) {
-    if (tickets.some(ticket => ticket.status === 'open')) {
-      result.pendingRaceCount++
-      continue
-    }
     if (!tickets.length || tickets.some(ticket => ticket.reconciled || !['won', 'lost'].includes(ticket.status))) {
-      result.excludedRaceCount++
+      if (tickets.some(ticket => ticket.reconciled || ticket.status === 'void' || !['open', 'won', 'lost'].includes(ticket.status))) {
+        result.excludedRaceCount++
+      } else {
+        result.pendingRaceCount++
+      }
       continue
     }
     const actualStake = tickets.reduce((sum, ticket) => sum + ticket.stake, 0)
