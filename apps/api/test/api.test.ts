@@ -931,11 +931,12 @@ describe('EdgeLab API',()=>{
   expect((await app.request('/api/health',{},e)).status).toBe(200);
   expect((await app.request('/api/ingest/venues',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:'[]'},e)).status).toBe(200);
  });
- it('caches only successful authenticated GET reads with query-separated keys and falls back on cache errors',async()=>{
-  const values=new Map<string,Response>(); let puts=0,prepareCount=0,failMatch=false,failPut=false;
+ it('caches successful authenticated reads with query-separated keys and fresh bypass',async()=>{
+  const values=new Map<string,Response>(); let puts=0,deletes=0,prepareCount=0,failMatch=false,failPut=false;
   const fakeCache={
    match:async(request:Request)=>{if(failMatch)throw new Error('cache unavailable');const response=values.get(request.url);return response?.clone();},
    put:async(request:Request,response:Response)=>{puts++;if(failPut)throw new Error('cache write failed');values.set(request.url,response.clone());},
+   delete:async(request:Request)=>{deletes++;return values.delete(request.url);},
   };
   vi.stubGlobal('caches',{default:fakeCache});
   const countingDb={prepare:(sql:string)=>{prepareCount++;return DB.prepare(sql);}};
@@ -943,14 +944,15 @@ describe('EdgeLab API',()=>{
   const unauthorized=await app.request('/api/models',{},e);
   expect(unauthorized.status).toBe(403); expect(puts).toBe(0);
   const headers={'X-ROI-Proxy':'proxy'};
-  expect((await app.request('/api/models?view=a',{headers},e)).status).toBe(200);
-  expect((await app.request('/api/models?view=a',{headers},e)).headers.get('Cache-Control')).toBe('private, no-store');
+  const miss=await app.request('/api/models?view=a',{headers},e);
+  expect(miss.status).toBe(200); expect(miss.headers.get('X-ROI-Read-Cache')).toBe('MISS');
+  expect(miss.headers.get('Cache-Control')).toBe('private, no-store');
   expect([...values.values()][0].headers.get('Cache-Control')).toBe('public, max-age=10');
   const cacheKeyUrl=new URL([...values.keys()][0]);
   expect(cacheKeyUrl.hostname).toBe('localhost'); expect(cacheKeyUrl.pathname).toBe('/__roi_read_cache_v1/api/models');
   const afterFirst=prepareCount;
   const hit=await app.request('/api/models?view=a',{headers},e);
-  expect(hit.status).toBe(200); expect(hit.headers.get('Cache-Control')).toBe('private, no-store');
+  expect(hit.status).toBe(200); expect(hit.headers.get('Cache-Control')).toBe('private, no-store'); expect(hit.headers.get('X-ROI-Read-Cache')).toBe('HIT');
   expect(prepareCount).toBe(afterFirst);
   expect((await app.request('/api/models?view=a',{},e)).status).toBe(403); // warm cache never bypasses auth
   expect((await app.request('/api/models?view=b',{headers},e)).status).toBe(200);
@@ -958,8 +960,34 @@ describe('EdgeLab API',()=>{
   const beforeErrorPuts=puts;
   expect((await app.request('/api/races?origin=real',{headers},e)).status).toBe(400);
   expect(puts).toBe(beforeErrorPuts);
+
+  const betsUrl='/api/bets?origin=real&sport=boat';
+  const betsMiss=await app.request(betsUrl,{headers},e);
+  expect(betsMiss.status).toBe(200); expect(betsMiss.headers.get('X-ROI-Read-Cache')).toBe('MISS');
+  const betsKey=[...values.keys()].find(key=>new URL(key).pathname==='/__roi_read_cache_v1/api/bets')!;
+  expect(values.get(betsKey)?.headers.get('Cache-Control')).toBe('public, max-age=5');
+  const beforeBetsHit=prepareCount;
+  const betsHit=await app.request(betsUrl,{headers},e);
+  expect(betsHit.headers.get('X-ROI-Read-Cache')).toBe('HIT'); expect(prepareCount).toBe(beforeBetsHit);
+  expect((await app.request('/api/bets?origin=real&sport=horse',{headers},e)).headers.get('X-ROI-Read-Cache')).toBe('MISS');
+  expect((await app.request('/api/bets?origin=real&sport=boat',{},e)).status).toBe(403);
+
+  const overviewUrl='/api/performance/overview?origin=real&sport=boat';
+  const overviewMiss=await app.request(overviewUrl,{headers},e);
+  expect(overviewMiss.status).toBe(200); expect(overviewMiss.headers.get('X-ROI-Read-Cache')).toBe('MISS');
+  const overviewKey=[...values.keys()].find(key=>new URL(key).pathname==='/__roi_read_cache_v1/api/performance/overview')!;
+  expect(values.get(overviewKey)?.headers.get('Cache-Control')).toBe('public, max-age=10');
+  const beforeOverviewHit=prepareCount;
+  expect((await app.request(overviewUrl,{headers},e)).headers.get('X-ROI-Read-Cache')).toBe('HIT');
+  expect(prepareCount).toBe(beforeOverviewHit);
+  const beforeBypass=prepareCount;
+  const bypass=await app.request(overviewUrl,{headers:{...headers,'X-ROI-Cache-Bypass':'1'}},e);
+  expect(bypass.status).toBe(200); expect(bypass.headers.get('X-ROI-Read-Cache')).toBe('BYPASS');
+  expect(bypass.headers.get('Cache-Control')).toBe('private, no-store');
+  expect(prepareCount).toBeGreaterThan(beforeBypass); expect(deletes).toBeGreaterThan(0);
+
   const beforeExcluded=puts;
-  expect((await app.request('/api/bets',{headers},e)).status).toBe(200);
+  expect((await app.request('/api/performance/breakdown?origin=real',{headers},e)).status).toBe(200);
   expect(puts).toBe(beforeExcluded);
   const beforeFallback=prepareCount; failMatch=true;
   expect((await app.request('/api/models?view=c',{headers},e)).status).toBe(200);

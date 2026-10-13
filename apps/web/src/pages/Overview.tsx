@@ -42,7 +42,7 @@ function groupPurchasedRaces(bets: Bet[]): PurchasedRace[] {
 
 export function OverviewPage() {
   const { origin } = useOrigin()
-  const all = useAsync(() => Promise.all([api.overview(origin), api.bets(origin)]), [origin])
+  const all = useAsync(() => Promise.all([api.overview(origin), api.bets(origin)]), [origin], () => Promise.all([api.overview(origin, undefined, true), api.bets(origin, undefined, true)]))
   const purchasedRaces = useMemo(() => all.data ? groupPurchasedRaces(all.data[1]) : [], [all.data])
 
   if (all.error) return <div className="card"><ErrorState error={all.error} onRetry={all.reload} /></div>
@@ -52,7 +52,7 @@ export function OverviewPage() {
 
   return <div className="space-y-5">
     <div>
-      <h1 className="text-xl font-semibold tracking-tight">運用ボード</h1>
+      <div className="flex flex-wrap items-center justify-between gap-2"><h1 className="text-xl font-semibold tracking-tight">運用ボード</h1><button className="btn-ghost h-8 text-xs" onClick={all.reload} disabled={all.loading}>更新</button></div>
       <p className="mt-1 text-sm text-muted">仮想購入の実績と、購入記録があるレースだけを表示します。</p>
     </div>
 

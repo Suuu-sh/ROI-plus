@@ -53,7 +53,7 @@ async function hasVerifiedCapsizeNoRefund(db: Db, race: {id:string;race_date:str
     && Array.isArray(evidence?.terminalEntries) && evidence.terminalEntries.some((x:any)=>x?.number===number&&x?.finishCode==='転覆');
 }
 const app = new Hono<Ctx>().basePath('/api');
-app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization'] }));
+app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization','X-ROI-Cache-Bypass'], exposeHeaders: ['X-ROI-Read-Cache'] }));
 // 本番では閲覧系 API を、Cloudflare Access で保護された画面 Worker（Service Binding）経由に限定する。
 // PROXY_TOKEN 未設定（ローカル開発・テスト）では制限しない。ingest は従来どおり INGEST_TOKEN で認証。
 app.use('*', async (c, next) => {
@@ -64,18 +64,30 @@ app.use('*', async (c, next) => {
   return next();
 });
 // Cache only authenticated, read-only dashboard data. Keep URLs (including the
-// complete query string) as keys; mutable ledgers and purchase-sensitive views
-// intentionally bypass this cache. Cache API failures must never fail a read.
-const READ_CACHE_TTL_SECONDS = 10;
-function cacheableReadPath(path: string): boolean {
-  return path === '/api/races' || path === '/api/rankings' || path === '/api/models'
-    || path === '/api/collection/status' || /^\/api\/races\/[^/]+$/.test(path);
+// complete query string) as keys; purchase-sensitive writes and admin/ingest
+// routes intentionally bypass this cache. Cache API failures must never fail a read.
+function readCacheTtl(path: string): number | null {
+  if (path === '/api/bets') return 5;
+  if (path === '/api/performance/overview') return 10;
+  if (path === '/api/races' || path === '/api/rankings' || path === '/api/models'
+    || path === '/api/collection/status' || /^\/api\/races\/[^/]+$/.test(path)) return 10;
+  return null;
 }
 app.use('*', async (c, next) => {
-  if (c.req.method !== 'GET' || !c.env.PROXY_TOKEN || !cacheableReadPath(new URL(c.req.url).pathname)) return next();
+  const ttl = readCacheTtl(new URL(c.req.url).pathname);
+  if (c.req.method !== 'GET' || !c.env.PROXY_TOKEN || ttl === null) return next();
   const keyUrl = new URL(c.req.url);
   keyUrl.pathname = `/__roi_read_cache_v1${keyUrl.pathname}`;
   const key = new Request(keyUrl.toString(), { method: 'GET' });
+  if (c.req.header('X-ROI-Cache-Bypass') === '1') {
+    try { await (globalThis.caches as CacheStorage & { default?: Cache } | undefined)?.default?.delete(key); } catch { /* Best-effort local invalidation. */ }
+    await next();
+    const headers = new Headers(c.res.headers);
+    headers.set('Cache-Control', 'private, no-store');
+    headers.set('X-ROI-Read-Cache', 'BYPASS');
+    c.res = new Response(c.res.body, { status: c.res.status, statusText: c.res.statusText, headers });
+    return;
+  }
   let cache: Cache | undefined;
   let cached: Response | undefined;
   try {
@@ -85,6 +97,7 @@ app.use('*', async (c, next) => {
   if (cached) {
     const headers = new Headers(cached.headers);
     headers.set('Cache-Control', 'private, no-store');
+    headers.set('X-ROI-Read-Cache', 'HIT');
     return new Response(cached.body, { status: cached.status, statusText: cached.statusText, headers });
   }
 
@@ -93,10 +106,12 @@ app.use('*', async (c, next) => {
   await next();
   const responseHeaders = new Headers(c.res.headers);
   responseHeaders.set('Cache-Control', 'private, no-store');
+  responseHeaders.set('X-ROI-Read-Cache', 'MISS');
   c.res = new Response(c.res.body, { status: c.res.status, statusText: c.res.statusText, headers: responseHeaders });
   if (c.res.status !== 200 || !c.res.headers.get('content-type')?.includes('application/json')) return;
   const storeHeaders = new Headers(c.res.headers);
-  storeHeaders.set('Cache-Control', `public, max-age=${READ_CACHE_TTL_SECONDS}`);
+  storeHeaders.set('Cache-Control', `public, max-age=${ttl}`);
+  storeHeaders.delete('X-ROI-Read-Cache');
   try {
     await cache?.put(key, new Response(c.res.clone().body, { status: c.res.status, statusText: c.res.statusText, headers: storeHeaders }));
   } catch { /* Ignore cache write errors; return the fresh D1 response. */ }
