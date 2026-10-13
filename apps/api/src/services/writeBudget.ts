@@ -124,41 +124,48 @@ export async function reserveWriteBudget(db: Db, date: string, units: number, ca
 /** Reserve multiple priority classes in one CAS so a denied mixed batch does not charge either bucket. */
 export async function reserveWriteBudgets(db: Db, date: string, reservations: Array<{ units: number; category: WriteCategory }>): Promise<boolean> {
   if (!validDate(date) || !reservations.length || reservations.some(({units}) => !Number.isSafeInteger(units) || units <= 0 || units > DAILY_D1_WRITE_BUDGET)) return false;
-  const row = await db.prepare(`SELECT value FROM settings WHERE key=?`).bind(D1_WRITE_BUDGET_KEY).first<{ value: string }>();
-  if (!row) return false;
-  const prior = parse(row.value);
-  if (!prior || prior.date > date) return false;
-  const sameDay = prior.date === date;
-  const reserved = sameDay ? prior.reserved : 0;
-  const essentialReserved = sameDay ? prior.essentialReserved : 0;
-  const optionalReserved = sameDay ? prior.optionalReserved : 0;
-  const oddsReserved = sameDay ? prior.oddsReserved : 0;
-  const collectionReserved = sameDay ? prior.collectionReserved : 0;
-  const allowance = sameDay ? prior.allowance : undefined;
-  const limits = allowance ?? DEFAULT_LIMITS;
-  const requestedCollection = reservations.filter(x => x.category === 'collection').reduce((sum,x) => sum+x.units,0);
-  const requestedEssential = reservations.filter(x => x.category === 'essential').reduce((sum,x) => sum+x.units,0);
-  const requestedOptional = reservations.filter(x => x.category !== 'essential' && x.category !== 'collection').reduce((sum,x) => sum+x.units,0);
-  const requestedOdds = reservations.filter(x => x.category === 'odds').reduce((sum,x) => sum+x.units,0);
-  const requested = requestedEssential + requestedCollection + requestedOptional;
-  const nextCollectionReserved = collectionReserved + requestedCollection;
-  // Legacy ledgers may already have spent into the would-be reserve. Never
-  // invalidate their remaining headroom; protect only capacity still available.
-  const nonLogEssentialReserved = essentialReserved - collectionReserved;
-  const reserveStillProtected = nonLogEssentialReserved <= limits.essentialLimit - DAILY_COLLECTION_LOG_RESERVE
-    ? Math.max(0, DAILY_COLLECTION_LOG_RESERVE - nextCollectionReserved) : 0;
-  if (reserved + requested > limits.limit
-    || essentialReserved + requestedEssential + requestedCollection > limits.essentialLimit
-    || nextCollectionReserved > DAILY_COLLECTION_LOG_RESERVE
-    || nonLogEssentialReserved + requestedEssential > limits.essentialLimit - reserveStillProtected
-    || optionalReserved + requestedOptional > limits.optionalLimit
-    || (requestedOdds > 0 && oddsReserved + requestedOdds > limits.oddsLimit)) return false;
-  const next = JSON.stringify({ date, reserved: reserved + requested, oddsReserved: oddsReserved + requestedOdds,
-    essentialReserved: essentialReserved + requestedEssential + requestedCollection, optionalReserved: optionalReserved + requestedOptional,
-    collectionReserved: nextCollectionReserved, ...(allowance ? { allowance } : {}) });
-  const result = await db.prepare(`UPDATE settings SET value=? WHERE key=? AND value=?`)
-    .bind(next, D1_WRITE_BUDGET_KEY, row.value).run();
-  return result.meta?.changes === 1;
+  const maxCasRetries = 3;
+  for (let conflicts = 0; conflicts <= maxCasRetries; conflicts++) {
+    // Always reread and revalidate fresh counters after a lost compare-and-set.
+    const row = await db.prepare(`SELECT value FROM settings WHERE key=?`).bind(D1_WRITE_BUDGET_KEY).first<{ value: string }>();
+    if (!row) return false;
+    const prior = parse(row.value);
+    if (!prior || prior.date > date) return false;
+    const sameDay = prior.date === date;
+    const reserved = sameDay ? prior.reserved : 0;
+    const essentialReserved = sameDay ? prior.essentialReserved : 0;
+    const optionalReserved = sameDay ? prior.optionalReserved : 0;
+    const oddsReserved = sameDay ? prior.oddsReserved : 0;
+    const collectionReserved = sameDay ? prior.collectionReserved : 0;
+    const allowance = sameDay ? prior.allowance : undefined;
+    const limits = allowance ?? DEFAULT_LIMITS;
+    const requestedCollection = reservations.filter(x => x.category === 'collection').reduce((sum,x) => sum+x.units,0);
+    const requestedEssential = reservations.filter(x => x.category === 'essential').reduce((sum,x) => sum+x.units,0);
+    const requestedOptional = reservations.filter(x => x.category !== 'essential' && x.category !== 'collection').reduce((sum,x) => sum+x.units,0);
+    const requestedOdds = reservations.filter(x => x.category === 'odds').reduce((sum,x) => sum+x.units,0);
+    // Account conservatively for each failed CAS attempt in the eventual
+    // successful reservation. These units are never refunded.
+    const retryOverhead = conflicts * 8;
+    const requested = requestedEssential + requestedCollection + requestedOptional + retryOverhead;
+    const nextCollectionReserved = collectionReserved + requestedCollection;
+    const nonLogEssentialReserved = essentialReserved - collectionReserved;
+    const reserveStillProtected = nonLogEssentialReserved <= limits.essentialLimit - DAILY_COLLECTION_LOG_RESERVE
+      ? Math.max(0, DAILY_COLLECTION_LOG_RESERVE - nextCollectionReserved) : 0;
+    if (reserved + requested > limits.limit
+      || essentialReserved + requestedEssential + requestedCollection + retryOverhead > limits.essentialLimit
+      || nextCollectionReserved > DAILY_COLLECTION_LOG_RESERVE
+      || nonLogEssentialReserved + requestedEssential + retryOverhead > limits.essentialLimit - reserveStillProtected
+      || optionalReserved + requestedOptional > limits.optionalLimit
+      || (requestedOdds > 0 && oddsReserved + requestedOdds > limits.oddsLimit)) return false;
+    const next = JSON.stringify({ date, reserved: reserved + requested, oddsReserved: oddsReserved + requestedOdds,
+      essentialReserved: essentialReserved + requestedEssential + requestedCollection + retryOverhead, optionalReserved: optionalReserved + requestedOptional,
+      collectionReserved: nextCollectionReserved, ...(allowance ? { allowance } : {}) });
+    const result = await db.prepare(`UPDATE settings SET value=? WHERE key=? AND value=?`)
+      .bind(next, D1_WRITE_BUDGET_KEY, row.value).run();
+    if (result.meta?.changes === 1) return true;
+    if (result.meta?.changes !== 0) return false;
+  }
+  return false;
 }
 
 /** Add the sole whitelisted one-day allowance to a known current-day ledger, preserving all reservations. */

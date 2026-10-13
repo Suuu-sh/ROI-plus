@@ -118,14 +118,14 @@ describe('minute odds collection controls', () => {
     expect((await selectOddsTargets(DB, now)).map(x => x.id)).toEqual(['stale-60s']);
   });
 
-  it('atomically reserves conservative writes in the shared budget and caps odds at 10k', async () => {
+  it('atomically reserves concurrent writes in the shared budget and caps odds at 4k', async () => {
     const reserves = await Promise.all([
       reserveWriteBudget(DB, now.toISOString().slice(0, 10), 20, 'odds'),
       reserveWriteBudget(DB, now.toISOString().slice(0, 10), 20, 'odds'),
     ]);
-    expect(reserves.filter(Boolean)).toHaveLength(1);
+    expect(reserves.filter(Boolean)).toHaveLength(2);
     const stored = JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as { value: string }).value);
-    expect(stored).toEqual({ date: now.toISOString().slice(0, 10), reserved: 20, oddsReserved: 20, essentialReserved: 0, optionalReserved: 20, collectionReserved: 0 });
+    expect(stored).toEqual({ date: now.toISOString().slice(0, 10), reserved: 48, oddsReserved: 40, essentialReserved: 8, optionalReserved: 40, collectionReserved: 0 });
     sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify({ date: now.toISOString().slice(0, 10), reserved: 9_920, oddsReserved: 9_920 }));
     expect(await reserveWriteBudget(DB, now.toISOString().slice(0, 10), 100, 'odds')).toBe(false);
     expect(await reserveWriteBudget(DB, now.toISOString().slice(0, 10), 1, 'ingest')).toBe(false);
@@ -133,6 +133,57 @@ describe('minute odds collection controls', () => {
     expect(DAILY_ESSENTIAL_WRITE_BUDGET).toBe(16_000);
     expect(DAILY_OPTIONAL_WRITE_BUDGET).toBe(4_000);
     expect(DAILY_ODDS_WRITE_BUDGET).toBe(4_000);
+  });
+
+  it.each([1, 2])('retries a lost budget CAS %i time(s) and preserves concurrent reservations', async (losses) => {
+    const day = now.toISOString().slice(0, 10);
+    await reserveWriteBudget(DB, day, 100, 'optional');
+    let failedCas = 0;
+    const racingDb = {
+      prepare(sql: string) {
+        const statement = DB.prepare(sql);
+        if (sql !== 'UPDATE settings SET value=? WHERE key=? AND value=?') return statement;
+        return {
+          bind(...values: unknown[]) { statement.bind(...values); return this; },
+          first: <T>() => statement.first<T>(),
+          all: <T>() => statement.all<T>(),
+          async run() {
+            if (failedCas < losses) {
+              failedCas += 1;
+              const current = JSON.parse((sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get() as {value:string}).value);
+              current.reserved += 12;
+              current.essentialReserved += 12;
+              sqlite.prepare("UPDATE settings SET value=? WHERE key='roi_d1_write_budget_utc'").run(JSON.stringify(current));
+            }
+            return statement.run();
+          },
+        };
+      },
+    } as any;
+    expect(await reserveWriteBudget(racingDb, day, 20, 'essential')).toBe(true);
+    expect(failedCas).toBe(losses);
+    expect(await readWriteBudget(DB, day)).toMatchObject({reserved: 100 + losses * 12 + 20 + losses * 8,
+      essentialReserved: losses * 12 + 20 + losses * 8, optionalReserved: 100});
+  });
+
+  it('fails closed after the bounded CAS retry count', async () => {
+    const day = now.toISOString().slice(0, 10);
+    let casAttempts = 0;
+    const contendedDb = {
+      prepare(sql: string) {
+        const statement = DB.prepare(sql);
+        if (sql !== 'UPDATE settings SET value=? WHERE key=? AND value=?') return statement;
+        return {
+          bind(...values: unknown[]) { statement.bind(...values); return this; },
+          first: <T>() => statement.first<T>(),
+          all: <T>() => statement.all<T>(),
+          async run() { casAttempts += 1; return {success:true,meta:{changes:0}}; },
+        };
+      },
+    } as any;
+    expect(await reserveWriteBudget(contendedDb, day, 20, 'essential')).toBe(false);
+    expect(casAttempts).toBe(4);
+    expect(await readWriteBudget(DB, day)).toMatchObject({reserved:0,essentialReserved:0,optionalReserved:0});
   });
 
   it('protects the essential bucket from optional work and combines all optional caps', async () => {
