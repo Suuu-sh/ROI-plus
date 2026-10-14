@@ -28,7 +28,7 @@ jobs:
       DELETE_CONFIRMATION: ${{ inputs.confirmation }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      PURCHASE_HISTORY_BACKUP_DIR: ${{ runner.temp }}/roi-plus-purchase-history-backup
+      PURCHASE_HISTORY_BACKUP_DIR: /tmp/roi-plus-purchase-history-backup
     steps:
       - name: Validate exact source and target
         env:
@@ -54,7 +54,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: roi-plus-purchase-history-backup-${{ github.run_id }}
-          path: ${{ runner.temp }}/roi-plus-purchase-history-backup/purchase-history-2026-10-13.json
+          path: /tmp/roi-plus-purchase-history-backup/purchase-history-2026-10-13.json
           if-no-files-found: error
           retention-days: 30
       - name: Atomically delete only backed-up 2026-10-13 purchase rows
@@ -64,6 +64,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: roi-plus-purchase-history-delete-report-${{ github.run_id }}
-          path: ${{ runner.temp }}/roi-plus-purchase-history-backup/delete-report.json
+          path: /tmp/roi-plus-purchase-history-backup/delete-report.json
           if-no-files-found: ignore
           retention-days: 30
