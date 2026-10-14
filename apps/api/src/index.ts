@@ -1915,26 +1915,106 @@ app.post('/admin/settle',async c=>{
  }
  return c.json({settled:await settleOpen(c.env.DB)});
 });
+type ScheduledDecisionStages={
+  normal?:()=>Promise<any>;
+  experimental:()=>Promise<any>;
+  historical:()=>Promise<any>;
+  pass?:'current'|'upcoming-t60';
+  log?:(line:string)=>void;
+};
+async function runScheduledDecisionStages(stages:ScheduledDecisionStages){
+  const log=stages.log??((line:string)=>console.info(line));
+  const run=async(stage:'paper-decision-timing'|'experimental-paper-decision'|'historical-trifecta-virtual-experiment',work:(()=>Promise<any>)|undefined,summary:(value:any)=>any=(value:any)=>value)=>{
+    if(!work)return {status:'skipped' as const,value:undefined};
+    try{
+      const value=await work();
+      log(JSON.stringify({event:stage,status:'success',...(stages.pass?{pass:stages.pass}:{}),...summary(value)}));
+      return {status:'success' as const,value};
+    }catch(error){
+      const errorClass=error instanceof Error&&/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)?error.name:'Error';
+      log(JSON.stringify({event:stage,status:'failed',...(stages.pass?{pass:stages.pass}:{}),reason:'decision-stage-failed',errorClass}));
+      return {status:'failed' as const,value:undefined};
+    }
+  };
+  const normal=await run('paper-decision-timing',stages.normal,(value:any)=>value===null?{enabled:false}:value.report??{});
+  const experimental=await run('experimental-paper-decision',stages.experimental);
+  const historical=await run('historical-trifecta-virtual-experiment',stages.historical,(value:any)=>{
+    const {archiveObservations,...summary}=value??{};return summary;
+  });
+  return {normal,experimental,historical};
+}
+async function runScheduledDecisionPasses(stages:ScheduledDecisionStages,wait:()=>Promise<{status:'none'|'ready'|'expired'|string}>,log=(line:string)=>console.info(line)){
+  const current=await runScheduledDecisionStages({...stages,pass:'current'});
+  let target:{status:'none'|'ready'|'expired'|string};
+  try{target=await wait();}catch(error){
+    const errorClass=error instanceof Error&&/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)?error.name:'Error';
+    log(JSON.stringify({event:'paper-t60-target',status:'failed',reason:'target-discovery-failed',errorClass}));
+    return {current,upcoming:null};
+  }
+  if(target.status!=='ready')return {current,upcoming:null};
+  const upcoming=await runScheduledDecisionStages({...stages,pass:'upcoming-t60'});
+  return {current,upcoming};
+}
+async function findUpcomingPaperT60Target(db:Db,afterMs:number,throughMs:number){
+  const rows=await all<any>(db,`SELECT r.betting_cutoff_at,r.betting_cutoff_source,r.betting_cutoff_observed_at FROM races r
+    WHERE r.sport='boat' AND r.data_origin='real' AND r.status='scheduled' AND r.betting_cutoff_source=?
+      AND julianday(r.betting_cutoff_at)>julianday(?) AND julianday(r.betting_cutoff_at)<=julianday(?)
+      AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
+      AND ((NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.mode='auto')
+            AND NOT EXISTS(SELECT 1 FROM paper_decisions d WHERE d.race_id=r.id AND d.phase='primary_t60'))
+        OR NOT EXISTS(SELECT 1 FROM experimental_paper_decisions d WHERE d.experiment_key='boat-trifecta-small-sample-v1' AND d.race_id=r.id)
+        OR NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_decisions d WHERE d.race_id=r.id))
+    ORDER BY julianday(r.betting_cutoff_at),r.id LIMIT 400`,TRUSTED_CUTOFF_SOURCE,
+    isoJstAt(afterMs+PRIMARY_PAPER_OFFSET_MS),isoJstAt(throughMs+PRIMARY_PAPER_OFFSET_MS));
+  const targets=rows.map((row:any):number|null=>{
+    const target=Date.parse(row.betting_cutoff_at)-PRIMARY_PAPER_OFFSET_MS;
+    return primaryPaperTiming(row.betting_cutoff_at,target,row.betting_cutoff_source,row.betting_cutoff_observed_at).eligible?target:null;
+  }).filter((value):value is number=>value!==null&&Number.isFinite(value)).sort((a,b)=>a-b);
+  return targets[0]??null;
+}
+const waitForNextPaperT60Target=async(options:{
+  now:()=>number;
+  findTarget:(afterMs:number,throughMs:number)=>Promise<number|null>;
+  refresh:()=>Promise<void>;
+  sleep?:(ms:number)=>Promise<void>;
+  log?:(line:string)=>void;
+})=>{
+  const startedAt=options.now();
+  const targetMs=await options.findTarget(startedAt+PRIMARY_PAPER_TOLERANCE_MS,startedAt+60_000);
+  if(targetMs===null)return {status:'none' as const,targetMs:null,actualMs:options.now()};
+  const remaining=targetMs-options.now();
+  if(remaining>0)await (options.sleep??(ms=>new Promise<void>(resolve=>setTimeout(resolve,ms))))(remaining);
+  // Force fresh I/O after a timer: scheduledTime is not a decision clock and
+  // Worker Date.now must be re-read before any timing or odds predicates.
+  await options.refresh();
+  const actualMs=options.now(),deltaMs=actualMs-targetMs;
+  if(Math.abs(deltaMs)>PRIMARY_PAPER_TOLERANCE_MS){
+    (options.log??((line:string)=>console.info(line)))(JSON.stringify({event:'paper-t60-target',status:'skipped',reason:'t60-window-expired'}));
+    return {status:'expired' as const,targetMs,actualMs};
+  }
+  return {status:'ready' as const,targetMs,actualMs};
+};
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env, ctx?: ExecutionContext) => {
   if (event.cron !== '* * * * *') return;
   const requestBudget={used:0,max:49};
   const oddsContext=purchaseOddsContext(requestBudget);
   oddsContext.enabled=env.ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE==='true';
-  const paperEnabled=env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true';
-  if (paperEnabled) {
-    // Every existing minute tick evaluates the bounded T-60 window before
-    // collector work and before ten-minute result collection.
-    const paper=await autoBetWithReport(env.DB,true,Date.now(),oddsContext);
-    console.info(JSON.stringify({event:'paper-decision-timing',...paper.report}));
-  }
-  // Experimental trifecta decisions use a minute-resolution T-60 window and
-  // therefore run on every tick, independently from normal auto-bet settings.
-  // This is before ten-minute result collection and maintenance.
-  const experimental=await experimentalPaperDecision(env.DB,Date.now(),oddsContext);
-  console.info(JSON.stringify({event:'experimental-paper-decision',...experimental}));
-  const historical=await historicalTrifectaExperimentDecision(env.DB,Date.now(),oddsContext);
-  const {archiveObservations,...historicalSummary}=historical;
-  console.info(JSON.stringify({event:'historical-trifecta-virtual-experiment',...historicalSummary}));
+  const decisionWork:ScheduledDecisionStages={
+    log:line=>console.info(line),
+    normal:async()=>{
+      const enabled=env.ENABLE_AUTO_BET==='true'||(await setting(env.DB,'auto_bet_enabled','false'))==='true';
+      return enabled?autoBetWithReport(env.DB,true,Date.now(),oddsContext):null;
+    },
+    experimental:()=>experimentalPaperDecision(env.DB,Date.now(),oddsContext),
+    historical:()=>historicalTrifectaExperimentDecision(env.DB,Date.now(),oddsContext),
+  };
+  const decisions=await runScheduledDecisionPasses(decisionWork,()=>waitForNextPaperT60Target({
+    now:()=>Date.now(),
+    findTarget:(afterMs,throughMs)=>findUpcomingPaperT60Target(env.DB,afterMs,throughMs),
+    refresh:async()=>{await first(env.DB,'SELECT 1 AS fresh_t60_clock');},
+  }),line=>console.info(line));
+  const archiveObservations=[decisions.current.historical,decisions.upcoming?.historical]
+    .filter((stage:any)=>stage?.status==='success').flatMap((stage:any)=>stage.value?.archiveObservations??[]);
   if(env.ENABLE_HISTORICAL_TRIFECTA_ARCHIVE==='true'&&env.TRIFECTA_ARCHIVE&&archiveObservations.length){
     // The R2 write is deliberately registered only after the T-60 decision
     // path has completed, so storage latency cannot delay or change purchases.
@@ -1988,4 +2068,4 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
   }
   return;
 } };
-export { app, cron, settleOpen, autoBet, autoBetWithReport, primaryPaperTiming, recordPaperAbstention, experimentalPaperDecision };
+export { app, cron, settleOpen, autoBet, autoBetWithReport, primaryPaperTiming, recordPaperAbstention, experimentalPaperDecision, runScheduledDecisionStages, runScheduledDecisionPasses, waitForNextPaperT60Target, findUpcomingPaperT60Target };

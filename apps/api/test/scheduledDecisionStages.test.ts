@@ -1,0 +1,64 @@
+import {describe,expect,it,vi} from 'vitest';
+import {runScheduledDecisionPasses,runScheduledDecisionStages,waitForNextPaperT60Target} from '../src/index.js';
+
+describe('scheduled decision stage isolation',()=>{
+  it('continues later decisions and scheduled recovery after a normal decision rejects',async()=>{
+    const lines:string[]=[],experimental=vi.fn(async()=>({evaluated:1})),historical=vi.fn(async()=>({archiveObservations:[]}));
+    const result=await runScheduledDecisionStages({
+      normal:async()=>{throw new Error('sensitive database detail');},experimental,historical,log:line=>lines.push(line),
+    });
+    const recovery=vi.fn();
+    await recovery();
+    expect(result.normal.status).toBe('failed');
+    expect(experimental).toHaveBeenCalledOnce();expect(historical).toHaveBeenCalledOnce();expect(recovery).toHaveBeenCalledOnce();
+    expect(lines.map(line=>JSON.parse(line).status)).toEqual(['failed','success','success']);
+    expect(lines[0]).toContain('"reason":"decision-stage-failed"');
+    expect(lines[0]).toContain('"errorClass":"Error"');
+    expect(lines.join('\n')).not.toContain('sensitive database detail');
+  });
+
+  it('preserves the normal decision and continues historical work after experimental rejects',async()=>{
+    const lines:string[]=[],normal=vi.fn(async()=>({bought:1,report:{boughtBetCount:2}})),historical=vi.fn(async()=>({archiveObservations:[]}));
+    const result=await runScheduledDecisionStages({normal,experimental:async()=>{throw 'private failure';},historical,log:line=>lines.push(line)});
+    expect(result.normal).toMatchObject({status:'success',value:{bought:1}});
+    expect(result.experimental.status).toBe('failed');expect(historical).toHaveBeenCalledOnce();
+    expect(JSON.parse(lines[0])).toMatchObject({event:'paper-decision-timing',status:'success',boughtBetCount:2});
+    expect(JSON.parse(lines[1])).toMatchObject({event:'experimental-paper-decision',status:'failed',reason:'decision-stage-failed',errorClass:'Error'});
+    expect(lines.join('\n')).not.toContain('private failure');
+  });
+
+  it('waits only for an upcoming target and runs decisions on the refreshed wall clock',async()=>{
+    let clock=1_800_000_000_000;const target=clock+47_000,sleep=vi.fn(async(ms:number)=>{clock+=ms;});
+    const timing=await waitForNextPaperT60Target({now:()=>clock,findTarget:async(after,through)=>{
+      expect(after).toBe(1_800_000_010_000);expect(through).toBe(1_800_000_060_000);return target;
+    },refresh:async()=>{},sleep});
+    const decisions=vi.fn(async()=>clock);
+    const stage=await runScheduledDecisionStages({experimental:decisions,historical:async()=>({})});
+    expect(timing).toMatchObject({status:'ready',targetMs:target,actualMs:target});
+    expect(sleep).toHaveBeenCalledWith(47_000);expect(decisions).toHaveBeenCalledOnce();expect(stage.experimental.value).toBe(target);
+  });
+
+  it('skips an expired target after timer overshoot without reusing the target timestamp',async()=>{
+    let clock=1_800_000_000_000;const target=clock+20_000,lines:string[]=[];
+    const timing=await waitForNextPaperT60Target({now:()=>clock,findTarget:async()=>target,refresh:async()=>{},
+      sleep:async(ms:number)=>{clock+=ms+10_001;},log:line=>lines.push(line)});
+    expect(timing).toMatchObject({status:'expired',targetMs:target,actualMs:target+10_001});
+    expect(JSON.parse(lines[0])).toMatchObject({event:'paper-t60-target',status:'skipped',reason:'t60-window-expired'});
+    const observed:number[]=[];
+    await runScheduledDecisionStages({experimental:async()=>{observed.push(clock);return{};},historical:async()=>({})});
+    expect(observed).toEqual([target+10_001]);
+  });
+
+  it('evaluates the current window before waiting and reuses the same decision context at the next target',async()=>{
+    let clock=1_800_000_000_000;const target=clock+47_000,context={requestBudget:{used:0,max:49}},calls:string[]=[];
+    const stage=(name:string)=>async()=>{calls.push(`${name}:${clock}:${context.requestBudget.max}`);return name==='historical'?{archiveObservations:[]}:{evaluated:0};};
+    const result=await runScheduledDecisionPasses({normal:stage('normal'),experimental:stage('experimental'),historical:stage('historical')},async()=>{
+      clock=target;return {status:'ready' as const};
+    },()=>{});
+    expect(result.upcoming).not.toBeNull();
+    expect(calls).toEqual([
+      `normal:${1_800_000_000_000}:49`,`experimental:${1_800_000_000_000}:49`,`historical:${1_800_000_000_000}:49`,
+      `normal:${target}:49`,`experimental:${target}:49`,`historical:${target}:49`,
+    ]);
+  });
+});

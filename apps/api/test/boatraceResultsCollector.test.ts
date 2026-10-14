@@ -10,7 +10,7 @@ import { finalTrifectaPage } from './fixtures/finalTrifectaPage.js';
 import { beforeinfoUrl } from '../src/services/boatraceBeforeinfo.js';
 import { raceListUrl } from '../src/services/boatraceRaceList.js';
 import { loadVerifiedRefundOutcome } from '../src/services/trifectaSettlement.js';
-import worker,{app,settleOpen} from '../src/index.js';
+import worker,{app,findUpcomingPaperT60Target,settleOpen} from '../src/index.js';
 const root=resolve(import.meta.dirname,'../../..');
 const now=new Date('2026-10-11T04:00:00Z'),raceDate='2026-10-11';
 let sqlite:Sqlite.Database,DB:D1SqliteAdapter;
@@ -51,6 +51,12 @@ beforeEach(()=>{
 afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();sqlite.close();});
 
 describe('purchased real boat results',()=>{
+  it('finds the nearest trusted upcoming T-60 target with the production D1 query',async()=>{
+    const raceId=seed();const targetMs=now.getTime()+30_000,cutoff=new Date(targetMs+60_000).toISOString();
+    sqlite.prepare('UPDATE races SET betting_cutoff_at=?,betting_cutoff_source=?,betting_cutoff_observed_at=? WHERE id=?')
+      .run(cutoff,'boatrace-racelist-cutoff-v1',now.toISOString(),raceId);
+    expect(await findUpcomingPaperT60Target(DB,now.getTime(),now.getTime()+60_000)).toBe(targetMs);
+  });
   it('atomically records normal official results, evidence and existing settlement without modifying purchase snapshots',async()=>{
     seed();const requestBudget={used:48,max:49},pauses:number[]=[];
     const result=await collectResults(DB,now,{requestBudget,fetch:fetchPage,sleep:async ms=>{pauses.push(ms)}});
