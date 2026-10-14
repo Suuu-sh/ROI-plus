@@ -1206,10 +1206,12 @@ describe('collection status quality compatibility',()=>{
   vi.useFakeTimers();
   for(const tick of ticks){
    vi.setSystemTime(tick);
-   await worker.scheduled({cron:'* * * * *',scheduledTime:tick} as ScheduledController,
+   const scheduled=worker.scheduled({cron:'* * * * *',scheduledTime:tick} as ScheduledController,
     env({ENABLE_BOATRACE_RESULTS_SCRAPE:tick===ticks[2]?'true':'false'}));
+   await vi.advanceTimersByTimeAsync(60_000);
+   await scheduled;
   }
-  expect(modelLookups).toBe(ticks.length); // repeated ticks must not starve undecided races
+  expect(modelLookups).toBe(ticks.length+1); // one bounded upcoming-target pass, then decision rows dedupe later ticks
   expect(sqlite.prepare('SELECT race_id,outcome,reason FROM experimental_paper_decisions ORDER BY race_id').all()).toEqual(ticks.map((_,i)=>({
    race_id:`boat-${raceDate.replaceAll('-','')}-99-${String(i+1).padStart(2,'0')}`,outcome:'abstained',reason:'experimental_forecast_missing_or_invalid'})));
  });
