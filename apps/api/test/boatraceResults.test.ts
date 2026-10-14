@@ -59,6 +59,30 @@ describe('official BOAT RACE result parser', () => {
     expect(()=>parseBoatraceRefundOutcome(html,{...expected,url:expected.url.replace('rno=7','rno=8')})).toThrow('official result page rejected');
   });
 
+  it('accepts a verified refund result with a matching official finish table but creates no rank output',()=>{
+    const page=boatraceResultPage({...identity,finishOrder:[1,3,5,4,6,2]})
+      .replace(/(<td class="is-fs14">)６(<\/td>\s*<td class="is-fs14 is-fBold is-boatColor2")/,'$1Ｆ$2')
+      .replace('&yen;3,770','&yen;590').replace('&yen;430','&yen;120')
+      .replace('<tbody><tr><td><div class="numberSet1"><div class="numberSet1_row"></div><div class="numberSet1_row"></div></div></td></tr></tbody>',
+        '<tbody><tr><td><div class="numberSet1"><div class="numberSet1_row"><span class="numberSet1_number">2</span></div></div></td></tr></tbody>');
+    expect(parseBoatraceRefundOutcome(page,expected)).toMatchObject({refundNumbers:[2],payouts:[
+      {betType:'trifecta',selection:'1-3-5',payout:590},{betType:'win',selection:'1',payout:120},
+    ]});
+    for(const marker of ['L','Ｌ']){
+      const lateStartRefund=page.replace('>Ｆ</td>','>'+marker+'</td>');
+      expect(parseBoatraceRefundOutcome(lateStartRefund,expected).refundNumbers).toEqual([2]);
+    }
+    const wrongTop=page.replace(/(<td class="is-fs14">)２(<\/td>\s*<td class="is-fs14 is-fBold is-boatColor3")/,'$1４$2');
+    expect(()=>parseBoatraceRefundOutcome(wrongTop,expected)).toThrow('official result page rejected');
+    const missingRefundMarker=page.replace(/(<td class="is-fs14">)Ｆ(<\/td>\s*<td class="is-fs14 is-fBold is-boatColor2")/,'$1６$2');
+    expect(()=>parseBoatraceRefundOutcome(missingRefundMarker,expected)).toThrow('official result page rejected');
+    const unrefundedLateStart=page.replace(/(<td class="is-fs14">)Ｆ(<\/td>\s*<td class="is-fs14 is-fBold is-boatColor2")/,'$1Ｌ$2')
+      .replace('<span class="numberSet1_number">2</span></div></div></td></tr></tbody>','<span class="numberSet1_number">3</span></div></div></td></tr></tbody>');
+    expect(()=>parseBoatraceRefundOutcome(unrefundedLateStart,expected)).toThrow('official result page rejected');
+    expect(()=>parseBoatraceRefundOutcome(page,{...expected,entries:expected.entries.map(entry=>entry.number===2?{...entry,racerId:'9999'}:entry)}))
+      .toThrow('official result page rejected');
+  });
+
   it('rejects refund boat numbers even when the refund table has no status text', () => {
     const html = boatraceResultPage(identity).replace(
       '<div class="numberSet1_row"></div>',

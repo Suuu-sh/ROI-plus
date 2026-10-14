@@ -120,8 +120,7 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
     refundTablePresent: refundTables.length === 1, nonRefundableNumbers, payouts };
 }
 
-/** Parse only explicit refunds and official payouts when the official result
- * page omits the finish table. This intentionally provides no rank labels. */
+/** Parse explicit refunds and official payouts without creating result labels. */
 export function parseBoatraceRefundOutcome(html: string, expected: BoatraceResultExpected): BoatraceRefundOutcome {
   if (typeof html !== 'string' || html.length === 0) fail();
   validateExpected(expected);
@@ -131,11 +130,12 @@ export function parseBoatraceRefundOutcome(html: string, expected: BoatraceResul
   if(/中止|不成立|同着/.test(text(nonHeaderText)))fail();
   validateSelectedResultTab(html,expectedDate,expected.venueCode,expected.raceNo);
   const tables=[...html.matchAll(/<table\b[^>]*>[\s\S]*?<\/table>/gi)].map(match=>match[0]);
-  if(tables.some(table=>{
+  const finishTables=tables.filter(table=>{
     const head=table.match(/<thead\b[^>]*>([\s\S]*?)<\/thead>/i)?.[1]??'';
     const labels=[...head.matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi)].map(match=>text(match[1]));
     return labels.includes('着')&&labels.includes('枠')&&labels.includes('ボートレーサー');
-  }))fail();
+  });
+  if(finishTables.length>1)fail();
   const refundTables=tables.filter(table=>/<th\b[^>]*>\s*返還\s*<\/th>/i.test(table));
   if(refundTables.length!==1)fail();
   const bodies=[...refundTables[0].matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)];
@@ -152,7 +152,28 @@ export function parseBoatraceRefundOutcome(html: string, expected: BoatraceResul
   if(trifecta.length!==1||win.length!==1
     ||trifecta[0].selection.split('-')[0]!==win[0].selection
     ||trifecta[0].selection.split('-').some(value=>refundNumbers.includes(Number(value))))fail();
+  if(finishTables.length)validateRefundFinishTable(finishTables[0],expected,refundNumbers,trifecta[0].selection);
   return {refundNumbers:refundNumbers.sort((a,b)=>a-b),payouts};
+}
+
+function validateRefundFinishTable(table:string,expected:BoatraceResultExpected,refundNumbers:number[],trifectaSelection:string):void{
+  const byNumber=new Map(expected.entries.map(entry=>[entry.number,entry.racerId]));
+  if(byNumber.size!==6||expected.entries.some(entry=>!Number.isInteger(entry.number)||entry.number<1||entry.number>6||!/^\d{4,5}$/.test(entry.racerId)))fail();
+  const rows:Array<{number:number;rank:number|null;racerId:string;refund:boolean}>=[];
+  for(const body of table.matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi))for(const row of body[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){
+    const cells=[...row[1].matchAll(/<td\b([^>]*)>([\s\S]*?)<\/td>/gi)];
+    if(cells.length!==4)fail();
+    const rankText=text(cells[0][2]),number=digit(text(cells[1][2]));
+    const rank=digit(rankText),refund=/^[FＦLＬ]$/.test(rankText);
+    const racerSpan=[...cells[2][2].matchAll(/<span\b([^>]*)>([\s\S]*?)<\/span>/gi)].find(match=>/\bis-fs12\b/.test(match[1]));
+    const racerId=racerSpan?text(racerSpan[2]):'';
+    if(!number||(!rank&&!refund)||!/^\d{4,5}$/.test(racerId))fail();
+    rows.push({number,rank,refund,racerId});
+  }
+  if(rows.length!==6||new Set(rows.map(row=>row.number)).size!==6||rows.some(row=>byNumber.get(row.number)!==row.racerId
+    ||row.refund!==refundNumbers.includes(row.number)))fail();
+  const topRanks=[1,2,3].map(rank=>rows.find(row=>row.rank===rank)?.number);
+  if(topRanks.some(Boolean)&&(topRanks.some(number=>!number)||topRanks.join('-')!==trifectaSelection))fail();
 }
 
 function validateSelectedResultTab(html:string,expectedDate:string,venueCode:string,raceNo:number):void {
