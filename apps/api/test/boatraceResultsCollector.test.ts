@@ -99,6 +99,28 @@ describe('purchased real boat results',()=>{
     ]);
     expect(await selectResultsTargets(DB,new Date(now.getTime()+3600000))).toEqual([]);
   });
+  it('re-collects a complete old capsize proof when open tickets still lack no-refund evidence',async()=>{
+    const raceId=seed();sqlite.prepare("UPDATE bets SET status='won' WHERE id=?").run(`${raceId}-bet`);
+    const add=sqlite.prepare(`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin)
+      VALUES(?,?,'boat','trifecta',?,100,'manual','INSUFFICIENT_DATA','2026-10-11T02:00:00Z','open','real')`);
+    add.run(`${raceId}-tri-1`,raceId,'5-1-2');add.run(`${raceId}-tri-2`,raceId,'6-1-2');add.run(`${raceId}-tri-3`,raceId,'1-5-6');
+    const resultPage=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,3,4,'転','転']});
+    const fetchPageAndMarket=async(input:string)=>new Response(input.includes('/odds3t?')?finalTrifectaPage(raceDate,'09',1):resultPage);
+    expect(await collectResults(DB,now,{fetch:fetchPageAndMarket,sleep:async()=>{}})).toMatchObject({status:'success',verified:1});
+    const proof=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs WHERE id=?').get(`boat-result:${raceId}`) as {reason:string}).reason);
+    const legacy={...proof,nonRefundableNumbers:[6]};delete legacy.refundPolicy;
+    sqlite.prepare('UPDATE collection_runs SET reason=? WHERE id=?').run(JSON.stringify(legacy),`boat-result:${raceId}`);
+    expect(legacy.finalMarket.quality).toBe('verified-result-final-market-v1');
+    expect((await selectResultsTargets(DB,now)).map(target=>target.id)).toContain(raceId);
+
+    expect(await collectResults(DB,new Date(now.getTime()+10_000),{mode:'manual',fetch:fetchPageAndMarket,sleep:async()=>{}})).toMatchObject({status:'success',verified:1});
+    const refreshed=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs WHERE id=?').get(`boat-result:${raceId}`) as {reason:string}).reason);
+    expect(refreshed.nonRefundableNumbers).toEqual([5,6]);
+    expect(await settleOpen(DB)).toBe(3);
+    expect(sqlite.prepare("SELECT status,COUNT(*) count FROM bets WHERE race_id=? AND bet_type='trifecta' GROUP BY status").all(raceId))
+      .toEqual([{status:'lost',count:3}]);
+    expect(await selectResultsTargets(DB,new Date(now.getTime()+20_000))).toEqual([]);
+  });
   it('keeps a capsize ticket open when the refund table is missing',async()=>{
     const raceId=seed();sqlite.prepare("UPDATE bets SET selection='6' WHERE id=?").run(`${raceId}-bet`);
     const source=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']});

@@ -34,6 +34,28 @@ export type CollectResultsOptions = {
 const runId = (raceId: string) => `boat-result:${raceId}`;
 export const resultUrl = (race: RaceTarget) => `https://www.boatrace.jp/owpc/pc/race/raceresult?rno=${race.race_no}&jcd=${race.venue_id}&hd=${race.race_date.replaceAll('-', '')}`;
 
+// A complete numeric/payout record is not enough to stop collection when an
+// open ticket selects an official terminal runner: settlement still needs the
+// source's explicit no-refund capsize evidence for that runner.
+const missingOpenTerminalProofSql = `NOT EXISTS(
+  SELECT 1 FROM entries te WHERE te.race_id=r.id AND te.data_origin='real'
+    AND json_valid(te.features_json) AND (json_extract(te.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走') OR json_extract(te.features_json,'$.finish_code') GLOB 'K[0-9]')
+    AND (EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.data_origin='real' AND b.status='open' AND b.bet_type IN ('win','trifecta')
+        AND instr('-'||b.selection||'-','-'||CAST(te.number AS TEXT)||'-')>0 AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=b.id))
+      OR EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real' AND eb.status='open'
+        AND instr('-'||eb.selection||'-','-'||CAST(te.number AS TEXT)||'-')>0 AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=eb.id))
+      OR EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open'
+        AND instr('-'||hb.selection||'-','-'||CAST(te.number AS TEXT)||'-')>0))
+    AND NOT EXISTS(SELECT 1 FROM collection_runs cp WHERE cp.id='boat-result:'||r.id AND cp.source='boatrace-results-worker-v1' AND cp.sport='boat'
+      AND cp.status='success' AND cp.target_date=r.race_date AND json_valid(cp.reason)
+      AND json_extract(cp.reason,'$.quality')='verified-official-outcome-v2' AND json_extract(cp.reason,'$.raceId')=r.id
+      AND json_extract(cp.reason,'$.url')='https://www.boatrace.jp/owpc/pc/race/raceresult?rno='||r.race_no||'&jcd='||r.venue_id||'&hd='||replace(r.race_date,'-','')
+      AND julianday(json_extract(cp.reason,'$.fetchedAt'))<=julianday('now')
+      AND json_extract(cp.reason,'$.refundTablePresent')=1 AND json_extract(cp.reason,'$.refundPolicy')='official-post-start-capsize-v1'
+      AND EXISTS(SELECT 1 FROM json_each(cp.reason,'$.nonRefundableNumbers') nr WHERE CAST(nr.value AS INTEGER)=te.number)
+      AND EXISTS(SELECT 1 FROM json_each(cp.reason,'$.terminalEntries') ti WHERE CAST(json_extract(ti.value,'$.number') AS INTEGER)=te.number AND json_extract(ti.value,'$.finishCode')='転覆'))
+)`;
+
 export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_BATCH_SIZE, labelOnly = false, archiveRaceIds: string[] = []) {
   // Old open purchases may still need settlement; no history-wide collection.
   // Least recently attempted first prevents an unpublished race starving others.
@@ -89,6 +111,7 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
         AND NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open'
           AND NOT EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
             AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3)))
+        AND ${missingOpenTerminalProofSql}
       ))
     ORDER BY CASE WHEN EXISTS(SELECT 1 FROM bets ob WHERE ob.race_id=r.id AND ob.sport='boat' AND ob.data_origin='real' AND ob.status='open'
         AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=ob.id))
