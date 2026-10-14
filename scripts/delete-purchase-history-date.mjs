@@ -17,6 +17,18 @@ const maxRows = 5000
 const maxBytes = 16 * 1024 * 1024
 const maxSqlStatementBytes = 8 * 1024
 const maxSqlStatements = 1000
+const criticalGuardFields = {
+  bets:['id','race_id','status','stake','payout','profit'],
+  daily_summaries:['date','sport','bets','stake','payout'],
+  experimental_paper_bets:['id','race_id','status','stake','payout','profit'],
+  experimental_paper_bet_reconciliations:['bet_id','refund_amount'],
+  historical_trifecta_experiment_bets:['id','race_id','status','stake','payout','profit'],
+  paper_decisions:['race_id','phase'],
+  experimental_paper_decisions:['id','race_id'],
+  historical_trifecta_experiment_decisions:['id','race_id'],
+  experimental_bankroll:['experiment_key','initial_balance','available_balance'],
+  historical_trifecta_experiment_bankroll:['experiment_key','initial_balance','available_balance'],
+}
 const childTable = 'experimental_paper_bet_reconciliations'
 const childTrigger = 'trg_experimental_paper_bet_reconciliations_no_delete'
 const scopes = [
@@ -39,20 +51,38 @@ const protectedScopes = [
   ['daily_summaries', "SELECT * FROM daily_summaries WHERE date<>'2026-10-13' ORDER BY date,sport", 'date', []],
 ]
 function fail(message) { throw new Error(message) }
+export function classifyD1Failure(output, errorCode=null) {
+  if(['ETIMEDOUT','ENOBUFS','ENOENT','SQLITE_TOOBIG','SQLITE_ERROR'].includes(errorCode))return errorCode.toLowerCase()
+  const patterns=[
+    [/cannot start a transaction within a transaction/i,'nested_transaction'],
+    [/not authorized/i,'not_authorized'],
+    [/incomplete input/i,'incomplete_input'],
+    [/malformed JSON/i,'malformed_json'],
+    [/snapshot_guard_(bets|daily_summaries|experimental_paper_bets|experimental_paper_bet_reconciliations|historical_trifecta_experiment_bets|paper_decisions|experimental_paper_decisions|historical_trifecta_experiment_decisions|experimental_bankroll|historical_trifecta_experiment_bankroll)_([0-9]+)/i,null],
+    [/too many SQL variables/i,'sql_variable_limit'],
+    [/expression tree is too large/i,'expression_tree_limit'],
+    [/SQLITE_TOOBIG/i,'sqlite_toobig'],
+    [/SQLITE_ERROR/i,'sqlite_error'],
+    [/no such trigger/i,'no_such_trigger'],[/no such table/i,'no_such_table'],[/no such index/i,'no_such_index'],[/no such column/i,'no_such_column'],
+    [/foreign key constraint failed/i,'foreign_key'],
+    [/statement too long|too many statements/i,'statement_limit'],
+    [/D1 reset before execute completed!/i,'import_rollback'],
+    [/failed to execute query/i,'query_failed'],
+    [/syntax error/i,'sql_syntax'],
+    [/unauthorized|authentication|not authenticated/i,'auth'],
+    [/ETIMEDOUT|timed out/i,'timeout'],
+    [/fetch failed|network error/i,'network'],
+  ]
+  for(const [pattern,label] of patterns){
+    const match=output.match(pattern)
+    if(match)return label===null?`snapshot_guard_${match[1].toLowerCase()}_${match[2]}`:label
+  }
+  return 'remote_d1_nonzero'
+}
 function run(args, timeout=60000, stage='remote_d1_operation') {
   const result = spawnSync(process.execPath,[wrangler,...args],{cwd:apiRoot,encoding:'utf8',timeout,maxBuffer:maxBytes,env:{...process.env,CI:'true'}})
   if (result.error || result.status!==0) {
-    const output=`${result.stderr||''}\n${result.stdout||''}`
-    const ecode=['ETIMEDOUT','ENOBUFS','ENOENT'].includes(result.error?.code)?result.error.code:null
-    const category=ecode||(/SQLITE_TOOBIG|too long|too large|statement.{0,20}limit|max.{0,20}length/i.test(output)?'statement_limit'
-      :/too many SQL variables|SQLITE_RANGE/i.test(output)?'sql_variable_limit'
-      :/expression tree is too large/i.test(output)?'expression_tree_limit'
-      :/SQLITE_ERROR/i.test(output)?'sqlite_error'
-      :/syntax error/i.test(output)?'sql_syntax'
-      :/foreign key/i.test(output)?'foreign_key'
-      :/transaction|rollback/i.test(output)?'transaction'
-      :/unauthorized|authentication|not authenticated/i.test(output)?'auth'
-      :'remote_d1_nonzero')
+    const category=classifyD1Failure(`${result.stderr||''}\n${result.stdout||''}`,result.error?.code)
     fail(`A bounded remote D1 operation failed [${stage}:${category}].`)
   }
   return result.stdout
@@ -93,7 +123,7 @@ export function buildSnapshotGuardChecks(snapshot) {
       conditions=[];part++
     }
     for(const row of rows){
-      const keys=Object.keys(row)
+      const keys=(criticalGuardFields[name]||Object.keys(row)).filter(key=>Object.hasOwn(row,key))
       if(!keys.length)fail('Scoped snapshot row has no fields.')
       const values=keys.map(key=>{
         const value=row[key]
@@ -200,9 +230,10 @@ export function sqlFile(snapshot) {
   const expExpected=expectedAvailable(snapshot.tables.experimental_bankroll,snapshot.tables.experimental_paper_bets,snapshot.tables.experimental_paper_bet_reconciliations)
   const histExpected=expectedAvailable(snapshot.tables.historical_trifecta_experiment_bankroll,snapshot.tables.historical_trifecta_experiment_bets)
   const assertBalance=(table,key,expected)=>`SELECT CASE WHEN (SELECT available_balance FROM ${table} WHERE experiment_key=${quote(key)})=${expected} THEN 1 ELSE json('bankroll reversal mismatch') END;`
-  // Wrangler's D1 SQL-file importer runs the file as one transaction. Each
-  // row-comparison statement is kept below the conservative D1 query-size cap.
-  return `BEGIN TRANSACTION;\n${guardSql.join('\n')}\n${balanceAdjust('experimental_bankroll','boat-trifecta-small-sample-v1','experimental_paper_bets',true)}\n${balanceAdjust('historical_trifecta_experiment_bankroll','boat-trifecta-historical-base-v1','historical_trifecta_experiment_bets')}\n${assertBalance('experimental_bankroll','boat-trifecta-small-sample-v1',expExpected)}\n${assertBalance('historical_trifecta_experiment_bankroll','boat-trifecta-historical-base-v1',histExpected)}\nDROP TRIGGER ${childTrigger};\nDELETE FROM ${childTable} WHERE bet_id IN (SELECT b.id FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id WHERE r.race_date='2026-10-13');\nDELETE FROM experimental_paper_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\n${triggerSql};\nDELETE FROM historical_trifecta_experiment_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\nDELETE FROM bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\nDELETE FROM daily_summaries WHERE date='2026-10-13';\nCOMMIT;\n`
+  // Wrangler's remote --command sends this as one Cloudflare D1 query request.
+  // D1 executes semicolon-separated statements as an atomic batch; --file uses
+  // the database-import path and temporarily blocks the database.
+  return `${guardSql.join('\n')}\n${balanceAdjust('experimental_bankroll','boat-trifecta-small-sample-v1','experimental_paper_bets',true)}\n${balanceAdjust('historical_trifecta_experiment_bankroll','boat-trifecta-historical-base-v1','historical_trifecta_experiment_bets')}\n${assertBalance('experimental_bankroll','boat-trifecta-small-sample-v1',expExpected)}\n${assertBalance('historical_trifecta_experiment_bankroll','boat-trifecta-historical-base-v1',histExpected)}\nDROP TRIGGER ${childTrigger};\nDELETE FROM ${childTable} WHERE bet_id IN (SELECT b.id FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id WHERE r.race_date='2026-10-13');\nDELETE FROM experimental_paper_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\n${triggerSql};\nDELETE FROM historical_trifecta_experiment_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\nDELETE FROM bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\nDELETE FROM daily_summaries WHERE date='2026-10-13';\n`
 }
 async function deleteScoped() {
   validateApproval()
@@ -214,7 +245,7 @@ async function deleteScoped() {
   const sql=sqlFile(snapshot)
   await writeFile(sqlPath,sql,{mode:0o600})
   if((await stat(sqlPath)).size>maxBytes) fail('Deletion transaction exceeded size limit.')
-  run(['d1','execute','roi-plus','--remote','--file',sqlPath],120000,'atomic_delete_import')
+  run(['d1','execute','roi-plus','--remote','--command',sql],120000,'atomic_delete_batch')
   const after={}
   for(const [name,queryText] of scopes) after[name]=query(queryText)
   if(after.bets.length||after.daily_summaries.length||after.experimental_paper_bets.length||after.experimental_paper_bet_reconciliations.length||after.historical_trifecta_experiment_bets.length) fail('Target purchase rows remain after deletion.')

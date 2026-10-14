@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import Database from 'better-sqlite3'
-import { assertPreservedRows, buildSnapshotGuardChecks, buildSnapshotGuardStatements, ledgerInvariantSql, sqlFile, validateSnapshotIdentity } from './delete-purchase-history-date.mjs'
+import { assertPreservedRows, buildSnapshotGuardChecks, classifyD1Failure, buildSnapshotGuardStatements, ledgerInvariantSql, sqlFile, validateSnapshotIdentity } from './delete-purchase-history-date.mjs'
 
 const trigger = `CREATE TRIGGER trg_experimental_paper_bet_reconciliations_no_delete BEFORE DELETE ON experimental_paper_bet_reconciliations BEGIN SELECT RAISE(ABORT, 'experimental paper bet reconciliations are immutable'); END`
 function fixture() {
@@ -49,7 +49,7 @@ function snapshot(db){return {tables:Object.fromEntries(scopes.map(([n,q])=>[n,d
 
 test('deletes only target date, reverses exact experiment effects, preserves audit/future state and restores trigger',()=>{
  const db=fixture(), before=snapshot(db)
- db.exec(sqlFile(before))
+ db.transaction(()=>db.exec(sqlFile(before)))()
  assert.equal(db.prepare("SELECT count(*) n FROM bets WHERE race_id='r13'").get().n,0)
  assert.equal(db.prepare("SELECT count(*) n FROM bets WHERE race_id='r14'").get().n,1)
  assert.equal(db.prepare("SELECT count(*) n FROM daily_summaries WHERE date='2026-10-13'").get().n,0)
@@ -65,10 +65,18 @@ test('deletes only target date, reverses exact experiment effects, preserves aud
  for(const experimental of [true,false]){const invariant=db.prepare(ledgerInvariantSql(experimental)).get();assert.equal(invariant.available_balance,invariant.ledger_expected)}
  db.close()
 })
+test('mutation SQL is one bounded D1 query batch with no import transaction wrapper',()=>{
+ const sql=sqlFile(snapshot(fixture()))
+ assert.doesNotMatch(sql,/^(?:BEGIN TRANSACTION|COMMIT);?$/im)
+ assert.ok(Buffer.byteLength(sql)<100*1024)
+ assert.match(sql,/DROP TRIGGER/)
+ assert.match(sql,/DELETE FROM daily_summaries/)
+})
+
 test('snapshot guard rolls back all changes on concurrent target write',()=>{
  const db=fixture(), before=snapshot(db)
  db.prepare('INSERT INTO bets VALUES(?,?)').run('concurrent','r13')
- assert.throws(()=>db.exec(sqlFile(before)),/malformed JSON/)
+ assert.throws(()=>db.transaction(()=>db.exec(sqlFile(before)))(),/malformed JSON/)
  assert.equal(db.prepare("SELECT count(*) n FROM bets WHERE race_id='r13'").get().n,2)
  assert.equal(db.prepare("SELECT available_balance FROM experimental_bankroll").get().available_balance,99800)
  assert.equal(db.prepare("SELECT count(*) n FROM experimental_paper_bet_reconciliations").get().n,1)
@@ -77,8 +85,7 @@ test('snapshot guard rolls back all changes on concurrent target write',()=>{
 test('later delete failure rolls back balance adjustment and child cleanup',()=>{
  const db=fixture(), before=snapshot(db)
  db.exec("CREATE TRIGGER deny_parent BEFORE DELETE ON experimental_paper_bets BEGIN SELECT RAISE(ABORT,'blocked'); END")
- assert.throws(()=>db.exec(sqlFile(before)),/blocked/)
- db.exec('ROLLBACK') // D1 import rolls back the failed SQL file as a unit.
+ assert.throws(()=>db.transaction(()=>db.exec(sqlFile(before)))(),/blocked/)
  assert.equal(db.prepare("SELECT count(*) n FROM experimental_paper_bets WHERE race_id='r13'").get().n,3)
  assert.equal(db.prepare("SELECT count(*) n FROM experimental_paper_bet_reconciliations").get().n,1)
  assert.equal(db.prepare("SELECT available_balance FROM experimental_bankroll").get().available_balance,99800)
@@ -89,7 +96,7 @@ test('later delete failure rolls back balance adjustment and child cleanup',()=>
 
 test('per-row D1 guards chunk large target snapshots below 8 KiB',()=>{
  const db=fixture(), data=snapshot(db)
- data.tables.bets=Array.from({length:300},(_,i)=>({id:`large-${i}`,race_id:'r13',selection:'x'.repeat(500)}))
+ data.tables.bets=Array.from({length:300},(_,i)=>({id:`large-${i}-${'x'.repeat(30)}`,race_id:'r13',status:'open',stake:100,payout:null,profit:null}))
  const statements=buildSnapshotGuardStatements(data)
  assert.ok(statements.length>scopes.length)
  assert.ok(statements.every(sql=>Buffer.byteLength(sql)<=8*1024))
@@ -120,7 +127,15 @@ test('REAL-affinity snapshots compare numeric values without JSON text formattin
  const sql="SELECT COALESCE(json_group_array(json_object("+fields+")),'[]') AS j FROM (SELECT * FROM experimental_paper_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13') ORDER BY id)"
  assert.notEqual(db.prepare(sql).get().j,JSON.stringify(rows))
  assert.ok(buildSnapshotGuardChecks(before).every(check=>db.prepare(check.sql).get().ok===1))
- db.exec(sqlFile(before))
+ db.transaction(()=>db.exec(sqlFile(before)))()
  assert.equal(db.prepare("SELECT count(*) n FROM experimental_paper_bets WHERE race_id='r13'").get().n,0)
  db.close()
+})
+
+test('D1 failure diagnostics expose only allowlisted signatures and safe guard labels',()=>{
+ assert.equal(classifyD1Failure('cannot start a transaction within a transaction'),'nested_transaction')
+ assert.equal(classifyD1Failure('SQLITE_TOOBIG'),'sqlite_toobig')
+ assert.equal(classifyD1Failure('snapshot_guard_experimental_paper_bets_4'),'snapshot_guard_experimental_paper_bets_4')
+ assert.equal(classifyD1Failure('D1 runs your SQL in a transaction for you'),'remote_d1_nonzero')
+ assert.equal(classifyD1Failure('private row value: secret123'),'remote_d1_nonzero')
 })
