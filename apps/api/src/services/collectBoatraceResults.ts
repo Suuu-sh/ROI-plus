@@ -117,8 +117,8 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
       ))
     ORDER BY CASE WHEN EXISTS(SELECT 1 FROM bets ob WHERE ob.race_id=r.id AND ob.sport='boat' AND ob.data_origin='real' AND ob.status='open'
         AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=ob.id))
-        OR EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real' AND eb.status='open')
-        OR EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open') THEN 0 ELSE 1 END,
+        OR EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real' AND eb.status='open') THEN 0
+      WHEN EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open') THEN 1 ELSE 2 END,
       julianday(cr.started_at) ASC,julianday(r.post_time) ASC,r.id ASC LIMIT ?`, RESULTS_SOURCE,
     new Date(now.getTime()-5*60_000).toISOString(),Number(labelOnly),Number(labelOnly),jstDate,
     new Date(now.getTime()).toISOString(),RESULTS_SOURCE,...(archiveIds.length?[JSON.stringify(archiveIds)]:[]),new Date(now.getTime()-5*60_000).toISOString(),RESULTS_SOURCE,

@@ -250,6 +250,27 @@ describe('purchased real boat results',()=>{
     expect(await collectResults(DB,now,{fetch:fetchPage,sleep:async()=>{}})).toMatchObject({status:'success',verified:1,attempted:1});
     expect(JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs WHERE id=?').get(`boat-result:${id(2)}`) as {reason:string}).reason)).toMatchObject({quality:'verified-official-outcome-v2'});
   });
+  it('prioritizes normal and experimental open tickets ahead of older historical-comparison backlog',async()=>{
+    const insertHistorical=(raceNo:number)=>{
+      const raceId=seed(raceNo);sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
+      sqlite.prepare(`INSERT INTO historical_trifecta_experiment_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,snapshot_json)
+        VALUES(?, 'boat-trifecta-historical-base-v1', ?, 'boat-trifecta-historical-base-20261014', '2026-10-10T01:00:00Z', 'placed', 100, '{}')`).run(`hist-decision-${raceNo}`,raceId);
+      sqlite.prepare(`INSERT INTO historical_trifecta_experiment_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+        VALUES(?, ?, ?, 'boat-trifecta-historical-base-20261014', '1-2-3', 100, 0.1, 0.01, 20, 1, '2026-10-10T01:00:00Z', 'open', 'real')`)
+        .run(`hist-bet-${raceNo}`,`hist-decision-${raceNo}`,raceId);
+      return raceId;
+    };
+    insertHistorical(1);insertHistorical(2);insertHistorical(3);
+    const current=seed(20);sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(current);
+    sqlite.prepare(`INSERT INTO experimental_models(id,status,manifest_schema,sport,bet_type,training_mode,schema_version,artifact_sha256,manifest_sha256,metadata_sha256,trained_at,artifact_manifest_json,manifest_json,registered_at)
+      VALUES('current-fixture','candidate','edgelab-experimental-trifecta-artifact-v1','boat','trifecta','experimental','boat-prerace-v2-no-weather-experimental-v1',?,?,?,?,?,?,?)`)
+      .run('a'.repeat(64),'b'.repeat(64),'c'.repeat(64),'2026-10-11T01:00:00Z','{}','{}','2026-10-11T01:00:00Z');
+    sqlite.prepare(`INSERT INTO experimental_paper_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,sizing_method,snapshot_json)
+      VALUES('current-exp-decision','boat-trifecta-small-sample-v1',?,'current-fixture','2026-10-11T02:00:00Z','placed',100,'fractional-kelly-portfolio','{}')`).run(current);
+    sqlite.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+      VALUES('current-exp-bet','current-exp-decision',?,'current-fixture','1-2-3',100,0.1,0.01,20,1,'2026-10-11T02:00:00Z','open','real')`).run(current);
+    expect(await selectResultsTargets(DB,now,1)).toMatchObject([expect.objectContaining({id:current})]);
+  });
   it('collects purchased results with missing, invalid, or exhausted legacy reservation state',async()=>{
     seed();sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();
     const fetcher=vi.fn(fetchPage);
