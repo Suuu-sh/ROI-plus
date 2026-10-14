@@ -46,6 +46,8 @@ function safeEvent(value, timestamp, output) {
   if (['success','partial','failed','skipped','ready','none','expired'].includes(value.status)) out.status = value.status;
   if (['current','upcoming-t60'].includes(value.pass)) out.pass = value.pass;
   if (['TypeError','RangeError','SyntaxError','D1Error','Error'].includes(value.errorClass)) out.errorClass = value.errorClass;
+  if (Number.isFinite(value.elapsedMs) && value.elapsedMs >= 0 && value.elapsedMs <= 600_000) out.elapsedMs = value.elapsedMs;
+  if (Number.isFinite(value.startDeltaMs) && Math.abs(value.startDeltaMs) <= 600_000) out.startDeltaMs = value.startDeltaMs;
   for (const key of ['evaluated','placedRaces','placedBets','targets','verified','records','attempted','settled']) {
     if (Number.isFinite(value[key])) out[key] = value[key];
   }
@@ -53,6 +55,11 @@ function safeEvent(value, timestamp, output) {
   if (value.abstainedByReason && typeof value.abstainedByReason === 'object') {
     out.abstainedByReason = Object.fromEntries(Object.entries(value.abstainedByReason)
       .filter(([key, count]) => reasonAllowlist.has(key) && Number.isFinite(count)));
+  }
+  if (value.timingDroppedByReason && typeof value.timingDroppedByReason === 'object') {
+    const timingReasons = new Set(['commit_window_elapsed','pre_batch_window_elapsed','purchase_evidence_stale_before_commit']);
+    out.timingDroppedByReason = Object.fromEntries(Object.entries(value.timingDroppedByReason)
+      .filter(([key,count]) => timingReasons.has(key) && Number.isFinite(count) && count >= 0 && count <= 100_000));
   }
   output.push(out);
 }
@@ -135,6 +142,7 @@ const contextSql = `WITH active_model AS (
 )
 SELECT v.name venue,r.race_no raceNo,r.race_date raceDate,r.status,
   r.betting_cutoff_at cutoffAt,r.betting_cutoff_source cutoffSource,r.betting_cutoff_observed_at cutoffObservedAt,
+  datetime(r.betting_cutoff_at,'-60 seconds') t60TargetAt,
   ROUND((julianday(r.betting_cutoff_at)-julianday('now'))*86400) secondsToCutoff,
   ROUND((julianday(r.betting_cutoff_at)-julianday('now'))*86400-60) secondsToT60Target,
   (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real') entryCount,
@@ -188,7 +196,13 @@ export function safeDbRows(text) {
   if (!rows.length) return null;
   return rows.slice(0,30).map(row => {
     const venue = typeof row.venue === 'string' && /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}A-Za-z0-9ー・]+$/u.test(row.venue) ? row.venue : undefined;
-    const iso = value => { const date = value == null ? NaN : Date.parse(value); return Number.isFinite(date) ? new Date(date).toISOString() : null; };
+    const iso = value => {
+      if (value == null) return null;
+      const text = String(value);
+      const normalized = /^\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d(?:\.\d+)?)?$/.test(text) ? `${text.replace(' ','T')}Z` : text;
+      const date = Date.parse(normalized);
+      return Number.isFinite(date) ? new Date(date).toISOString() : null;
+    };
     const num = value => Number.isFinite(Number(value)) ? Number(value) : null;
     const bool = value => value === true || value === 1 || value === '1';
     return {
@@ -196,7 +210,8 @@ export function safeDbRows(text) {
       raceDate: /^\d{4}-\d\d-\d\d$/.test(row.raceDate ?? '') ? row.raceDate : null,
       status: row.status === 'scheduled' ? row.status : 'other', cutoffAt: iso(row.cutoffAt),
       cutoffSource: row.cutoffSource === TRUSTED_CUTOFF_SOURCE ? TRUSTED_CUTOFF_SOURCE : 'other',
-      cutoffObservedAt: iso(row.cutoffObservedAt), secondsToCutoff: num(row.secondsToCutoff), secondsToT60Target: num(row.secondsToT60Target),
+      cutoffObservedAt: iso(row.cutoffObservedAt), t60TargetAt: iso(row.t60TargetAt),
+      secondsToCutoff: num(row.secondsToCutoff), secondsToT60Target: num(row.secondsToT60Target),
       entryCount: num(row.entryCount), predictionCount: num(row.predictionCount), predictedAt: iso(row.predictedAt),
       hasExperimentalDecision: bool(row.hasExperimentalDecision), hasNormalDecision: bool(row.hasNormalDecision),
       hasNormalBet: bool(row.hasNormalBet), hasHistoricalDecision: bool(row.hasHistoricalDecision),

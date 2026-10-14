@@ -593,7 +593,8 @@ async function settleExperimentalOpen(db: Db) {
  return settled;
 }
 async function experimentalPaperDecision(db: Db, decisionAt=Date.now(), oddsContext:PurchaseOddsContext=purchaseOddsContext()) {
- const report={evaluated:0,placedRaces:0,placedBets:0,abstainedByReason:{} as Record<string,number>};
+ const report={evaluated:0,placedRaces:0,placedBets:0,abstainedByReason:{} as Record<string,number>,timingDroppedByReason:{} as Record<string,number>};
+ const noteTimingDrop=(reason:string)=>{report.timingDroppedByReason[reason]=(report.timingDroppedByReason[reason]??0)+1;};
  const model=await first<any>(db,"SELECT * FROM experimental_models WHERE status IN ('candidate','experimental') ORDER BY registered_at DESC,id DESC LIMIT 1");
  if(!model)return report;
  let metadata:any;try{metadata=JSON.parse(model.manifest_json)}catch{return report;}
@@ -650,10 +651,10 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now(), oddsCont
    if(!db.batch)return report;
    if(!await reserveWorkerWrites(db,predictions.length+stakes.length+3))continue;
    const commitAt=Date.now();
-   if(!primaryPaperTiming(race.betting_cutoff_at,commitAt,race.betting_cutoff_source,race.betting_cutoff_observed_at).eligible)continue;
+   if(!primaryPaperTiming(race.betting_cutoff_at,commitAt,race.betting_cutoff_source,race.betting_cutoff_observed_at).eligible){noteTimingDrop('commit_window_elapsed');continue;}
    if(totalStake>0&&(!purchaseOdds||Date.parse(purchaseOdds.capturedAt)>commitAt||!archive||commitAt-Date.parse(archiveRow?.captured_at??'')>5*60_000
       ||Date.parse(archive?.beforeinfo?.capturedAt??'')>commitAt||Date.parse(archive?.raceList?.capturedAt??'')>commitAt
-      ||Date.parse(archive?.trifectaOdds?.capturedAt??'')>commitAt))continue;
+      ||Date.parse(archive?.trifectaOdds?.capturedAt??'')>commitAt)){noteTimingDrop('purchase_evidence_stale_before_commit');continue;}
    const committedAt=isoJstAt(commitAt);
    const statements:Statement[]=[];
    if(totalStake>0)statements.push(db.prepare(`UPDATE experimental_bankroll SET available_balance=available_balance-?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND available_balance>=? AND NOT EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE experiment_key='boat-trifecta-small-sample-v1' AND race_id=?)
@@ -673,7 +674,7 @@ async function experimentalPaperDecision(db: Db, decisionAt=Date.now(), oddsCont
          SELECT id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,'open','real' FROM (${selects}) WHERE EXISTS(SELECT 1 FROM experimental_paper_decisions WHERE id=?)`).bind(...values,decisionId));
      }
    }
-   if(!primaryPaperTiming(race.betting_cutoff_at,Date.now(),race.betting_cutoff_source,race.betting_cutoff_observed_at).eligible)continue;
+   if(!primaryPaperTiming(race.betting_cutoff_at,Date.now(),race.betting_cutoff_source,race.betting_cutoff_observed_at).eligible){noteTimingDrop('pre_batch_window_elapsed');continue;}
    const results=await db.batch(statements) as any[];
    const decisionChanges=Number(results?.[totalStake>0?1:0]?.meta?.changes??0);
    if(decisionChanges&&totalStake){report.placedRaces++;report.placedBets+=stakes.length;}
@@ -1920,19 +1921,23 @@ type ScheduledDecisionStages={
   experimental:()=>Promise<any>;
   historical:()=>Promise<any>;
   pass?:'current'|'upcoming-t60';
+  targetMs?:number|null;
   log?:(line:string)=>void;
 };
 async function runScheduledDecisionStages(stages:ScheduledDecisionStages){
   const log=stages.log??((line:string)=>console.info(line));
   const run=async(stage:'paper-decision-timing'|'experimental-paper-decision'|'historical-trifecta-virtual-experiment',work:(()=>Promise<any>)|undefined,summary:(value:any)=>any=(value:any)=>value)=>{
     if(!work)return {status:'skipped' as const,value:undefined};
+    const startedAt=Date.now(),timing={elapsedMs:0,...(Number.isFinite(stages.targetMs)?{startDeltaMs:startedAt-Number(stages.targetMs)}:{})};
     try{
       const value=await work();
-      log(JSON.stringify({event:stage,status:'success',...(stages.pass?{pass:stages.pass}:{}),...summary(value)}));
+      timing.elapsedMs=Math.max(0,Date.now()-startedAt);
+      log(JSON.stringify({event:stage,status:'success',...(stages.pass?{pass:stages.pass}:{}),...timing,...summary(value)}));
       return {status:'success' as const,value};
     }catch(error){
+      timing.elapsedMs=Math.max(0,Date.now()-startedAt);
       const errorClass=error instanceof Error&&/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)?error.name:'Error';
-      log(JSON.stringify({event:stage,status:'failed',...(stages.pass?{pass:stages.pass}:{}),reason:'decision-stage-failed',errorClass}));
+      log(JSON.stringify({event:stage,status:'failed',...(stages.pass?{pass:stages.pass}:{}),...timing,reason:'decision-stage-failed',errorClass}));
       return {status:'failed' as const,value:undefined};
     }
   };
@@ -1943,16 +1948,16 @@ async function runScheduledDecisionStages(stages:ScheduledDecisionStages){
   });
   return {normal,experimental,historical};
 }
-async function runScheduledDecisionPasses(stages:ScheduledDecisionStages,wait:()=>Promise<{status:'none'|'ready'|'expired'|string}>,log=(line:string)=>console.info(line)){
+async function runScheduledDecisionPasses(stages:ScheduledDecisionStages,wait:()=>Promise<{status:'none'|'ready'|'expired'|string;targetMs?:number|null}>,log=(line:string)=>console.info(line)){
   const current=await runScheduledDecisionStages({...stages,pass:'current'});
-  let target:{status:'none'|'ready'|'expired'|string};
+  let target:{status:'none'|'ready'|'expired'|string;targetMs?:number|null};
   try{target=await wait();}catch(error){
     const errorClass=error instanceof Error&&/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)?error.name:'Error';
     log(JSON.stringify({event:'paper-t60-target',status:'failed',reason:'target-discovery-failed',errorClass}));
     return {current,upcoming:null};
   }
   if(target.status!=='ready')return {current,upcoming:null};
-  const upcoming=await runScheduledDecisionStages({...stages,pass:'upcoming-t60'});
+  const upcoming=await runScheduledDecisionStages({...stages,pass:'upcoming-t60',targetMs:target.targetMs});
   return {current,upcoming};
 }
 async function findUpcomingPaperT60Target(db:Db,afterMs:number,throughMs:number){
@@ -1980,9 +1985,10 @@ const waitForNextPaperT60Target=async(options:{
   log?:(line:string)=>void;
 })=>{
   const startedAt=options.now();
-  const targetMs=await options.findTarget(startedAt+PRIMARY_PAPER_TOLERANCE_MS,startedAt+60_000);
+  const targetMs=await options.findTarget(startedAt-PRIMARY_PAPER_TOLERANCE_MS,startedAt+60_000);
   if(targetMs===null)return {status:'none' as const,targetMs:null,actualMs:options.now()};
-  const remaining=targetMs-options.now();
+  const earlyPointMs=targetMs-8_000;
+  const remaining=earlyPointMs-options.now();
   if(remaining>0)await (options.sleep??(ms=>new Promise<void>(resolve=>setTimeout(resolve,ms))))(remaining);
   // Force fresh I/O after a timer: scheduledTime is not a decision clock and
   // Worker Date.now must be re-read before any timing or odds predicates.

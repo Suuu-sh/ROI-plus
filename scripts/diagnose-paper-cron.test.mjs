@@ -48,11 +48,26 @@ test('allows only safe T-60 target fields from diagnostic log events', () => {
     status: 'skipped', pass: 'upcoming-t60', reason: 't60-window-expired' }]);
 });
 
+test('forwards bounded timing diagnostics and allowlisted drop counters only', () => {
+  const payload = { eventTimestamp: '2026-10-14T07:20:00Z', logs: [{ level: 'info', message: [JSON.stringify({
+    event: 'experimental-paper-decision', status: 'success', pass: 'upcoming-t60', elapsedMs: 193,
+    startDeltaMs: -8, timingDroppedByReason: {
+      commit_window_elapsed: 1, pre_batch_window_elapsed: 2, purchase_evidence_stale_before_commit: 3,
+      arbitrary_reason: 99,
+    }, arbitraryField: 'do-not-forward',
+  })] }] };
+  const result = parseTailRecords([JSON.stringify(payload)]);
+  assert.deepEqual(result, [{ event: 'experimental-paper-decision', timestamp: '2026-10-14T07:20:00.000Z',
+    status: 'success', pass: 'upcoming-t60', elapsedMs: 193, startDeltaMs: -8,
+    timingDroppedByReason: { commit_window_elapsed: 1, pre_batch_window_elapsed: 2,
+      purchase_evidence_stale_before_commit: 3 } }]);
+});
+
 test('sanitizes D1 rows and excludes internal identifiers, hashes, and manifest content', () => {
   const rows = safeDbRows(JSON.stringify([{ results: [{
     venue: '丸亀', raceNo: 4, raceDate: '2026-10-14', status: 'scheduled',
     cutoffAt: '2026-10-14T16:42:00+09:00', cutoffSource: 'boatrace-racelist-cutoff-v1',
-    cutoffObservedAt: '2026-10-14T16:30:00+09:00', secondsToCutoff: 60, secondsToT60Target: 0,
+    cutoffObservedAt: '2026-10-14T16:30:00+09:00', t60TargetAt: '2026-10-14 07:41:00', secondsToCutoff: 60, secondsToT60Target: 0,
     entryCount: 6, predictionCount: 120, predictedAt: '2026-10-14T16:40:00Z',
     hasExperimentalDecision: 0, hasNormalDecision: 1, hasNormalBet: 0, hasHistoricalDecision: 1,
     quarantined: 0, modelReadyGate: 1, productionT60Target: 1,
@@ -61,6 +76,7 @@ test('sanitizes D1 rows and excludes internal identifiers, hashes, and manifest 
   assert.equal(rows.length, 1);
   assert.equal(rows[0].venue, '丸亀');
   assert.equal(rows[0].productionT60Target, true);
+  assert.equal(rows[0].t60TargetAt, '2026-10-14T07:41:00.000Z');
   assert.equal(JSON.stringify(rows).includes('internal-race-id'), false);
   assert.equal(JSON.stringify(rows).includes('secret-hash'), false);
   assert.equal(JSON.stringify(rows).includes('sensitive'), false);
