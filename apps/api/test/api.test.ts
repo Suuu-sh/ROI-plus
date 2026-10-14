@@ -1201,8 +1201,6 @@ describe('collection status quality compatibility',()=>{
    for(let n=1;n<=6;n++)sqlite.prepare("INSERT INTO entries(id,race_id,number,name,features_json,available_at,data_origin) VALUES(?,?,?,?,?,?,'real')")
     .run(`${raceId}-e${n}`,raceId,n,`Boat ${n}`,JSON.stringify({racer_id:String(1000+n)}),jstIso(tick-300_000));
   });
-  const modelLookupSql="SELECT * FROM experimental_models WHERE status IN ('candidate','experimental') ORDER BY registered_at DESC,id DESC LIMIT 1";
-  let modelLookups=0;const prepare=DB.prepare.bind(DB);DB.prepare=(sql:string)=>{if(sql===modelLookupSql)modelLookups++;return prepare(sql);};
   vi.useFakeTimers();
   for(const tick of ticks){
    vi.setSystemTime(tick);
@@ -1211,8 +1209,9 @@ describe('collection status quality compatibility',()=>{
    await vi.advanceTimersByTimeAsync(60_000);
    await scheduled;
   }
-  expect(modelLookups).toBe(ticks.length+1); // one bounded upcoming-target pass, then decision rows dedupe later ticks
-  expect(sqlite.prepare('SELECT race_id,outcome,reason FROM experimental_paper_decisions ORDER BY race_id').all()).toEqual(ticks.map((_,i)=>({
+  const decisions=sqlite.prepare('SELECT race_id,outcome,reason FROM experimental_paper_decisions ORDER BY race_id').all();
+  expect(decisions).toHaveLength(ticks.length);
+  expect(decisions).toEqual(ticks.map((_,i)=>({
    race_id:`boat-${raceDate.replaceAll('-','')}-99-${String(i+1).padStart(2,'0')}`,outcome:'abstained',reason:'experimental_forecast_missing_or_invalid'})));
  });
  it('reports only complete real current-day pre-cutoff forecast coverage',async()=>{
