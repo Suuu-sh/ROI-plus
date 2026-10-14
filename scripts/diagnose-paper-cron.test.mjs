@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTailRecords } from './diagnose-paper-cron.mjs';
+import { parseTailRecords, safeDbRows } from './diagnose-paper-cron.mjs';
 
 test('parses multiline tail JSON, array messages, cron event and known decision event safely', () => {
   const payload = {
@@ -36,4 +36,32 @@ test('records CPU and memory exceeded scheduled outcomes without event payload',
     JSON.stringify({ eventTimestamp: 1791986460000, event: { cron: '* * * * *' }, outcome: 'memoryExceeded', logs: [], exceptions: [] }),
   ]);
   assert.deepEqual(events.map(({ outcome }) => outcome), ['cpuExceeded', 'memoryExceeded']);
+});
+
+test('allows only safe T-60 target fields from diagnostic log events', () => {
+  const payload = { eventTimestamp: '2026-10-14T07:20:00Z', logs: [{ level: 'info', message: [JSON.stringify({
+    event: 'paper-t60-target', status: 'skipped', reason: 't60-window-expired', pass: 'upcoming-t60',
+    cutoffAt: 'sensitive-and-not-allowlisted', account_id: 'not-output',
+  })] }] };
+  const result = parseTailRecords([JSON.stringify(payload)]);
+  assert.deepEqual(result, [{ event: 'paper-t60-target', timestamp: '2026-10-14T07:20:00.000Z',
+    status: 'skipped', pass: 'upcoming-t60', reason: 't60-window-expired' }]);
+});
+
+test('sanitizes D1 rows and excludes internal identifiers, hashes, and manifest content', () => {
+  const rows = safeDbRows(JSON.stringify([{ results: [{
+    venue: '丸亀', raceNo: 4, raceDate: '2026-10-14', status: 'scheduled',
+    cutoffAt: '2026-10-14T16:42:00+09:00', cutoffSource: 'boatrace-racelist-cutoff-v1',
+    cutoffObservedAt: '2026-10-14T16:30:00+09:00', secondsToCutoff: 60, secondsToT60Target: 0,
+    entryCount: 6, predictionCount: 120, predictedAt: '2026-10-14T16:40:00Z',
+    hasExperimentalDecision: 0, hasNormalDecision: 1, hasNormalBet: 0, hasHistoricalDecision: 1,
+    quarantined: 0, modelReadyGate: 1, productionT60Target: 1,
+    race_id: 'internal-race-id', artifact_sha256: 'secret-hash', manifest_json: 'sensitive',
+  }] }]));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].venue, '丸亀');
+  assert.equal(rows[0].productionT60Target, true);
+  assert.equal(JSON.stringify(rows).includes('internal-race-id'), false);
+  assert.equal(JSON.stringify(rows).includes('secret-hash'), false);
+  assert.equal(JSON.stringify(rows).includes('sensitive'), false);
 });
