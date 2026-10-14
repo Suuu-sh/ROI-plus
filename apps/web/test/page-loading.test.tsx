@@ -72,7 +72,15 @@ it('boat main page loads only real purchases and performance without exploration
   expect(screen.queryByRole('button', { name: '全期間の購入履歴' })).toBeNull()
   expect(screen.queryByText(/レースを調べる/)).toBeNull()
   expect(screen.queryByText(/レースを調べるから購入できます/)).toBeNull()
-  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?sport=boat&origin=real', '/api/performance/overview?sport=boat&origin=real'])
+  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?sport=boat&origin=real', '/api/performance/overview?sport=boat&origin=real&scope=purchase-history'])
+  const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  window.dispatchEvent(new Event('focus'))
+  await waitFor(() => {
+    expect(fetcher.mock.calls.filter(([url]) => url === '/api/bets?sport=boat&origin=real').length).toBe(2)
+    expect(fetcher.mock.calls.filter(([url]) => url === '/api/performance/overview?sport=boat&origin=real&scope=purchase-history').length).toBe(2)
+  })
+  if (visibility) Object.defineProperty(document, 'visibilityState', visibility)
 })
 it('boat purchase-history surface shows ticket-level experimental purchases in the unified history', async () => {
   const experimentalBet: ExperimentalBet = {
@@ -118,7 +126,7 @@ it('keeps boat race detail links available with real-source research at race URL
   await waitFor(() => expect(fetcher.mock.calls.some(([url]) => url.includes('/rankings?') && url.includes('origin=real'))).toBe(true))
   expect(fetcher.mock.calls.some(([url]) => url === '/api/races/detail-race')).toBe(true)
   expect(fetcher.mock.calls.some(([url]) => url === '/api/bets?sport=boat&origin=real')).toBe(true)
-  expect(fetcher.mock.calls.some(([url]) => url === '/api/performance/overview?sport=boat&origin=real')).toBe(true)
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/performance/overview?sport=boat&origin=real&scope=purchase-history')).toBe(true)
 })
 it('board shows operational performance and only races with recorded purchases', async () => {
   const fetcher = mockReads()
@@ -127,9 +135,9 @@ it('board shows operational performance and only races with recorded purchases',
   expect(screen.getByRole('heading', { name: '運用成績' })).toBeTruthy()
   expect(screen.queryByText('競馬 vs ボートレースを比較')).toBeNull()
   await screen.findByText('実験用仮想残高')
-  expect(fetcher).toHaveBeenCalledTimes(5)
+  expect(fetcher).toHaveBeenCalledTimes(6)
   expect(fetcher.mock.calls.some(([url]) => /\/models|\/races\?|\/rankings|\/collection/.test(url))).toBe(false)
-  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?origin=all', '/api/performance/experimental', '/api/performance/historical-trifecta-experiment', '/api/performance/overview?origin=all'])
+  expect(fetcher.mock.calls.map(([url]) => url).sort()).toEqual(['/api/bets/experimental', '/api/bets?origin=all', '/api/performance/experimental', '/api/performance/historical-trifecta-experiment', '/api/performance/overview?origin=all', '/api/performance/overview?origin=all&scope=purchase-history'])
 })
 it('does not request or show the real experimental ledger in sample origin on Overview', async () => {
   vi.stubGlobal('localStorage', { getItem: (key: string) => key === 'edgelab.origin' ? 'sample' : null, setItem: vi.fn(), removeItem: vi.fn() })
