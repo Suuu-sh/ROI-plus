@@ -87,12 +87,12 @@ test('later delete failure rolls back balance adjustment and child cleanup',()=>
  db.close()
 })
 
-test('per-row D1 guards chunk large target snapshots below 80 KiB',()=>{
+test('per-row D1 guards chunk large target snapshots below 8 KiB',()=>{
  const db=fixture(), data=snapshot(db)
  data.tables.bets=Array.from({length:300},(_,i)=>({id:`large-${i}`,race_id:'r13',selection:'x'.repeat(500)}))
  const statements=buildSnapshotGuardStatements(data)
  assert.ok(statements.length>scopes.length)
- assert.ok(statements.every(sql=>Buffer.byteLength(sql)<=80*1024))
+ assert.ok(statements.every(sql=>Buffer.byteLength(sql)<=8*1024))
  db.close()
 })
 test('non-target preservation allows only an open-to-settled mutable transition',()=>{

@@ -15,8 +15,8 @@ const sqlPath = path.join(backupDir, 'delete-purchase-history-2026-10-13.sql')
 const reportPath = path.join(backupDir, 'delete-report.json')
 const maxRows = 5000
 const maxBytes = 16 * 1024 * 1024
-const maxSqlStatementBytes = 80 * 1024
-const maxSqlStatements = 80
+const maxSqlStatementBytes = 8 * 1024
+const maxSqlStatements = 1000
 const childTable = 'experimental_paper_bet_reconciliations'
 const childTrigger = 'trg_experimental_paper_bet_reconciliations_no_delete'
 const scopes = [
@@ -39,18 +39,21 @@ const protectedScopes = [
   ['daily_summaries', "SELECT * FROM daily_summaries WHERE date<>'2026-10-13' ORDER BY date,sport", 'date', []],
 ]
 function fail(message) { throw new Error(message) }
-function run(args, timeout=60000) {
+function run(args, timeout=60000, stage='remote_d1_operation') {
   const result = spawnSync(process.execPath,[wrangler,...args],{cwd:apiRoot,encoding:'utf8',timeout,maxBuffer:maxBytes,env:{...process.env,CI:'true'}})
   if (result.error || result.status!==0) {
     const output=`${result.stderr||''}\n${result.stdout||''}`
-    const category=result.error?.code==='ETIMEDOUT'?'timeout'
+    const ecode=['ETIMEDOUT','ENOBUFS','ENOENT'].includes(result.error?.code)?result.error.code:null
+    const category=ecode||(/SQLITE_TOOBIG|too long|too large|statement.{0,20}limit|max.{0,20}length/i.test(output)?'statement_limit'
+      :/too many SQL variables|SQLITE_RANGE/i.test(output)?'sql_variable_limit'
+      :/expression tree is too large/i.test(output)?'expression_tree_limit'
+      :/SQLITE_ERROR/i.test(output)?'sqlite_error'
       :/syntax error/i.test(output)?'sql_syntax'
-      :/too long|too large|statement.{0,20}limit|max.{0,20}length/i.test(output)?'statement_limit'
       :/foreign key/i.test(output)?'foreign_key'
       :/transaction|rollback/i.test(output)?'transaction'
       :/unauthorized|authentication|not authenticated/i.test(output)?'auth'
-      :'remote_d1_nonzero'
-    fail(`A bounded remote D1 operation failed [${category}].`)
+      :'remote_d1_nonzero')
+    fail(`A bounded remote D1 operation failed [${stage}:${category}].`)
   }
   return result.stdout
 }
@@ -60,10 +63,10 @@ function parseQuery(output) {
   if (!Array.isArray(payload)||payload.length!==1||payload[0]?.success!==true||!Array.isArray(payload[0].results)||payload[0].results.length>maxRows) fail('Unexpected or oversized bounded-query result.')
   return payload[0].results
 }
-function query(sql) { return parseQuery(run(['d1','execute','roi-plus','--remote','--json','--command',sql])) }
+function query(sql,stage='read_query') { return parseQuery(run(['d1','execute','roi-plus','--remote','--json','--command',sql],60000,stage)) }
 function preflightSnapshot(snapshot) {
   for(const check of buildSnapshotGuardChecks(snapshot)){
-    const rows=query(check.sql)
+    const rows=query(check.sql,`preflight_${check.table}_${check.part}`)
     if(rows.length!==1||Number(rows[0].ok)!==1)fail(`Read-only purchase snapshot preflight mismatch (${check.table}_${check.part}).`)
   }
 }
@@ -211,7 +214,7 @@ async function deleteScoped() {
   const sql=sqlFile(snapshot)
   await writeFile(sqlPath,sql,{mode:0o600})
   if((await stat(sqlPath)).size>maxBytes) fail('Deletion transaction exceeded size limit.')
-  run(['d1','execute','roi-plus','--remote','--file',sqlPath],120000)
+  run(['d1','execute','roi-plus','--remote','--file',sqlPath],120000,'atomic_delete_import')
   const after={}
   for(const [name,queryText] of scopes) after[name]=query(queryText)
   if(after.bets.length||after.daily_summaries.length||after.experimental_paper_bets.length||after.experimental_paper_bet_reconciliations.length||after.historical_trifecta_experiment_bets.length) fail('Target purchase rows remain after deletion.')
