@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTailRecords, safeDbRows } from './diagnose-paper-cron.mjs';
+import { parseTailRecords, safeDbRows, safeRecentOpenRows, safeResultsSettings } from './diagnose-paper-cron.mjs';
 
 test('parses multiline tail JSON, array messages, cron event and known decision event safely', () => {
   const payload = {
@@ -80,4 +80,34 @@ test('sanitizes D1 rows and excludes internal identifiers, hashes, and manifest 
   assert.equal(JSON.stringify(rows).includes('internal-race-id'), false);
   assert.equal(JSON.stringify(rows).includes('secret-hash'), false);
   assert.equal(JSON.stringify(rows).includes('sensitive'), false);
+});
+
+test('sanitizes recent open purchase/result evidence without raw IDs or collection JSON', () => {
+  const rows = safeRecentOpenRows(JSON.stringify([{ results: [{
+    venue: '下関', raceNo: 4, raceDate: '2026-10-14', raceStatus: 'finished',
+    cutoffAt: '2026-10-14T19:03:00+09:00', cutoffSource: 'boatrace-racelist-cutoff-v1', ledger: 'primary',
+    lastPlacedAt: '2026-10-14T19:02:00+09:00', openTickets: 1, resultsCount: 6, payoutCount: 7, finishCount: 6,
+    collectorStartedAt: '2026-10-14T19:10:00+09:00', collectorFinishedAt: '2026-10-14T19:10:03+09:00',
+    collectorStatus: 'failed', collectorRecords: 0, collectorQuality: 'unavailable-or-unsupported',
+    collectorReason: 'source-state-changed', collectorFetchFailure: 'fetch-timeout',
+    race_id: 'private-race-id', error: 'raw error secret', reason_json: '{"payload":"private"}',
+  }] }]));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].ledger, 'primary');
+  assert.equal(rows[0].resultsCount, 6);
+  assert.equal(rows[0].collectorReason, 'source-state-changed');
+  const serialized = JSON.stringify(rows);
+  assert.doesNotMatch(serialized, /private-race-id|raw error secret|private/);
+});
+
+test('reads only timestamp-shaped values for the two results lock settings', () => {
+  const rows = safeResultsSettings(JSON.stringify([{ results: [
+    { key: 'boat_results_ten_minute', value: '2026-10-14T19:10' },
+    { key: 'boat_results_manual_until', value: 'do-not-output-secret-token' },
+  ] }]));
+  assert.deepEqual(rows, [
+    { key: 'boat_results_ten_minute', present: true, timestamp: '2026-10-14T19:10:00.000Z' },
+    { key: 'boat_results_manual_until', present: true, timestamp: null },
+  ]);
+  assert.doesNotMatch(JSON.stringify(rows), /secret-token/);
 });

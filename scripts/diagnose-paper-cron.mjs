@@ -10,12 +10,15 @@ export const CAPTURE_MS = 120_000;
 const MAX_EVENTS = 200;
 const MAX_BUFFER = 2 * 1024 * 1024;
 const TRUSTED_CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1';
-const allowedEvents = new Set(['paper-decision-timing','experimental-paper-decision','historical-trifecta-virtual-experiment','boat-ten-minute-results','paper-t60-target']);
+const allowedEvents = new Set(['paper-decision-timing','experimental-paper-decision','historical-trifecta-virtual-experiment','boat-ten-minute-results','boat-ten-minute-results-collection','paper-t60-target']);
 const reasonAllowlist = new Set([
   'official_entries_incomplete','experimental_forecast_missing_or_invalid','forecast_predates_model',
   'official_archive_missing_or_stale','official_archive_invalid','official_archive_identity_or_odds_invalid',
   'purchase_odds_fetch_failed_or_window_elapsed','no_conservative_positive_edge','ten-minute-pass-failed',
   'official-result-unavailable','t60-window-expired','target-discovery-failed','decision-stage-failed',
+  'results-collection-failed','d1-bind-parameter-limit','source-state-changed','official-page-identity-or-outcome-rejected',
+  'stored-evidence-conflict','saved-registry-incomplete','daily-write-budget-exhausted','refund-outcome-archive-unavailable',
+  'http-status','http-redirect-rejected','body-missing','body-too-large','body-read-failed','utf8-rejected','hash-failed','fetch-timeout','fetch-rejected',
 ]);
 const stackFunctionAllowlist = new Set(['scheduled','autoBetWithReport','experimentalPaperDecision','historicalTrifectaExperimentDecision','collectResults','cron','settleOpen','fetchPurchaseOdds']);
 
@@ -179,21 +182,54 @@ WHERE r.sport='boat' AND r.data_origin='real' AND r.status='scheduled'
   AND julianday(r.betting_cutoff_at)<=julianday('now','+15 minutes')
 ORDER BY productionT60Target DESC,julianday(r.betting_cutoff_at),r.race_no LIMIT 30`;
 
-export function safeDbRows(text) {
+const recentOpenSql = `WITH open_ledger AS (
+  SELECT 'primary' ledger,race_id,MAX(placed_at) lastPlacedAt,COUNT(*) openTickets
+  FROM bets WHERE sport='boat' AND mode='auto' AND decision_phase='primary_t60' AND status='open' AND data_origin='real'
+    AND julianday(placed_at)>=julianday('now','-30 minutes') GROUP BY race_id
+  UNION ALL
+  SELECT 'experimental',race_id,MAX(placed_at),COUNT(*) FROM experimental_paper_bets
+    WHERE status='open' AND data_origin='real' AND julianday(placed_at)>=julianday('now','-30 minutes') GROUP BY race_id
+  UNION ALL
+  SELECT 'historical',race_id,MAX(placed_at),COUNT(*) FROM historical_trifecta_experiment_bets
+    WHERE status='open' AND data_origin='real' AND julianday(placed_at)>=julianday('now','-30 minutes') GROUP BY race_id
+)
+SELECT v.name venue,r.race_no raceNo,r.race_date raceDate,r.status raceStatus,r.betting_cutoff_at cutoffAt,
+  r.betting_cutoff_source cutoffSource,o.ledger,o.lastPlacedAt,o.openTickets,
+  (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real') resultsCount,
+  (SELECT COUNT(*) FROM payouts x WHERE x.race_id=r.id AND x.data_origin='real') payoutCount,
+  (SELECT COUNT(DISTINCT x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order IS NOT NULL) finishCount,
+  cr.started_at collectorStartedAt,cr.finished_at collectorFinishedAt,cr.status collectorStatus,cr.records collectorRecords,
+  CASE WHEN json_valid(cr.reason) THEN json_extract(cr.reason,'$.quality') END collectorQuality,
+  CASE WHEN json_valid(cr.reason) THEN json_extract(cr.reason,'$.reason') END collectorReason,
+  CASE WHEN json_valid(cr.reason) THEN json_extract(cr.reason,'$.fetchFailure.code') END collectorFetchFailure
+FROM open_ledger o JOIN races r ON r.id=o.race_id JOIN venues v ON v.id=r.venue_id
+LEFT JOIN collection_runs cr ON cr.id='boat-result:'||r.id AND cr.source='boatrace-results-worker-v1'
+WHERE r.sport='boat' AND r.data_origin='real' AND r.race_date=strftime('%Y-%m-%d','now','+9 hours')
+ORDER BY julianday(o.lastPlacedAt) DESC LIMIT 20`;
+
+const resultsSettingsSql = `SELECT key,value FROM settings
+WHERE key IN ('boat_results_ten_minute','boat_results_manual_until') ORDER BY key`;
+
+function findResultRows(root) {
+  if (Array.isArray(root)) {
+    for (const item of root) { const rows = findResultRows(item); if (rows !== null) return rows; }
+    return null;
+  }
+  if (!root || typeof root !== 'object') return null;
+  if (Array.isArray(root.results)) return root.results;
+  for (const item of Object.values(root)) { const rows = findResultRows(item); if (rows !== null) return rows; }
+  return null;
+}
+
+function parseD1Rows(text) {
   let root;
   try { root = JSON.parse(text); } catch { return null; }
-  const rows = [];
-  const visit = value => {
-    if (Array.isArray(value)) { for (const item of value) visit(item); return; }
-    if (!value || typeof value !== 'object') return;
-    if (Array.isArray(value.results) && value.results.every(x => x && typeof x === 'object' && ('raceNo' in x || 'modelReadyGate' in x))) {
-      rows.push(...value.results);
-      return;
-    }
-    for (const child of Object.values(value)) visit(child);
-  };
-  visit(root);
-  if (!rows.length) return null;
+  return findResultRows(root);
+}
+
+export function safeDbRows(text) {
+  const rows = parseD1Rows(text);
+  if (!rows?.length || !rows.every(x => x && typeof x === 'object' && ('raceNo' in x || 'modelReadyGate' in x))) return null;
   return rows.slice(0,30).map(row => {
     const venue = typeof row.venue === 'string' && /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}A-Za-z0-9ー・]+$/u.test(row.venue) ? row.venue : undefined;
     const iso = value => {
@@ -220,11 +256,60 @@ export function safeDbRows(text) {
   });
 }
 
-async function queryRemoteD1(cli) {
-  if (!/^\s*WITH\b/i.test(contextSql) || /\b(INSERT|UPDATE|DELETE|REPLACE|ALTER|DROP|CREATE|VACUUM|PRAGMA)\b/i.test(contextSql)) {
+export function safeRecentOpenRows(text) {
+  const rows = parseD1Rows(text);
+  if (!rows || !rows.every(x => x && typeof x === 'object' && 'ledger' in x)) return null;
+  const reasonAllowlistLocal = new Set(['official-result-unavailable','source-state-changed','official-page-identity-or-outcome-rejected',
+    'stored-evidence-conflict','saved-registry-incomplete','daily-write-budget-exhausted','refund-outcome-archive-unavailable',
+    'archived-prerace-evidence-unavailable','http-status','http-redirect-rejected','body-missing','body-too-large','body-read-failed',
+    'utf8-rejected','hash-failed','fetch-timeout','fetch-rejected']);
+  const qualityAllowlist = new Set(['verified-official-outcome-v2','verified-official-refund-outcome-v1','unavailable-or-unsupported']);
+  const iso = value => {
+    if (value == null) return null;
+    const text = String(value);
+    const normalized = /^\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d(?:\.\d+)?)?$/.test(text) ? `${text.replace(' ','T')}Z` : text;
+    const date = Date.parse(normalized);
+    return Number.isFinite(date) ? new Date(date).toISOString() : null;
+  };
+  const num = value => Number.isFinite(Number(value)) && Number(value)>=0 && Number(value)<=100_000 ? Number(value) : null;
+  return rows.slice(0,20).map(row => {
+    const venue = typeof row.venue === 'string' && /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}A-Za-z0-9ー・]+$/u.test(row.venue) ? row.venue : undefined;
+    return {
+      ...(venue ? { venue } : {}), raceNo: Number.isInteger(Number(row.raceNo)) ? Number(row.raceNo) : null,
+      raceDate: /^\d{4}-\d\d-\d\d$/.test(row.raceDate ?? '') ? row.raceDate : null,
+      raceStatus: row.raceStatus === 'finished' || row.raceStatus === 'scheduled' ? row.raceStatus : 'other',
+      cutoffAt: iso(row.cutoffAt), cutoffSource: row.cutoffSource === TRUSTED_CUTOFF_SOURCE ? TRUSTED_CUTOFF_SOURCE : 'other',
+      ledger: ['primary','experimental','historical'].includes(row.ledger) ? row.ledger : 'other',
+      lastPlacedAt: iso(row.lastPlacedAt), openTickets: num(row.openTickets), resultsCount: num(row.resultsCount),
+      payoutCount: num(row.payoutCount), finishCount: num(row.finishCount),
+      collectorStartedAt: iso(row.collectorStartedAt), collectorFinishedAt: iso(row.collectorFinishedAt),
+      collectorStatus: ['success','partial','failed','skipped'].includes(row.collectorStatus) ? row.collectorStatus : null,
+      collectorRecords: num(row.collectorRecords),
+      collectorQuality: qualityAllowlist.has(row.collectorQuality) ? row.collectorQuality : null,
+      collectorReason: reasonAllowlistLocal.has(row.collectorReason) ? row.collectorReason : (row.collectorReason ? 'other' : null),
+      collectorFetchFailure: reasonAllowlistLocal.has(row.collectorFetchFailure) ? row.collectorFetchFailure : (row.collectorFetchFailure ? 'other' : null),
+    };
+  });
+}
+
+export function safeResultsSettings(text) {
+  const rows = parseD1Rows(text);
+  if (!rows || !rows.every(x => x && typeof x === 'object' && ['boat_results_ten_minute','boat_results_manual_until'].includes(x.key))) return null;
+  const timestamp = value => {
+    if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:\d\d)?$/.test(value)) return null;
+    const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`;
+    const n = Date.parse(normalized);
+    return Number.isFinite(n) ? new Date(n).toISOString() : null;
+  };
+  const byKey = new Map(rows.map(row => [row.key,row.value]));
+  return ['boat_results_ten_minute','boat_results_manual_until'].map(key => ({ key, present: byKey.has(key), timestamp: byKey.has(key) ? timestamp(byKey.get(key)) : null }));
+}
+
+async function queryRemoteD1(cli, sql, sanitizer) {
+  if (!/^\s*(?:WITH|SELECT)\b/i.test(sql) || /\b(INSERT|UPDATE|DELETE|REPLACE|ALTER|DROP|CREATE|VACUUM|PRAGMA)\b/i.test(sql)) {
     return { status:'blocked', reason:'read_only_query_guard' };
   }
-  const child = spawn(process.execPath, [cli,'d1','execute','roi-plus','--remote','--yes','--json','--config','wrangler.toml','--command',contextSql], {
+  const child = spawn(process.execPath, [cli,'d1','execute','roi-plus','--remote','--yes','--json','--config','wrangler.toml','--command',sql], {
     cwd: process.cwd(), env: process.env, stdio: ['ignore','pipe','ignore'],
   });
   let output = '';
@@ -239,7 +324,7 @@ async function queryRemoteD1(cli) {
     child.once('error', () => { clearTimeout(timer); resolve(null); });
   });
   if (exitCode !== 0 || tooLarge) return { status: 'unavailable', reason: tooLarge ? 'response_limit' : 'read_query_failed' };
-  const rows = safeDbRows(output);
+  const rows = sanitizer(output);
   return rows ? { status:'available', rowCount: rows.length, rows } : { status:'unavailable', reason:'unrecognized_read_result' };
 }
 
@@ -252,7 +337,11 @@ async function main() {
   const config = join(dir, 'wrangler.toml');
   await writeFile(config, 'name = "roi-plus-api"\ncompatibility_date = "2026-10-09"\n');
   const cli = join(process.cwd(), '../../node_modules/wrangler/bin/wrangler.js');
-  const d1Promise = queryRemoteD1(cli);
+  const d1Promise = Promise.all([
+    queryRemoteD1(cli,contextSql,safeDbRows),
+    queryRemoteD1(cli,recentOpenSql,safeRecentOpenRows),
+    queryRemoteD1(cli,resultsSettingsSql,safeResultsSettings),
+  ]);
   const child = spawn(process.execPath, [cli,'tail','roi-plus-api','--config',config,'--format','json'], {
     cwd: process.cwd(), env: process.env, stdio: ['ignore','pipe','ignore'],
   });
@@ -263,22 +352,24 @@ async function main() {
     const chunk = `${line}\n`;
     if (bufferedChars + chunk.length <= MAX_BUFFER) { chunks.push(chunk); bufferedChars += chunk.length; }
   });
+  const requestedSeconds = process.env.TAIL_DURATION_SECONDS === '240' ? 240 : 120;
   const started = Date.now();
   let exitCode = null;
   let spawnFailed = false;
   await new Promise(resolve => {
-    const timer = setTimeout(() => { child.kill('SIGTERM'); resolve(); }, CAPTURE_MS);
+    const timer = setTimeout(() => { child.kill('SIGTERM'); resolve(); }, requestedSeconds * 1000);
     child.once('close', code => { exitCode = code; clearTimeout(timer); resolve(); });
     child.once('error', () => { spawnFailed = true; clearTimeout(timer); resolve(); });
   });
   rl.close();
   await rm(dir, { recursive: true, force: true });
   const elapsed = Math.round((Date.now() - started) / 1000);
-  const captured = elapsed >= 115 && !spawnFailed;
+  const captured = elapsed >= requestedSeconds - 5 && !spawnFailed;
   const events = parseTailRecords(chunks);
-  const d1Context = await d1Promise;
+  const [scheduleContext,openPurchaseContext,settingsContext] = await d1Promise;
   console.log(JSON.stringify({ status: captured ? 'captured' : 'tail_unavailable', durationSeconds: elapsed,
-    exitCode: Number.isInteger(exitCode) ? exitCode : null, events, d1Context }));
+    exitCode: Number.isInteger(exitCode) ? exitCode : null, events,
+    d1Context:{schedule:scheduleContext,recentOpenPurchases:openPurchaseContext,resultsSettings:settingsContext} }));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

@@ -2,6 +2,13 @@ name: Diagnose paper cron (read-only)
 
 on:
   workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: 'Tail capture window'
+        required: true
+        type: choice
+        options: ['120', '240']
+        default: '120'
 
 permissions:
   contents: read
@@ -9,7 +16,7 @@ permissions:
 jobs:
   tail-paper-cron:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 7
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,6 +31,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TAIL_DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: node ../../scripts/diagnose-paper-cron.mjs > ../../paper-cron-diagnostic.json
       - name: Upload sanitized diagnostic only
         uses: actions/upload-artifact@v4
