@@ -1,4 +1,4 @@
-import { first, type Db } from '../repo/db.js';
+import { all, first, type Db } from '../repo/db.js';
 import { RESULTS_SOURCE, resultUrl } from './collectBoatraceResults.js';
 
 // Shared query-side candidate filter prevents a permanently unsupported early
@@ -27,6 +27,10 @@ export const verifiedSelectedTerminalOutcomeSql = `NOT EXISTS(
 
 export async function verifiedNoRefundCapsize(db: Db, race: { id:string; race_date:string; venue_id:string; race_no:number }, number: number): Promise<boolean> {
   const record=await first<any>(db,'SELECT target_date,status,reason FROM collection_runs WHERE id=? AND source=? AND sport=\'boat\'',`boat-result:${race.id}`,RESULTS_SOURCE);
+  return verifiedNoRefundCapsizeRecord(record,race,number);
+}
+
+export function verifiedNoRefundCapsizeRecord(record: any, race: { id:string; race_date:string; venue_id:string; race_no:number }, number: number, nowMs=Date.now()): boolean {
   if(!record||record.status!=='success'||record.target_date!==race.race_date)return false;
   let evidence:any;
   try{evidence=JSON.parse(record.reason||'{}')}catch{return false;}
@@ -34,10 +38,26 @@ export async function verifiedNoRefundCapsize(db: Db, race: { id:string; race_da
   const fetchedAtMs=typeof evidence?.fetchedAt==='string'&&/(Z|[+-]\d{2}:\d{2})$/i.test(evidence.fetchedAt)?Date.parse(evidence.fetchedAt):NaN;
   return evidence?.raceId===race.id && evidence?.quality==='verified-official-outcome-v2'
     && evidence?.url===expectedUrl && typeof evidence?.sha256==='string' && /^[a-f0-9]{64}$/.test(evidence.sha256)
-    && Number.isFinite(fetchedAtMs) && fetchedAtMs<=Date.now()
+    && Number.isFinite(fetchedAtMs) && fetchedAtMs<=nowMs
     && evidence?.refundTablePresent===true && evidence?.refundPolicy==='official-post-start-capsize-v1'
     && Array.isArray(evidence?.nonRefundableNumbers) && evidence.nonRefundableNumbers.includes(number)
     && Array.isArray(evidence?.terminalEntries) && evidence.terminalEntries.some((x:any)=>x?.number===number&&x?.finishCode==='転覆');
+}
+
+/** Read immutable result evidence once per race set, rather than once per ticket. */
+export async function loadTrifectaSettlementEvidence(db: Db, races: Array<{id:string; race_date:string; venue_id:string; race_no:number}>) {
+  const ids=[...new Set(races.map(r=>r.id))];
+  const empty={entries:new Map<string,any[]>(),results:new Map<string,any[]>(),payouts:new Map<string,any[]>(),proofs:new Map<string,any>()};
+  if(!ids.length)return empty;
+  const encoded=JSON.stringify(ids);
+  const [entries,results,payouts,proofs]=await Promise.all([
+    all<any>(db,"SELECT race_id,number,features_json FROM entries WHERE data_origin='real' AND race_id IN (SELECT value FROM json_each(?)) ORDER BY race_id,number",encoded),
+    all<any>(db,"SELECT race_id,number,finish_order FROM results WHERE data_origin='real' AND race_id IN (SELECT value FROM json_each(?)) ORDER BY race_id,finish_order",encoded),
+    all<any>(db,"SELECT race_id,selection,payout FROM payouts WHERE data_origin='real' AND bet_type='trifecta' AND payout>0 AND race_id IN (SELECT value FROM json_each(?)) ORDER BY race_id,selection",encoded),
+    all<any>(db,"SELECT id,target_date,status,reason FROM collection_runs WHERE source=? AND sport='boat' AND id IN (SELECT 'boat-result:'||value FROM json_each(?))",RESULTS_SOURCE,encoded),
+  ]);
+  const byRace=(rows:any[],key='race_id')=>{const map=new Map<string,any[]>();for(const row of rows){const list=map.get(String(row[key]))??[];list.push(row);map.set(String(row[key]),list)}return map};
+  return {entries:byRace(entries),results:byRace(results),payouts:byRace(payouts),proofs:new Map(proofs.map((row:any)=>[String(row.id).slice('boat-result:'.length),row]))};
 }
 
 /** Determine a trifecta outcome from official partial standings without

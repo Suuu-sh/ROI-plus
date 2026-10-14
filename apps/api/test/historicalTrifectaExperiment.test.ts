@@ -116,6 +116,27 @@ describe('historical BASE dedicated T-60 virtual experiment', () => {
     f.sqlite.close()
   })
 
+  it('settles eligible historical backlog beyond the former 32-ticket limit in bounded batches', async () => {
+    const f = createFixture('2026-10-15T02:40:00+09:00')
+    f.sqlite.prepare("UPDATE races SET status='finished' WHERE id=?").run(f.raceId)
+    for (let number=1;number<=6;number++) f.sqlite.prepare("INSERT INTO results(race_id,number,finish_order,data_origin) VALUES(?,?,?,'real')").run(f.raceId,number,number)
+    f.sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin) VALUES(?,'trifecta','1-2-3',1700,'real')").run(f.raceId)
+    f.sqlite.prepare(`INSERT INTO historical_trifecta_experiment_decisions
+      (id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,snapshot_json)
+      VALUES('history-backlog','boat-trifecta-historical-base-v1',?,'boat-trifecta-historical-base-20261014','2026-10-15T00:00:00Z','placed',1000,'{}')`).run(f.raceId)
+    const add=f.sqlite.prepare(`INSERT INTO historical_trifecta_experiment_bets
+      (id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+      VALUES(?,'history-backlog',?,'boat-trifecta-historical-base-20261014',?,100,0.1,0.01,20,1,'2026-10-15T00:00:00Z','open','real')`)
+    const selections=Array.from({length:6},(_,i)=>i+1).flatMap(a=>Array.from({length:6},(_,i)=>i+1).filter(b=>b!==a)
+      .flatMap(b=>Array.from({length:6},(_,i)=>i+1).filter(c=>c!==a&&c!==b).map(c=>`${a}-${b}-${c}`))).filter(s=>s!=='1-2-3')
+    for(let i=0;i<41;i++)add.run(`history-backlog-${i}`,f.raceId,selections[i])
+    expect(await settleHistoricalTrifectaExperimentOpen(f.DB)).toBe(41)
+    expect(f.sqlite.prepare("SELECT status,COUNT(*) count FROM historical_trifecta_experiment_bets GROUP BY status").all())
+      .toEqual([{status:'lost',count:41}])
+    expect(await settleHistoricalTrifectaExperimentOpen(f.DB)).toBe(0)
+    f.sqlite.close()
+  })
+
   it('uses fresh official current odds and writes only its isolated virtual ledger', async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-15T03:00:00.000Z'))
     const f = createFixture(jst(Date.now() - 30_000))

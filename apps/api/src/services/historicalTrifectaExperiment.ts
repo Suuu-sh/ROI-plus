@@ -5,7 +5,7 @@ import { predictHistoricalTrifecta, historicalTrifectaModelMetadata, HISTORICAL_
 import { primaryPaperTiming } from './paperTiming.js'
 import { sizeExperimentalPortfolioResult } from './experimentalSizing.js'
 import { HISTORICAL_ARCHIVE_SCHEMA, type HistoricalObservation } from './historicalTrifectaArchive.js'
-import { verifiedNoRefundCapsize, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './trifectaSettlement.js'
+import { loadTrifectaSettlementEvidence, verifiedNoRefundCapsizeRecord, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './trifectaSettlement.js'
 
 const CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1'
 const MODEL_TRAINED_AT = Date.parse('2026-10-13T16:21:26.363521Z')
@@ -204,13 +204,15 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
         (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||
         (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3))
     AND ${verifiedSelectedTerminalOutcomeSql}
-    ORDER BY b.placed_at,b.id LIMIT 32`)
-  let count = 0
+    ORDER BY b.placed_at,b.id`)
+  const races=[...new Map(open.map((b:any)=>[String(b.race_id),{id:String(b.race_id),race_date:String(b.race_date),venue_id:String(b.venue_id),race_no:Number(b.race_no)}])).values()]
+  const evidence=await loadTrifectaSettlementEvidence(db,races)
+  const settlements:any[]=[]
   for (const bet of open) {
-    const results = await all<any>(db, `SELECT number,finish_order FROM results WHERE race_id=? AND data_origin='real' ORDER BY finish_order`, bet.race_id)
-    const entries = await all<any>(db, `SELECT number,features_json FROM entries WHERE race_id=? AND data_origin='real' ORDER BY number`, bet.race_id)
+    const results = evidence.results.get(String(bet.race_id))??[]
+    const entries = evidence.entries.get(String(bet.race_id))??[]
     const entryNumbers = entries.map(e => Number(e.number)), resultNumbers = results.map(r => Number(r.number))
-    const payouts = await all<any>(db, `SELECT selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND payout>0`, bet.race_id)
+    const payouts = evidence.payouts.get(String(bet.race_id))??[]
     if (entryNumbers.length !== 6 || entryNumbers.some((n, i) => n !== i + 1)
       || new Set(resultNumbers).size !== results.length || resultNumbers.some(n => !entryNumbers.includes(n))) continue
     const mappedEntries=entries.map(e => ({
@@ -219,7 +221,7 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
     const verifiedTerminalNumbers:number[]=[]
     for(const entry of mappedEntries){
       if(entry.finishCode==='転覆'&&String(bet.selection).split('-').includes(String(entry.number))
-        &&await verifiedNoRefundCapsize(db,{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no},entry.number))verifiedTerminalNumbers.push(entry.number)
+        &&verifiedNoRefundCapsizeRecord(evidence.proofs.get(String(bet.race_id)),{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no},entry.number))verifiedTerminalNumbers.push(entry.number)
     }
     const outcome = verifiedTrifectaOutcome(String(bet.selection), mappedEntries,
       results.map(r => ({ number: Number(r.number), finishOrder: Number(r.finish_order) })),
@@ -227,15 +229,22 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
     if (!outcome) continue
     const won = outcome.won
     const payout = won ? Math.floor(Number(bet.stake) * outcome.payoutPer100 / 100) : 0
-    if (!db.batch) break
-    const settledAt = new Date().toISOString()
-    const changes = await db.batch([
-      db.prepare(`UPDATE historical_trifecta_experiment_bets SET status=?,payout=?,profit=?,settled_at=? WHERE id=? AND status='open'`)
-        .bind(won ? 'won' : 'lost', payout, payout - Number(bet.stake), settledAt, bet.id),
-      db.prepare(`UPDATE historical_trifecta_experiment_bankroll SET available_balance=available_balance+?,updated_at=? WHERE experiment_key=? AND changes()>0`)
-        .bind(payout, settledAt, HISTORICAL_TRIFECTA_EXPERIMENT_KEY),
-    ]) as any[]
-    count += Number(changes?.[0]?.meta?.changes ?? 0)
+    settlements.push({bet,payout,status:won?'won':'lost'})
+  }
+  if(!db.batch)return 0
+  let count=0
+  // Keep each atomic D1 batch below a conservative 80-statement ceiling.
+  for(let start=0;start<settlements.length;start+=40){
+    const chunk=settlements.slice(start,start+40), settledAt=new Date().toISOString(), statements:any[]=[]
+    for(const item of chunk){
+      const {bet,payout,status}=item
+      statements.push(db.prepare(`UPDATE historical_trifecta_experiment_bets SET status=?,payout=?,profit=?,settled_at=? WHERE id=? AND status='open'`)
+        .bind(status,payout,payout-Number(bet.stake),settledAt,bet.id))
+      statements.push(db.prepare(`UPDATE historical_trifecta_experiment_bankroll SET available_balance=available_balance+?,updated_at=? WHERE experiment_key=? AND changes()>0`)
+        .bind(payout,settledAt,HISTORICAL_TRIFECTA_EXPERIMENT_KEY))
+    }
+    const changes=await db.batch(statements) as any[]
+    for(let i=0;i<chunk.length;i++)count+=Number(changes?.[i*2]?.meta?.changes??0)
   }
   return count
 }

@@ -1,7 +1,7 @@
 import { normalHistorySnapshot, resetNormalHistory, validSnapshot } from './services/resetNormalHistory.js';
 import { fetchPurchaseOdds, purchaseOddsContext, type PurchaseOdds, type PurchaseOddsContext } from './services/purchaseOdds.js';
 import { finalTrifectaOdds } from './services/finalTrifectaOdds.js';
-import { verifiedNoRefundCapsize, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './services/trifectaSettlement.js';
+import { loadTrifectaSettlementEvidence, verifiedNoRefundCapsize, verifiedNoRefundCapsizeRecord, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './services/trifectaSettlement.js';
 import { collectionIssues } from './services/collectionIssues.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
@@ -510,26 +510,15 @@ async function settleExperimentalOpen(db: Db) {
        (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||
        (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3))
    AND ${verifiedSelectedTerminalOutcomeSql}
-   ORDER BY b.placed_at,b.id LIMIT 32`);
- let settled=0;
+   ORDER BY b.placed_at,b.id`);
+
+ const races=[...new Map(open.map((b:any)=>[String(b.race_id),{id:String(b.race_id),race_date:String(b.race_date),venue_id:String(b.venue_id),race_no:Number(b.race_no)}])).values()];
+ const evidence=await loadTrifectaSettlementEvidence(db,races);
+ const settlements:any[]=[];
  for(const bet of open){
-   const integrity=await first<any>(db,`SELECT
-      (SELECT COUNT(*) FROM entries WHERE race_id=? AND data_origin='real') entry_count,
-      (SELECT COUNT(*) FROM results WHERE race_id=? AND data_origin='real') result_count,
-      (SELECT COUNT(DISTINCT number) FROM results WHERE race_id=? AND data_origin='real') distinct_count,
-      (SELECT COUNT(DISTINCT finish_order) FROM results WHERE race_id=? AND data_origin='real') order_count,
-      (SELECT MIN(finish_order) FROM results WHERE race_id=? AND data_origin='real') min_order,
-      (SELECT MAX(finish_order) FROM results WHERE race_id=? AND data_origin='real') max_order,
-      (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin='real' AND ${terminalFinishCodeSql}) terminal_count`,
-     bet.race_id,bet.race_id,bet.race_id,bet.race_id,bet.race_id,bet.race_id,bet.race_id);
-   if(!integrity||integrity.entry_count!==6||integrity.result_count+integrity.terminal_count!==6
-      ||integrity.distinct_count!==integrity.result_count||integrity.order_count!==integrity.result_count
-      ||integrity.min_order!==1||integrity.max_order!==integrity.result_count)continue;
-   const [order,entries]=await Promise.all([
-     all<any>(db,'SELECT number,finish_order FROM results WHERE race_id=? AND data_origin=\'real\' ORDER BY finish_order',bet.race_id),
-     all<any>(db,'SELECT number,features_json FROM entries WHERE race_id=? AND data_origin=\'real\' ORDER BY number',bet.race_id),
-   ]);
-   const payouts=await all<any>(db,"SELECT selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND payout>0",bet.race_id);
+   const order=evidence.results.get(String(bet.race_id))??[];
+   const entries=evidence.entries.get(String(bet.race_id))??[];
+   const payouts=evidence.payouts.get(String(bet.race_id))??[];
    const mappedEntries=entries.map((entry:any)=>{
      let finishCode:string|null=null;try{const parsed=JSON.parse(entry.features_json??'{}');if(typeof parsed.finish_code==='string')finishCode=parsed.finish_code;}catch{/* malformed metadata stays unknown */}
      return {number:Number(entry.number),finishCode};
@@ -537,21 +526,28 @@ async function settleExperimentalOpen(db: Db) {
    const verifiedTerminalNumbers:number[]=[];
    for(const entry of mappedEntries){
      if(isTerminalFinishCode(entry.finishCode)&&String(bet.selection).split('-').includes(String(entry.number))
-       &&await verifiedNoRefundCapsize(db,{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no},entry.number))verifiedTerminalNumbers.push(entry.number);
+       &&verifiedNoRefundCapsizeRecord(evidence.proofs.get(String(bet.race_id)),{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no},entry.number))verifiedTerminalNumbers.push(entry.number);
    }
    const outcome=verifiedTrifectaOutcome(String(bet.selection),mappedEntries,
      order.map((row:any)=>({number:Number(row.number),finishOrder:Number(row.finish_order)})),
      payouts.map((row:any)=>({selection:String(row.selection),payout:Number(row.payout)})),verifiedTerminalNumbers);
    if(!outcome)continue;
    const won=outcome.won,payout=won?payoutYen(Number(bet.stake),outcome.payoutPer100):0;
-   if(!await reserveWorkerWrites(db,2))break;
-   if(!db.batch)break;
-   const settledAt=now();
-   const results=await db.batch([
-     db.prepare("UPDATE experimental_paper_bets SET status=?,payout=?,profit=?,settled_at=? WHERE id=? AND status='open'").bind(won?'won':'lost',payout,payout-Number(bet.stake),settledAt,bet.id),
-     db.prepare("UPDATE experimental_bankroll SET available_balance=available_balance+?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND changes()>0").bind(payout,settledAt),
-   ]) as any[];
-   settled+=Number(results?.[0]?.meta?.changes??0);
+   settlements.push({bet,won,payout});
+ }
+ if(!db.batch)return 0;
+ let settled=0;
+ for(let start=0;start<settlements.length;start+=40){
+   const chunk=settlements.slice(start,start+40);
+   if(!await reserveWorkerWrites(db,chunk.length*2))break;
+   const settledAt=now(),statements:Statement[]=[];
+   for(const item of chunk){
+     const {bet,won,payout}=item;
+     statements.push(db.prepare("UPDATE experimental_paper_bets SET status=?,payout=?,profit=?,settled_at=? WHERE id=? AND status='open'").bind(won?'won':'lost',payout,payout-Number(bet.stake),settledAt,bet.id));
+     statements.push(db.prepare("UPDATE experimental_bankroll SET available_balance=available_balance+?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND changes()>0").bind(payout,settledAt));
+   }
+   const results=await db.batch(statements) as any[];
+   for(let i=0;i<chunk.length;i++)settled+=Number(results?.[i*2]?.meta?.changes??0);
  }
  return settled;
 }
