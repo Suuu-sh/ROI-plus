@@ -9,6 +9,7 @@ import { boatraceResultPage } from './fixtures/boatraceResultPage.js';
 import { finalTrifectaPage } from './fixtures/finalTrifectaPage.js';
 import { beforeinfoUrl } from '../src/services/boatraceBeforeinfo.js';
 import { raceListUrl } from '../src/services/boatraceRaceList.js';
+import { loadVerifiedRefundOutcome } from '../src/services/trifectaSettlement.js';
 import worker,{app,settleOpen} from '../src/index.js';
 const root=resolve(import.meta.dirname,'../../..');
 const now=new Date('2026-10-11T04:00:00Z'),raceDate='2026-10-11';
@@ -23,6 +24,11 @@ function seed(raceNo=1,origin='real',status='open',postTime='2026-10-11T03:00:00
   return raceId;
 }
 const page=(raceNo=1,venueCode='09')=>boatraceResultPage({raceDate,venueCode,raceNo});
+const refundOutcomePage=(raceNo=1,venueCode='09')=>boatraceResultPage({raceDate,venueCode,raceNo,finishOrder:[1,3,5,4,6,2]})
+  .replace(/<div class="grid"><div class="table1"><table class="is-w495">[\s\S]*?<\/table><\/div><\/div>/,'')
+  .replace('&yen;3,770','&yen;590').replace('&yen;430','&yen;120')
+  .replace('<tbody><tr><td><div class="numberSet1"><div class="numberSet1_row"></div><div class="numberSet1_row"></div></div></td></tr></tbody>',
+    '<tbody><tr><td><div class="numberSet1"><div class="numberSet1_row"><span class="numberSet1_number">2</span></div></div></td></tr></tbody>');
 const fetchPage=async(input:string)=>{const url=new URL(input);return new Response(page(Number(url.searchParams.get('rno')),url.searchParams.get('jcd')??'09'),{headers:{'content-type':'text/html; charset=utf-8'}})};
 function seedT60Archive(raceNo=1){
   const raceId=seed(raceNo);sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
@@ -120,6 +126,57 @@ describe('purchased real boat results',()=>{
     expect(sqlite.prepare("SELECT status,COUNT(*) count FROM bets WHERE race_id=? AND bet_type='trifecta' GROUP BY status").all(raceId))
       .toEqual([{status:'lost',count:3}]);
     expect(await selectResultsTargets(DB,new Date(now.getTime()+20_000))).toEqual([]);
+  });
+  it('settles a refund-only official result against the saved T-60 registry without inserting ranks',async()=>{
+    const raceId=seedT60Archive(3);
+    sqlite.prepare(`INSERT INTO historical_trifecta_experiment_decisions
+      (id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,snapshot_json)
+      VALUES('refund-only-decision','boat-trifecta-historical-base-v1',?,'boat-trifecta-historical-base-20261014','2026-10-11T02:00:00Z','placed',1000,'{}')`).run(raceId);
+    sqlite.prepare('UPDATE historical_trifecta_experiment_bankroll SET available_balance=99000 WHERE experiment_key=?').run('boat-trifecta-historical-base-v1');
+    const selections=['1-3-5','1-2-3','2-1-3','1-4-5','4-5-6','3-4-5','5-4-3','6-1-3','6-5-4','3-1-4'];
+    const add=sqlite.prepare(`INSERT INTO historical_trifecta_experiment_bets
+      (id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+      VALUES(?,'refund-only-decision',?,'boat-trifecta-historical-base-20261014',?,100,0.1,0.01,20,1,'2026-10-11T02:00:00Z','open','real')`);
+    selections.forEach((selection,index)=>add.run(`refund-only-${index}`,raceId,selection));
+    expect(await collectResults(DB,now,{fetch:async()=>new Response(refundOutcomePage(3)),sleep:async()=>{}})).toMatchObject({status:'success',verified:1,records:3});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(raceId)).toMatchObject({n:0});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM payouts WHERE race_id=?').get(raceId)).toMatchObject({n:0});
+    const proof=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs WHERE id=?').get(`boat-result:${raceId}`) as {reason:string}).reason);
+    expect(proof).toMatchObject({quality:'verified-official-refund-outcome-v1',refundNumbers:[2],payouts:[
+      {betType:'trifecta',selection:'1-3-5',payout:590},{betType:'win',selection:'1',payout:120},
+    ],archiveId:`${raceId}:capture:${Date.parse('2026-10-11T02:58:00.000Z')}`});
+    const writeProof=(value:any)=>sqlite.prepare('UPDATE collection_runs SET reason=? WHERE id=?').run(JSON.stringify(value),`boat-result:${raceId}`);
+    const verifiedRace={id:raceId,race_date:raceDate,venue_id:'09',race_no:3,betting_cutoff_at:'2026-10-11T03:00:00.000Z'};
+    expect(await loadVerifiedRefundOutcome(DB,verifiedRace)).not.toBeNull();
+    writeProof({...proof,payouts:proof.payouts.map((p:any)=>p.betType==='win'?{...p,selection:'3'}:p)});
+    expect(await loadVerifiedRefundOutcome(DB,verifiedRace)).toBeNull();
+    writeProof({...proof,url:proof.url.replace('rno=3','rno=4')});
+    expect(await loadVerifiedRefundOutcome(DB,verifiedRace)).toBeNull();
+    writeProof({...proof,archiveSha256:'f'.repeat(64)});
+    expect(await loadVerifiedRefundOutcome(DB,verifiedRace)).toBeNull();
+    writeProof({...proof,fetchedAt:'2099-01-01T00:00:00Z'});
+    expect(await loadVerifiedRefundOutcome(DB,verifiedRace)).toBeNull();
+    writeProof({...proof,fetchedAt:'2026-10-11T03:00:00'});
+    expect(await loadVerifiedRefundOutcome(DB,verifiedRace)).toBeNull();
+    writeProof(proof);
+    sqlite.prepare("UPDATE entries SET features_json=? WHERE race_id=? AND number=1 AND data_origin='real'").run(JSON.stringify({racer_id:'9999'}),raceId);
+    expect(await loadVerifiedRefundOutcome(DB,verifiedRace)).toBeNull();
+    sqlite.prepare("UPDATE entries SET features_json=? WHERE race_id=? AND number=1 AND data_origin='real'").run(JSON.stringify({racer_id:'4001'}),raceId);
+    expect(await loadVerifiedRefundOutcome(DB,verifiedRace)).not.toBeNull();
+    expect(await settleOpen(DB)).toBe(10);
+    expect(sqlite.prepare('SELECT selection,status,payout,profit FROM historical_trifecta_experiment_bets WHERE race_id=? ORDER BY selection').all(raceId)).toEqual([
+      {selection:'1-2-3',status:'void',payout:100,profit:0},{selection:'1-3-5',status:'won',payout:590,profit:490},
+      {selection:'1-4-5',status:'lost',payout:0,profit:-100},{selection:'2-1-3',status:'void',payout:100,profit:0},
+      {selection:'3-1-4',status:'lost',payout:0,profit:-100},{selection:'3-4-5',status:'lost',payout:0,profit:-100},
+      {selection:'4-5-6',status:'lost',payout:0,profit:-100},{selection:'5-4-3',status:'lost',payout:0,profit:-100},
+      {selection:'6-1-3',status:'lost',payout:0,profit:-100},{selection:'6-5-4',status:'lost',payout:0,profit:-100},
+    ]);
+    expect(sqlite.prepare('SELECT available_balance FROM historical_trifecta_experiment_bankroll WHERE experiment_key=?').get('boat-trifecta-historical-base-v1'))
+      .toMatchObject({available_balance:99790});
+    expect(await settleOpen(DB)).toBe(0);
+    expect(sqlite.prepare('SELECT available_balance FROM historical_trifecta_experiment_bankroll WHERE experiment_key=?').get('boat-trifecta-historical-base-v1'))
+      .toMatchObject({available_balance:99790});
+    expect(await selectResultsTargets(DB,new Date(now.getTime()+60_000))).toEqual([]);
   });
   it('keeps a capsize ticket open when the refund table is missing',async()=>{
     const raceId=seed();sqlite.prepare("UPDATE bets SET selection='6' WHERE id=?").run(`${raceId}-bet`);

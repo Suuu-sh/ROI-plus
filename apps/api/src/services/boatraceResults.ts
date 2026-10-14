@@ -14,6 +14,10 @@ export type BoatraceResults = {
   nonRefundableNumbers: number[];
   payouts: Array<{ betType: 'win' | 'trifecta'; selection: string; payout: number }>;
 };
+export type BoatraceRefundOutcome = {
+  refundNumbers: number[];
+  payouts: Array<{ betType: 'win' | 'trifecta'; selection: string; payout: number }>;
+};
 
 const OFFICIAL_HOST = 'www.boatrace.jp';
 const RESULT_PATH = '/owpc/pc/race/raceresult';
@@ -114,6 +118,61 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   return { results: numericRows.map(({ number, finishOrder }) => ({ number, finishOrder: finishOrder! })),
     terminalEntries: terminalRows.map(({number,finishCode})=>({number,finishCode:finishCode!})),
     refundTablePresent: refundTables.length === 1, nonRefundableNumbers, payouts };
+}
+
+/** Parse only explicit refunds and official payouts when the official result
+ * page omits the finish table. This intentionally provides no rank labels. */
+export function parseBoatraceRefundOutcome(html: string, expected: BoatraceResultExpected): BoatraceRefundOutcome {
+  if (typeof html !== 'string' || html.length === 0) fail();
+  validateExpected(expected);
+  const expectedDate=expected.raceDate.replaceAll('-','');
+  if(!sameIdentity(officialResultIdentity(expected.url),expectedDate,expected.venueCode,expected.raceNo))fail();
+  const nonHeaderText=html.replace(/<thead\b[^>]*>[\s\S]*?<\/thead>/gi,'');
+  if(/中止|不成立|同着/.test(text(nonHeaderText)))fail();
+  validateSelectedResultTab(html,expectedDate,expected.venueCode,expected.raceNo);
+  const tables=[...html.matchAll(/<table\b[^>]*>[\s\S]*?<\/table>/gi)].map(match=>match[0]);
+  if(tables.some(table=>{
+    const head=table.match(/<thead\b[^>]*>([\s\S]*?)<\/thead>/i)?.[1]??'';
+    const labels=[...head.matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi)].map(match=>text(match[1]));
+    return labels.includes('着')&&labels.includes('枠')&&labels.includes('ボートレーサー');
+  }))fail();
+  const refundTables=tables.filter(table=>/<th\b[^>]*>\s*返還\s*<\/th>/i.test(table));
+  if(refundTables.length!==1)fail();
+  const bodies=[...refundTables[0].matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)];
+  if(!bodies.length)fail();
+  const refundNumbers:number[]=[];
+  for(const body of bodies)for(const row of body[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){
+    const cells=[...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map(match=>text(match[1])).filter(Boolean);
+    for(const value of cells){const number=digit(value);if(!number)fail();refundNumbers.push(number);}
+  }
+  if(!refundNumbers.length||new Set(refundNumbers).size!==refundNumbers.length)fail();
+  const payouts=parsePayouts(html);
+  const trifecta=payouts.filter(payout=>payout.betType==='trifecta');
+  const win=payouts.filter(payout=>payout.betType==='win');
+  if(trifecta.length!==1||win.length!==1
+    ||trifecta[0].selection.split('-')[0]!==win[0].selection
+    ||trifecta[0].selection.split('-').some(value=>refundNumbers.includes(Number(value))))fail();
+  return {refundNumbers:refundNumbers.sort((a,b)=>a-b),payouts};
+}
+
+function validateSelectedResultTab(html:string,expectedDate:string,venueCode:string,raceNo:number):void {
+  const venueImage=html.match(/<img\b[^>]*\bsrc\s*=\s*["'][^"']*\/text_place2_(\d{2})\.png(?:\?[^"']*)?["'][^>]*>/i);
+  if(!venueImage||venueImage[1]!==venueCode)fail();
+  const activeDate=html.match(/<li\b[^>]*\bclass\s*=\s*["'][^"']*\bis-active2\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/i)?.[1];
+  const dateLabel=activeDate?text(activeDate).match(/(\d{1,2})月(\d{1,2})日/):null;
+  if(!dateLabel||Number(dateLabel[1])!==Number(expectedDate.slice(4,6))||Number(dateLabel[2])!==Number(expectedDate.slice(6,8)))fail();
+  const schedule=html.match(/<table\b[^>]*>[\s\S]*?<\/table>/gi)?.find(table=>/<th\b[^>]*>\s*レース\s*<\/th>/i.test(table));
+  if(!schedule)fail();
+  const selected=[...schedule.matchAll(/<th\b([^>]*)>([\s\S]*?)<\/th>/gi)].filter(match=>{
+    if(/\bis-thColor[23]\b/i.test(match[1]))return false;
+    const href=match[2].match(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
+    return !!href&&isOfficialResultLink(href);
+  });
+  if(selected.length!==1)fail();
+  const href=selected[0][2].match(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
+  if(!href||!identityFromLink(href,true,expectedDate,venueCode,raceNo))fail();
+  const tab=html.match(/<div\b[^>]*\bclass\s*=\s*["'][^"']*\btab3\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1];
+  if(!tab||!/<li\b[^>]*\bclass\s*=\s*["'][^"']*\bis-active\b[^"']*["'][^>]*>\s*<span[^>]*>\s*<span>\s*結果\s*<\/span>/i.test(tab))fail();
 }
 
 // Official result pages use short markers in the finish column. Keep the

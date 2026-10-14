@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseBoatraceResults, type BoatraceResultExpected } from '../src/services/boatraceResults.js';
+import { parseBoatraceRefundOutcome, parseBoatraceResults, type BoatraceResultExpected } from '../src/services/boatraceResults.js';
 import { boatraceResultPage } from './fixtures/boatraceResultPage.js';
 
 const identity = { raceDate: '2026-10-11', venueCode: '18', raceNo: 7 };
@@ -39,6 +39,24 @@ describe('official BOAT RACE result parser', () => {
 
   it('accepts the normal empty refund table even though its heading says 返還', () => {
     expect(parseBoatraceResults(boatraceResultPage(identity), expected).payouts).toHaveLength(2);
+  });
+
+  it('parses an explicitly refunded no-rank page without manufacturing finish labels',()=>{
+    const html=boatraceResultPage({ ...identity,finishOrder:[1,3,5,4,6,2] })
+      .replace(/<div class="grid"><div class="table1"><table class="is-w495">[\s\S]*?<\/table><\/div><\/div>/,'')
+      .replace('&yen;3,770','&yen;590').replace('&yen;430','&yen;120')
+      .replace('<tbody><tr><td><div class="numberSet1"><div class="numberSet1_row"></div><div class="numberSet1_row"></div></div></td></tr></tbody>',
+        '<tbody><tr><td><div class="numberSet1"><div class="numberSet1_row"><span class="numberSet1_number">2</span></div></div></td></tr></tbody>');
+    expect(parseBoatraceRefundOutcome(html,expected)).toEqual({refundNumbers:[2],payouts:[
+      {betType:'trifecta',selection:'1-3-5',payout:590},{betType:'win',selection:'1',payout:120},
+    ]});
+    expect(()=>parseBoatraceRefundOutcome(html.replace('>2</span>','>5</span>'),expected)).toThrow('official result page rejected');
+    expect(()=>parseBoatraceRefundOutcome(html.replace('<span class="numberSet1_number">3</span><span class="numberSet1_number">5</span>',
+      '<span class="numberSet1_number">2</span><span class="numberSet1_number">5</span>'),expected)).toThrow('official result page rejected');
+    expect(()=>parseBoatraceRefundOutcome(html.replace('>1</span></div></td><td><span class="is-payout1">&yen;120',
+      '>3</span></div></td><td><span class="is-payout1">&yen;120'),expected)).toThrow('official result page rejected');
+    expect(()=>parseBoatraceRefundOutcome(`${html}<div>中止</div>`,expected)).toThrow('official result page rejected');
+    expect(()=>parseBoatraceRefundOutcome(html,{...expected,url:expected.url.replace('rno=7','rno=8')})).toThrow('official result page rejected');
   });
 
   it('rejects refund boat numbers even when the refund table has no status text', () => {

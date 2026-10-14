@@ -1,5 +1,6 @@
 import { all, first, type Db } from '../repo/db.js';
 import { RESULTS_SOURCE, resultUrl } from './collectBoatraceResults.js';
+import { boatArchiveEvidenceValid } from './boatArchiveEvidence.js';
 
 // Shared query-side candidate filter prevents a permanently unsupported early
 // open ticket from occupying each bounded settlement batch ahead of later
@@ -25,6 +26,12 @@ export const verifiedSelectedTerminalOutcomeSql = `NOT EXISTS(
     ))
 )`;
 
+export const verifiedOfficialRefundOutcomeSql = `EXISTS(SELECT 1 FROM collection_runs rf WHERE rf.id='boat-result:'||r.id
+  AND rf.source='boatrace-results-worker-v1' AND rf.sport='boat' AND rf.status='success' AND rf.target_date=r.race_date
+  AND json_valid(rf.reason) AND json_extract(rf.reason,'$.quality')='verified-official-refund-outcome-v1'
+  AND json_extract(rf.reason,'$.raceId')=r.id AND json_type(rf.reason,'$.refundNumbers')='array'
+  AND json_type(rf.reason,'$.payouts')='array' AND json_extract(rf.reason,'$.archiveId') IS NOT NULL)`;
+
 export async function verifiedNoRefundCapsize(db: Db, race: { id:string; race_date:string; venue_id:string; race_no:number }, number: number): Promise<boolean> {
   const record=await first<any>(db,'SELECT target_date,status,reason FROM collection_runs WHERE id=? AND source=? AND sport=\'boat\'',`boat-result:${race.id}`,RESULTS_SOURCE);
   return verifiedNoRefundCapsizeRecord(record,race,number);
@@ -42,6 +49,46 @@ export function verifiedNoRefundCapsizeRecord(record: any, race: { id:string; ra
     && evidence?.refundTablePresent===true && evidence?.refundPolicy==='official-post-start-capsize-v1'
     && Array.isArray(evidence?.nonRefundableNumbers) && evidence.nonRefundableNumbers.includes(number)
     && Array.isArray(evidence?.terminalEntries) && evidence.terminalEntries.some((x:any)=>x?.number===number&&x?.finishCode==='転覆');
+}
+
+export type VerifiedRefundOutcome={refundNumbers:number[];payouts:Array<{betType:'win'|'trifecta';selection:string;payout:number}>};
+export async function loadVerifiedRefundOutcome(db:Db,race:{id:string;race_date:string;venue_id:string;race_no:number;betting_cutoff_at?:string|null}):Promise<VerifiedRefundOutcome|null>{
+  const existing=await first<any>(db,"SELECT (SELECT COUNT(*) FROM results WHERE race_id=? AND data_origin='real') result_count,(SELECT COUNT(*) FROM payouts WHERE race_id=? AND data_origin='real') payout_count",race.id,race.id);
+  if(existing?.result_count||existing?.payout_count)return null;
+  const record=await first<any>(db,"SELECT target_date,status,reason FROM collection_runs WHERE id=? AND source=? AND sport='boat'",`boat-result:${race.id}`,RESULTS_SOURCE);
+  if(!record||record.status!=='success'||record.target_date!==race.race_date)return null;
+  let proof:any;try{proof=JSON.parse(record.reason||'{}')}catch{return null;}
+  const fetchedAtMs=typeof proof.fetchedAt==='string'&&/(?:Z|[+-]\d{2}:\d{2})$/i.test(proof.fetchedAt)?Date.parse(proof.fetchedAt):NaN;
+  if(proof.quality!=='verified-official-refund-outcome-v1'||proof.raceId!==race.id||proof.url!==resultUrl(race)
+    ||!/^([a-f0-9]{64})$/.test(String(proof.sha256??''))||!Number.isFinite(fetchedAtMs)
+    ||fetchedAtMs>Date.now()||proof.refundTablePresent!==true)return null;
+  const numbers=proof.refundNumbers;
+  if(!Array.isArray(numbers)||!numbers.length||new Set(numbers).size!==numbers.length
+    ||numbers.some(n=>!Number.isInteger(n)||n<1||n>6))return null;
+  const payouts=proof.payouts;
+  if(!Array.isArray(payouts)||payouts.filter((p:any)=>p?.betType==='win').length!==1
+    ||payouts.filter((p:any)=>p?.betType==='trifecta').length!==1||payouts.length!==2
+    ||payouts.some((p:any)=>!['win','trifecta'].includes(p?.betType)||!Number.isSafeInteger(p?.payout)||p.payout<=0))return null;
+  const trifecta=payouts.find((p:any)=>p.betType==='trifecta');
+  const win=payouts.find((p:any)=>p.betType==='win');
+  const validSelection=(selection:any,count:number)=>typeof selection==='string'&&selection.split('-').length===count
+    &&selection.split('-').every((n:string)=>/^[1-6]$/.test(n))&&new Set(selection.split('-')).size===count;
+  if(!validSelection(trifecta.selection,3)||!validSelection(win.selection,1)
+    ||trifecta.selection.split('-')[0]!==win.selection
+    ||trifecta.selection.split('-').some((n:string)=>numbers.includes(Number(n)))||numbers.includes(Number(win.selection)))return null;
+  const archiveId=proof.archiveId;
+  if(typeof archiveId!=='string'||!archiveId.startsWith(`${race.id}:capture:`))return null;
+  const archiveRow=await first<any>(db,"SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE id=? AND race_id=? AND data_origin='real'",archiveId,race.id);
+  if(!archiveRow||archiveRow.captured_at!==proof.archiveCapturedAt||!Number.isFinite(Date.parse(archiveRow.captured_at)))return null;
+  if(!race.betting_cutoff_at||Date.parse(archiveRow.captured_at)>Date.parse(race.betting_cutoff_at)-60_000)return null;
+  let archive:any;try{archive=JSON.parse(archiveRow.archive_json)}catch{return null;}
+  if(archive.capturedAt!==archiveRow.captured_at)return null;
+  const entries=await all<any>(db,"SELECT number,features_json FROM entries WHERE race_id=? AND data_origin='real' ORDER BY number",race.id);
+  if(!boatArchiveEvidenceValid(archive,race,entries))return null;
+  const archiveDigest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(archiveRow.archive_json));
+  const archiveHash=Array.from(new Uint8Array(archiveDigest),b=>b.toString(16).padStart(2,'0')).join('');
+  if(archiveHash!==proof.archiveSha256)return null;
+  return {refundNumbers:[...numbers],payouts:payouts.map((p:any)=>({betType:p.betType,selection:p.selection,payout:p.payout}))};
 }
 
 /** Read immutable result evidence once per race set, rather than once per ticket. */

@@ -5,7 +5,7 @@ import { predictHistoricalTrifecta, historicalTrifectaModelMetadata, HISTORICAL_
 import { primaryPaperTiming } from './paperTiming.js'
 import { sizeExperimentalPortfolioResult } from './experimentalSizing.js'
 import { HISTORICAL_ARCHIVE_SCHEMA, type HistoricalObservation } from './historicalTrifectaArchive.js'
-import { loadTrifectaSettlementEvidence, verifiedNoRefundCapsizeRecord, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './trifectaSettlement.js'
+import { loadTrifectaSettlementEvidence, loadVerifiedRefundOutcome, verifiedOfficialRefundOutcomeSql, verifiedNoRefundCapsizeRecord, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './trifectaSettlement.js'
 
 const CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1'
 const MODEL_TRAINED_AT = Date.parse('2026-10-13T16:21:26.363521Z')
@@ -182,10 +182,10 @@ export async function historicalTrifectaExperimentDecision(db: Db, decisionAt = 
 }
 
 export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
-  const open = await all<any>(db, `SELECT b.*,r.race_date,r.venue_id,r.race_no FROM historical_trifecta_experiment_bets b JOIN races r ON r.id=b.race_id
+  const open = await all<any>(db, `SELECT b.*,r.race_date,r.venue_id,r.race_no,r.betting_cutoff_at FROM historical_trifecta_experiment_bets b JOIN races r ON r.id=b.race_id
     WHERE b.status='open' AND r.status='finished' AND r.data_origin='real'
     AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-    AND (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')=6
+    AND (((SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')=6
     AND (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')+
       (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real' AND json_valid(e.features_json) AND (
         json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走')
@@ -203,12 +203,28 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
       AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||
         (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||
         (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3))
-    AND ${verifiedSelectedTerminalOutcomeSql}
+    AND ${verifiedSelectedTerminalOutcomeSql}) OR ${verifiedOfficialRefundOutcomeSql})
     ORDER BY b.placed_at,b.id`)
   const races=[...new Map(open.map((b:any)=>[String(b.race_id),{id:String(b.race_id),race_date:String(b.race_date),venue_id:String(b.venue_id),race_no:Number(b.race_no)}])).values()]
   const evidence=await loadTrifectaSettlementEvidence(db,races)
   const settlements:any[]=[]
+  const refundOutcomeCache=new Map<string,Promise<any>>()
   for (const bet of open) {
+    let sourceProof:any;try{sourceProof=JSON.parse(evidence.proofs.get(String(bet.race_id))?.reason??'{}')}catch{sourceProof=null}
+    if(sourceProof?.quality==='verified-official-refund-outcome-v1'){
+      let pending=refundOutcomeCache.get(String(bet.race_id))
+      if(!pending){pending=loadVerifiedRefundOutcome(db,{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no,betting_cutoff_at:bet.betting_cutoff_at});refundOutcomeCache.set(String(bet.race_id),pending)}
+      const refund=await pending
+      if(refund){
+        const isRefund=String(bet.selection).split('-').some(n=>refund.refundNumbers.includes(Number(n)))
+        const official=refund.payouts.find((row:any)=>row.betType==='trifecta')
+        if(!official)continue
+        const won=!isRefund&&String(bet.selection)===official.selection,status=isRefund?'void':won?'won':'lost'
+        const payout=isRefund?Number(bet.stake):won?Math.floor(Number(bet.stake)*official.payout/100):0
+        settlements.push({bet,payout,status,credit:isRefund?Number(bet.stake):payout,finalOdds:isRefund?null:won?official.payout/100:null})
+        continue
+      }
+    }
     const results = evidence.results.get(String(bet.race_id))??[]
     const entries = evidence.entries.get(String(bet.race_id))??[]
     const entryNumbers = entries.map(e => Number(e.number)), resultNumbers = results.map(r => Number(r.number))
@@ -229,7 +245,7 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
     if (!outcome) continue
     const won = outcome.won
     const payout = won ? Math.floor(Number(bet.stake) * outcome.payoutPer100 / 100) : 0
-    settlements.push({bet,payout,status:won?'won':'lost'})
+    settlements.push({bet,payout,status:won?'won':'lost',credit:payout,finalOdds:bet.final_odds})
   }
   if(!db.batch)return 0
   let count=0
@@ -237,11 +253,11 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
   for(let start=0;start<settlements.length;start+=40){
     const chunk=settlements.slice(start,start+40), settledAt=new Date().toISOString(), statements:any[]=[]
     for(const item of chunk){
-      const {bet,payout,status}=item
-      statements.push(db.prepare(`UPDATE historical_trifecta_experiment_bets SET status=?,payout=?,profit=?,settled_at=? WHERE id=? AND status='open'`)
-        .bind(status,payout,payout-Number(bet.stake),settledAt,bet.id))
+      const {bet,payout,status,credit,finalOdds}=item
+      statements.push(db.prepare(`UPDATE historical_trifecta_experiment_bets SET status=?,payout=?,profit=?,final_odds=?,settled_at=? WHERE id=? AND status='open'`)
+        .bind(status,payout,payout-Number(bet.stake),finalOdds,settledAt,bet.id))
       statements.push(db.prepare(`UPDATE historical_trifecta_experiment_bankroll SET available_balance=available_balance+?,updated_at=? WHERE experiment_key=? AND changes()>0`)
-        .bind(payout,settledAt,HISTORICAL_TRIFECTA_EXPERIMENT_KEY))
+        .bind(credit,settledAt,HISTORICAL_TRIFECTA_EXPERIMENT_KEY))
     }
     const changes=await db.batch(statements) as any[]
     for(let i=0;i<chunk.length;i++)count+=Number(changes?.[i*2]?.meta?.changes??0)

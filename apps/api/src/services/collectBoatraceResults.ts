@@ -1,5 +1,5 @@
 import { all, first, type Db, type Statement } from '../repo/db.js';
-import { parseBoatraceResults } from './boatraceResults.js';
+import { parseBoatraceRefundOutcome, parseBoatraceResults } from './boatraceResults.js';
 import { parseTrifectaOdds, trifectaOddsUrl } from './boatraceTrifectaOdds.js';
 import { USER_AGENT } from './boatraceOdds.js';
 import { estimateWorkerWriteUnits, reserveWriteBudgets, utcDate } from './writeBudget.js';
@@ -282,7 +282,39 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       if(!body){reason=fetchFailure?.code ?? 'official-result-unavailable';throw new Error('official result unavailable');}
       sha256=body.sha256;
       reason='official-page-identity-or-outcome-rejected';
-      const parsed=parseBoatraceResults(body.html,{url,raceDate:race.race_date,venueCode:race.venue_id,raceNo:race.race_no,entries});
+      const expected={url,raceDate:race.race_date,venueCode:race.venue_id,raceNo:race.race_no,entries};
+      let parsed:ReturnType<typeof parseBoatraceResults>;
+      try { parsed=parseBoatraceResults(body.html,expected); }
+      catch {
+        const refund=parseBoatraceRefundOutcome(body.html,expected);
+        reason='refund-outcome-archive-unavailable';
+        const archiveRow=await first<any>(db,"SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin='real' AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1",race.id,new Date(Date.parse(race.betting_cutoff_at??'')-60_000).toISOString());
+        if(!race.betting_cutoff_at||race.betting_cutoff_source!=='boatrace-racelist-cutoff-v1'||!archiveRow)throw new Error('refund archive missing');
+        let archive:any;try{archive=JSON.parse(archiveRow.archive_json)}catch{throw new Error('refund archive invalid');}
+        if(archive.capturedAt!==archiveRow.captured_at||!boatArchiveEvidenceValid(archive,race,savedEntries))throw new Error('refund archive rejected');
+        reason='stored-evidence-conflict';
+        const [existingResults,existingPayouts]=await Promise.all([
+          all<any>(db,"SELECT number,finish_order FROM results WHERE race_id=? AND data_origin='real'",race.id),
+          all<any>(db,"SELECT bet_type,selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type IN ('win','trifecta')",race.id),
+        ]);
+        if(existingResults.length||existingPayouts.length)throw new Error('stored evidence conflicts with refund-only outcome');
+        const archiveHashBytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(archiveRow.archive_json));
+        const archiveSha256=Array.from(new Uint8Array(archiveHashBytes),b=>b.toString(16).padStart(2,'0')).join('');
+        const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:[],payouts:[],labelOnly:false,labelArchiveId:null,
+          refundArchiveId:archiveRow.id,refundArchiveCapturedAt:archiveRow.captured_at,refundArchiveJson:archiveRow.archive_json});
+        const proof={raceId:race.id,url,sha256,fetchedAt:new Date().toISOString(),quality:'verified-official-refund-outcome-v1',refundTablePresent:true,
+          refundNumbers:refund.refundNumbers,payouts:refund.payouts,archiveId:archiveRow.id,archiveCapturedAt:archiveRow.captured_at,archiveSha256};
+        const refundCount=refund.refundNumbers.length+refund.payouts.length;
+        if(!await reserveWriteBudgets(db,utcDate(now),[{units:estimateWorkerWriteUnits(2),category:'essential'}])){reason='daily-write-budget-exhausted';throw new Error('daily write budget exhausted');}
+        const refundWrites=await db.batch([
+          db.prepare("UPDATE races SET status='finished',updated_at=? WHERE id=? AND "+currentSourceGuard).bind(new Date().toISOString(),race.id,guardData),
+          logStatement(db,race,startedAt,'success',refundCount,proof,guardData),
+        ]) as any[];
+        reason='source-state-changed';
+        if(!refundWrites.at(-1)?.meta?.changes)throw new Error('source state changed');
+        records+=refundCount;verified++;
+        continue;
+      }
       const [existingResults,existingPayouts]=await Promise.all([
         all<{number:number;finish_order:number}>(db,"SELECT number,finish_order FROM results WHERE race_id=? AND data_origin='real'",race.id),
         all<{bet_type:string;selection:string;payout:number}>(db,"SELECT bet_type,selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type IN ('win','trifecta')",race.id),
@@ -374,6 +406,10 @@ const currentSourceGuard = `EXISTS(SELECT 1 FROM races current JOIN (SELECT ? da
     AND current.race_date=json_extract(gate.data,'$.race.race_date')
     AND current.venue_id=json_extract(gate.data,'$.race.venue_id') AND current.race_no=json_extract(gate.data,'$.race.race_no')
     AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=current.id)
+    AND (json_extract(gate.data,'$.refundArchiveId') IS NULL OR EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives ra
+      WHERE ra.id=json_extract(gate.data,'$.refundArchiveId') AND ra.race_id=current.id AND ra.data_origin='real'
+        AND ra.captured_at=json_extract(gate.data,'$.refundArchiveCapturedAt')
+        AND ra.archive_json=json_extract(gate.data,'$.refundArchiveJson')))
     AND (EXISTS(SELECT 1 FROM bets b WHERE b.race_id=current.id AND b.data_origin='real' AND b.status='open' AND b.sport='boat' AND b.bet_type IN ('win','trifecta')
       AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=b.id))
       OR EXISTS(SELECT 1 FROM experimental_paper_bets eb

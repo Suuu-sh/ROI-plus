@@ -1,7 +1,7 @@
 import { normalHistorySnapshot, resetNormalHistory, validSnapshot } from './services/resetNormalHistory.js';
 import { fetchPurchaseOdds, purchaseOddsContext, type PurchaseOdds, type PurchaseOddsContext } from './services/purchaseOdds.js';
 import { finalTrifectaOdds } from './services/finalTrifectaOdds.js';
-import { loadTrifectaSettlementEvidence, verifiedNoRefundCapsize, verifiedNoRefundCapsizeRecord, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './services/trifectaSettlement.js';
+import { loadTrifectaSettlementEvidence, loadVerifiedRefundOutcome, verifiedNoRefundCapsize, verifiedNoRefundCapsizeRecord, verifiedOfficialRefundOutcomeSql, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './services/trifectaSettlement.js';
 import { collectionIssues } from './services/collectionIssues.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
@@ -400,13 +400,38 @@ async function ingest(c: any, name: string) {
   return c.json({ upserted: rows.length, changed: changedRows });
 }
 async function settleOpen(db: Db) {
-  const bets = await all<any>(db, `SELECT b.*, r.status AS race_status, r.data_origin AS race_origin,r.race_date,r.venue_id,r.race_no FROM bets b JOIN races r ON r.id=b.race_id WHERE b.status='open' AND r.status IN ('finished','cancelled') AND b.data_origin=r.data_origin AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) AND ${nonQuarantinedBet()}`);
+  const bets = await all<any>(db, `SELECT b.*, r.status AS race_status, r.data_origin AS race_origin,r.race_date,r.venue_id,r.race_no,r.betting_cutoff_at FROM bets b JOIN races r ON r.id=b.race_id WHERE b.status='open' AND r.status IN ('finished','cancelled') AND b.data_origin=r.data_origin AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) AND ${nonQuarantinedBet()}`);
   let settled = 0;
+  const refundOutcomeCache=new Map<string,Promise<any>>();
   for (const b of bets) {
     if (b.race_status === 'cancelled') {
       if (!await reserveWorkerWrites(db, 1)) break;
       const result = await run(db, `UPDATE bets SET status='void',payout=stake,profit=0,final_odds=1,settled_at=? WHERE id=? AND status='open'`, now(), b.id);
       settled += Number(result.meta?.changes ?? 0); continue;
+    }
+    if(b.race_origin==='real'){
+      let pending=refundOutcomeCache.get(String(b.race_id));
+      if(!pending){pending=loadVerifiedRefundOutcome(db,{id:b.race_id,race_date:b.race_date,venue_id:b.venue_id,race_no:b.race_no,betting_cutoff_at:b.betting_cutoff_at});refundOutcomeCache.set(String(b.race_id),pending);}
+      const refundOutcome=await pending;
+      if(refundOutcome){
+        if(!['win','trifecta'].includes(b.bet_type))continue;
+        const selected=String(b.selection).split('-').map(Number);
+        const isRefund=selected.some(number=>refundOutcome.refundNumbers.includes(number));
+        const officialPayout=refundOutcome.payouts.find((row:any)=>row.betType===b.bet_type);
+        if(!officialPayout)continue;
+        const won=!isRefund&&String(b.selection)===officialPayout.selection;
+        const status=isRefund?'void':won?'won':'lost';
+        const payout=isRefund?Number(b.stake):won?payoutYen(Number(b.stake),Number(officialPayout.payout)):0;
+        const finalOdds=isRefund?1:won?Number(officialPayout.payout)/100:null;
+        if(!await reserveWorkerWrites(db,1))break;
+        const result=await run(db,"UPDATE bets SET status=?,payout=?,profit=?,final_odds=?,settled_at=? WHERE id=? AND status='open'",
+          status,payout,isRefund?0:payout-Number(b.stake),finalOdds,now(),b.id);
+        if(Number(result.meta?.changes??0)>0){
+          if(!isRefund&&b.expected_roi>0&&finalOdds!==null&&b.predicted_prob*finalOdds-1<=0)await run(db,"UPDATE bets SET ev_lost=1 WHERE id=? AND ev_lost<>1",b.id);
+          settled++;
+        }
+        continue;
+      }
     }
     const integrity = await first<any>(db, `SELECT
       (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin=?) entry_count,
@@ -491,11 +516,11 @@ async function settleOpen(db: Db) {
   return settled + await settleExperimentalOpen(db) + await settleHistoricalTrifectaExperimentOpen(db);
 }
 async function settleExperimentalOpen(db: Db) {
- const open=await all<any>(db,`SELECT b.*,r.race_date,r.venue_id,r.race_no FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id
+ const open=await all<any>(db,`SELECT b.*,r.race_date,r.venue_id,r.race_no,r.betting_cutoff_at FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id
    WHERE b.status='open' AND r.status='finished' AND r.data_origin='real'
    AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id)
    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-   AND (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')=6
+   AND (((SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')=6
    AND (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')+
        (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real' AND ${terminalFinishCodeSql})=6
    AND NOT EXISTS(SELECT 1 FROM entries e JOIN results x ON x.race_id=e.race_id AND x.number=e.number AND x.data_origin=e.data_origin
@@ -509,13 +534,29 @@ async function settleExperimentalOpen(db: Db) {
      AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||
        (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||
        (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3))
-   AND ${verifiedSelectedTerminalOutcomeSql}
+   AND ${verifiedSelectedTerminalOutcomeSql}) OR ${verifiedOfficialRefundOutcomeSql})
    ORDER BY b.placed_at,b.id`);
 
  const races=[...new Map(open.map((b:any)=>[String(b.race_id),{id:String(b.race_id),race_date:String(b.race_date),venue_id:String(b.venue_id),race_no:Number(b.race_no)}])).values()];
  const evidence=await loadTrifectaSettlementEvidence(db,races);
  const settlements:any[]=[];
+ const refundOutcomeCache=new Map<string,Promise<any>>();
  for(const bet of open){
+   let sourceProof:any;try{sourceProof=JSON.parse(evidence.proofs.get(String(bet.race_id))?.reason??'{}')}catch{sourceProof=null;}
+   if(sourceProof?.quality==='verified-official-refund-outcome-v1'){
+     let pending=refundOutcomeCache.get(String(bet.race_id));
+     if(!pending){pending=loadVerifiedRefundOutcome(db,{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no,betting_cutoff_at:bet.betting_cutoff_at});refundOutcomeCache.set(String(bet.race_id),pending);}
+     const refund=await pending;
+     if(refund){
+       const selection=String(bet.selection).split('-').map(Number),isRefund=selection.some(n=>refund.refundNumbers.includes(n));
+       const official=refund.payouts.find((row:any)=>row.betType==='trifecta');
+       if(!official)continue;
+       const won=!isRefund&&String(bet.selection)===official.selection,status=isRefund?'void':won?'won':'lost';
+       const payout=isRefund?Number(bet.stake):won?payoutYen(Number(bet.stake),official.payout):0;
+       settlements.push({bet,status,payout,credit:isRefund?Number(bet.stake):payout});
+       continue;
+     }
+   }
    const order=evidence.results.get(String(bet.race_id))??[];
    const entries=evidence.entries.get(String(bet.race_id))??[];
    const payouts=evidence.payouts.get(String(bet.race_id))??[];
@@ -533,7 +574,7 @@ async function settleExperimentalOpen(db: Db) {
      payouts.map((row:any)=>({selection:String(row.selection),payout:Number(row.payout)})),verifiedTerminalNumbers);
    if(!outcome)continue;
    const won=outcome.won,payout=won?payoutYen(Number(bet.stake),outcome.payoutPer100):0;
-   settlements.push({bet,won,payout});
+   settlements.push({bet,status:won?'won':'lost',payout,credit:payout});
  }
  if(!db.batch)return 0;
  let settled=0;
@@ -542,9 +583,9 @@ async function settleExperimentalOpen(db: Db) {
    if(!await reserveWorkerWrites(db,chunk.length*2))break;
    const settledAt=now(),statements:Statement[]=[];
    for(const item of chunk){
-     const {bet,won,payout}=item;
-     statements.push(db.prepare("UPDATE experimental_paper_bets SET status=?,payout=?,profit=?,settled_at=? WHERE id=? AND status='open'").bind(won?'won':'lost',payout,payout-Number(bet.stake),settledAt,bet.id));
-     statements.push(db.prepare("UPDATE experimental_bankroll SET available_balance=available_balance+?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND changes()>0").bind(payout,settledAt));
+     const {bet,status,payout,credit}=item;
+     statements.push(db.prepare("UPDATE experimental_paper_bets SET status=?,payout=?,profit=?,settled_at=? WHERE id=? AND status='open'").bind(status,payout,payout-Number(bet.stake),settledAt,bet.id));
+     statements.push(db.prepare("UPDATE experimental_bankroll SET available_balance=available_balance+?,updated_at=? WHERE experiment_key='boat-trifecta-small-sample-v1' AND changes()>0").bind(credit,settledAt));
    }
    const results=await db.batch(statements) as any[];
    for(let i=0;i<chunk.length;i++)settled+=Number(results?.[i*2]?.meta?.changes??0);
