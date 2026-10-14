@@ -154,15 +154,17 @@ async function readBody(response: Response): Promise<{ html: string; sha256: str
 export async function collectResults(db: Db, now: Date, opts: CollectResultsOptions = {}) {
   const skipped = { status:'skipped' as const, records:0, verified:0, targets:0, attempted:0 };
   if (!db.batch) return {...skipped,reason:'atomic D1 batch required'};
-  const hour = now.toISOString().slice(0,13), budget = opts.requestBudget ?? {used:0,max:49};
+  const minute = Math.floor(now.getUTCMinutes() / 10) * 10;
+  const window = `${now.toISOString().slice(0,13)}:${String(minute).padStart(2,'0')}`;
+  const budget = opts.requestBudget ?? {used:0,max:49};
   const manual=opts.mode==='manual';
-  const lockKey=manual?'boat_results_manual_until':'boat_results_hour';
+  const lockKey=manual?'boat_results_manual_until':'boat_results_ten_minute';
   const prior=await first<{value:string}>(db,'SELECT value FROM settings WHERE key=?',lockKey);
   if(manual&&prior){
     const until=Date.parse(prior.value);
     if(!Number.isFinite(until))return {...skipped,reason:'manual lock state unavailable'};
     if(until>now.getTime())return {...skipped,reason:'manual run in progress or throttled'};
-  } else if(!manual&&prior&&prior.value>=hour)return skipped;
+  } else if(!manual&&prior&&prior.value>=window)return skipped;
   const attemptStart=budget.used;
   const attemptLimit=Math.min(manual?MANUAL_MAX_ATTEMPTS:HOURLY_MAX_ATTEMPTS,
     Math.max(0,Math.floor(opts.maxAttempts ?? Number.MAX_SAFE_INTEGER)),
@@ -172,7 +174,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
   const archiveRaceIds=(opts.archiveRaceIds??[]).filter(id=>/^boat-\d{8}-\d{2}-\d{2}$/.test(id)).slice(0,80)
   const targets = await selectResultsTargets(db,now,labelOnly?Math.min(4,attemptLimit):attemptLimit,labelOnly,archiveRaceIds);
   if (!targets.length) return skipped;
-  const lease=manual?new Date(now.getTime()+5*60_000).toISOString():hour;
+  const lease=manual?new Date(now.getTime()+5*60_000).toISOString():window;
   const fetcher=opts.fetch ?? ((input,init)=>fetch(input,init)),sleep=opts.sleep ?? pause;
   let attempted=0,records=0,failed=0,verified=0,processedTargets=0,batches=0,lockClaimed=false;
   const fetchFailures:Array<FetchFailure & {count:number}>=[];
@@ -305,8 +307,10 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       statements.push(db.prepare(`INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin)
         SELECT ?,json_extract(value,'$.betType'),json_extract(value,'$.selection'),json_extract(value,'$.payout'),'real' FROM json_each(?) WHERE ${currentSourceGuard}
         ON CONFLICT(race_id,bet_type,selection) DO NOTHING`).bind(race.id,JSON.stringify(parsed.payouts),guardData));
-      if(!labelOnly)for(const terminal of parsed.terminalEntries) statements.push(db.prepare(`UPDATE entries SET features_json=json_set(CASE WHEN json_valid(features_json) THEN features_json ELSE '{}' END,'$.finish_code',?)
-        WHERE race_id=? AND number=? AND data_origin='real' AND ${currentSourceGuard}`).bind(terminal.finishCode,race.id,terminal.number,guardData));
+      if(!labelOnly&&parsed.terminalEntries.length) statements.push(db.prepare(`UPDATE entries SET features_json=json_set(CASE WHEN json_valid(features_json) THEN features_json ELSE '{}' END,'$.finish_code',
+        (SELECT json_extract(terminal.value,'$.finishCode') FROM json_each(?) terminal WHERE json_extract(terminal.value,'$.number')=entries.number))
+        WHERE race_id=? AND data_origin='real' AND number IN (SELECT json_extract(value,'$.number') FROM json_each(?)) AND ${currentSourceGuard}`)
+        .bind(JSON.stringify(parsed.terminalEntries),race.id,JSON.stringify(parsed.terminalEntries),guardData));
       statements.push(db.prepare(`UPDATE races SET status='finished',updated_at=? WHERE id=? AND ${currentSourceGuard}`).bind(new Date().toISOString(),race.id,guardAfterTerminal));
       const count=parsed.results.length+parsed.payouts.length+parsed.terminalEntries.length;
       statements.push(logStatement(db,race,startedAt,'success',count,{raceId:race.id,url,sha256,quality:'verified-official-outcome-v2',fetchedAt:new Date().toISOString(),results:parsed.results,payouts:parsed.payouts,...(finalMarket?{finalMarket}:{}),refundTablePresent:parsed.refundTablePresent,nonRefundableNumbers:parsed.nonRefundableNumbers,...(parsed.nonRefundableNumbers.length?{refundPolicy:'official-post-start-capsize-v1',terminalEntries:parsed.terminalEntries}:{})},guardAfterTerminal));
@@ -352,6 +356,9 @@ const currentSourceGuard = `EXISTS(SELECT 1 FROM races current JOIN (SELECT ? da
       OR EXISTS(SELECT 1 FROM experimental_paper_bets eb
         JOIN experimental_paper_decisions ed ON ed.id=eb.decision_id AND ed.experiment_key='boat-trifecta-small-sample-v1'
         WHERE eb.race_id=current.id AND eb.data_origin='real')
+      OR EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb
+        JOIN historical_trifecta_experiment_decisions hd ON hd.id=hb.decision_id AND hd.experiment_key='boat-trifecta-historical-base-v1'
+        WHERE hb.race_id=current.id AND hb.data_origin='real' AND hb.status='open')
       OR (json_extract(gate.data,'$.labelOnly')=1 AND json_extract(gate.data,'$.labelArchiveId') IS NOT NULL
         AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=current.id AND b.data_origin='real' AND b.status='open')
         AND current.betting_cutoff_source='boatrace-racelist-cutoff-v1'

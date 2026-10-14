@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       confirmed:
-        description: 'Explicitly confirm one production result collection pass'
+        description: 'Explicitly confirm one production result collection and settlement pass'
         required: true
         type: boolean
         default: false
@@ -29,3 +29,10 @@ jobs:
             --data '{"confirmed":true}' \
             https://roi-plus-api.suuu-sh.workers.dev/api/admin/collect-boat-results)"
           python -c 'import json,sys; data=json.load(sys.stdin); print(json.dumps({k:data.get(k) for k in ("status","targets","verified","records","attempted","reason")},ensure_ascii=False))' <<<"$response"
+          settlement="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${INGEST_TOKEN}" \
+            --header 'content-type: application/json' \
+            --data '{"confirmed":true}' \
+            https://roi-plus-api.suuu-sh.workers.dev/api/admin/settle)"
+          python -c 'import json,sys; data=json.load(sys.stdin); print(json.dumps({"settled":data.get("settled")},ensure_ascii=False))' <<<"$settlement"

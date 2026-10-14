@@ -154,7 +154,7 @@ describe('EdgeLab API',()=>{
   const race={id:'boat-20990101-99-01',sport:'boat',venue_id:'venue-99',race_date:'2099-01-01',race_no:1,status:'scheduled',data_origin:'real',updated_at:'2099-01-01T00:00:00Z'};
   const body=JSON.stringify([race]);
   const unauthorized=await app.request('/api/ingest/races',{method:'POST',headers:{'content-type':'application/json'},body},{DB,INGEST_TOKEN:'test-token'});
-  expect(unauthorized.status).toBe(401); expect(unauthorized.headers.get('X-ROI-API-Revision')).toBe('fresh-t60-purchase-odds-v1');
+  expect(unauthorized.status).toBe(401); expect(unauthorized.headers.get('X-ROI-API-Revision')).toBe('ten-minute-results-settlement-v1');
   expect(await unauthorized.json()).toMatchObject({error:'unauthorized'});
   const req=()=>app.request('/api/ingest/races',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body},env());
   expect((await req()).status).toBe(200); expect((await req()).status).toBe(200);
@@ -1000,10 +1000,10 @@ describe('EdgeLab API',()=>{
  it('requires the proxy header for read APIs when PROXY_TOKEN is set',async()=>{
   const e={...env(),PROXY_TOKEN:'p'};
   const forbidden=await app.request('/api/models',{},e);
-  expect(forbidden.status).toBe(403); expect(forbidden.headers.get('X-ROI-API-Revision')).toBe('fresh-t60-purchase-odds-v1');
+  expect(forbidden.status).toBe(403); expect(forbidden.headers.get('X-ROI-API-Revision')).toBe('ten-minute-results-settlement-v1');
   expect(await forbidden.json()).toMatchObject({error:'forbidden'});
   const allowed=await app.request('/api/models',{headers:{'X-ROI-Proxy':'p'}},e);
-  expect(allowed.status).toBe(200); expect(allowed.headers.get('X-ROI-API-Revision')).toBe('fresh-t60-purchase-odds-v1');
+  expect(allowed.status).toBe(200); expect(allowed.headers.get('X-ROI-API-Revision')).toBe('ten-minute-results-settlement-v1');
   expect((await app.request('/api/health',{},e)).status).toBe(200);
   expect((await app.request('/api/ingest/venues',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token'},body:'[]'},e)).status).toBe(200);
  });
@@ -1029,7 +1029,7 @@ describe('EdgeLab API',()=>{
   const afterFirst=prepareCount;
   const hit=await app.request('/api/models?view=a',{headers},e);
   expect(hit.status).toBe(200); expect(hit.headers.get('Cache-Control')).toBe('private, no-store'); expect(hit.headers.get('X-ROI-Read-Cache')).toBe('HIT');
-  expect(hit.headers.get('X-ROI-API-Revision')).toBe('fresh-t60-purchase-odds-v1');
+  expect(hit.headers.get('X-ROI-API-Revision')).toBe('ten-minute-results-settlement-v1');
   expect(prepareCount).toBe(afterFirst);
   expect((await app.request('/api/models?view=a',{},e)).status).toBe(403); // warm cache never bypasses auth
   expect((await app.request('/api/models?view=b',{headers},e)).status).toBe(200);

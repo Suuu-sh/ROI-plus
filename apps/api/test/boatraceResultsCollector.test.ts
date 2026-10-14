@@ -44,7 +44,7 @@ beforeEach(()=>{
 });
 afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();sqlite.close();});
 
-describe('purchased real boat hourly results',()=>{
+describe('purchased real boat results',()=>{
   it('atomically records normal official results, evidence and existing settlement without modifying purchase snapshots',async()=>{
     seed();const requestBudget={used:48,max:49},pauses:number[]=[];
     const result=await collectResults(DB,now,{requestBudget,fetch:fetchPage,sleep:async ms=>{pauses.push(ms)}});
@@ -67,30 +67,35 @@ describe('purchased real boat hourly results',()=>{
     sqlite.prepare(`INSERT INTO experimental_paper_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
       VALUES('experimental-result-ticket','experimental-result-decision',?,?,'1-2-3',100,0.1,0.01,20,1,'2026-10-11T02:00:00Z','open','real')`).run(raceId,modelId);
     expect(await selectResultsTargets(DB,now)).toEqual([expect.objectContaining({id:raceId})]);
-    expect(await collectResults(DB,now,{fetch:async url=>url.includes('/odds3t?')?new Response(finalTrifectaPage(raceDate,'09',1)):fetchPage(url),sleep:async()=>{}})).toMatchObject({status:'success',verified:1,attempted:2});
+    const experimentalCollection=await collectResults(DB,now,{fetch:async url=>url.includes('/odds3t?')?new Response(finalTrifectaPage(raceDate,'09',1)):
+      new Response(boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']})),sleep:async()=>{}});
+    expect(experimentalCollection).toMatchObject({status:'success',verified:1,attempted:2});
     expect(sqlite.prepare("SELECT payout FROM payouts WHERE race_id=? AND bet_type='trifecta'").get(raceId)).toMatchObject({payout:3770});
+    expect(JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs WHERE id=?').get(`boat-result:${raceId}`) as {reason:string}).reason).nonRefundableNumbers).toEqual([6]);
     expect(await selectResultsTargets(DB,new Date(now.getTime()+3600000))).toEqual([]);
     expect(await settleOpen(DB)).toBe(1);
     const history=await (await app.request('/api/bets/experimental',{}, {DB} as any)).json() as any[];
     expect(history[0]).toMatchObject({status:'lost',finalOdds:37.7,oddsAtBet:20});
   });
-  it('records five ranked finishers and settles a capsize ticket only with official no-refund evidence',async()=>{
+  it('records multiple capsize finishers and settles tickets only with official no-refund evidence',async()=>{
     const raceId=seed();sqlite.prepare("UPDATE bets SET selection='3' WHERE id=?").run(`${raceId}-bet`);
     sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES(?,?,'boat','win','6',100,'manual','INSUFFICIENT_DATA','2026-10-11T02:01:00Z','open','real')").run(`${raceId}-terminal-bet`,raceId);
-    const fetch=async()=>new Response(boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']}));
+    sqlite.prepare("INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,edge_label,placed_at,status,data_origin) VALUES(?,?,'boat','trifecta','1-5-6',100,'manual','INSUFFICIENT_DATA','2026-10-11T02:02:00Z','open','real')").run(`${raceId}-terminal-trifecta`,raceId);
+    const fetch=async()=>new Response(boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,3,4,'転','転']}));
     expect(await collectResults(DB,now,{fetch})).toMatchObject({status:'success',records:8,verified:1});
-    expect(sqlite.prepare('SELECT number,finish_order FROM results ORDER BY finish_order').all()).toHaveLength(5);
-    expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number=6').get(raceId)).toMatchObject({features_json:expect.stringContaining('転覆')});
+    expect(sqlite.prepare('SELECT number,finish_order FROM results ORDER BY finish_order').all()).toHaveLength(4);
+    expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number IN (5,6) ORDER BY number').all(raceId)).toHaveLength(2);
     const provenance=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs').get() as {reason:string}).reason);
-    expect(provenance).toMatchObject({raceId,url:`https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=09&hd=20261011`,quality:'verified-official-outcome-v2',sha256:expect.stringMatching(/^[a-f0-9]{64}$/),refundTablePresent:true,refundPolicy:'official-post-start-capsize-v1',nonRefundableNumbers:[6],terminalEntries:[{number:6,finishCode:'転覆'}]});
-    expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number=6').get(raceId)).toMatchObject({features_json:expect.stringContaining('転覆')});
+    expect(provenance).toMatchObject({raceId,url:`https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=09&hd=20261011`,quality:'verified-official-outcome-v2',sha256:expect.stringMatching(/^[a-f0-9]{64}$/),refundTablePresent:true,refundPolicy:'official-post-start-capsize-v1',nonRefundableNumbers:[5,6],terminalEntries:[{number:5,finishCode:'転覆'},{number:6,finishCode:'転覆'}]});
     const settled=await settleOpen(DB);
     expect(sqlite.prepare('SELECT id,status FROM bets ORDER BY id').all()).toEqual([
       {id:`${raceId}-bet`,status:'lost'}, {id:`${raceId}-terminal-bet`,status:'lost'},
+      {id:`${raceId}-terminal-trifecta`,status:'lost'},
     ]);
-    expect(settled).toBe(2);
+    expect(settled).toBe(3);
     expect(sqlite.prepare('SELECT id,status FROM bets ORDER BY id').all()).toEqual([
       {id:`${raceId}-bet`,status:'lost'}, {id:`${raceId}-terminal-bet`,status:'lost'},
+      {id:`${raceId}-terminal-trifecta`,status:'lost'},
     ]);
     expect(await selectResultsTargets(DB,new Date(now.getTime()+3600000))).toEqual([]);
   });
@@ -145,20 +150,22 @@ describe('purchased real boat hourly results',()=>{
     expect(targets.map(row=>row.id)).not.toContain(wrongCutoff);
   });
   it('targets a historical-only open virtual race while excluding unrelated races',async()=>{
-    seed(1);seed(2);seed(3,'real','won');
+    seed(2);seed(3,'real','won');
     sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(id(2));
     sqlite.prepare(`INSERT INTO historical_trifecta_experiment_decisions(id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,snapshot_json)
       VALUES('hist-decision','boat-trifecta-historical-base-v1',?,'boat-trifecta-historical-base-20261014','2026-10-11T02:00:00Z','placed',100,'{}')`).run(id(2));
     sqlite.prepare(`INSERT INTO historical_trifecta_experiment_bets(id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
       VALUES('hist-bet','hist-decision',?,'boat-trifecta-historical-base-20261014','1-2-3',100,0.1,0.01,200,19,'2026-10-11T02:00:00Z','open','real')`).run(id(2));
-    expect((await selectResultsTargets(DB,now)).map(x=>x.id)).toEqual([id(1),id(2)]);
+    expect((await selectResultsTargets(DB,now)).map(x=>x.id)).toEqual([id(2)]);
+    expect(await collectResults(DB,now,{fetch:fetchPage,sleep:async()=>{}})).toMatchObject({status:'success',verified:1,attempted:1});
+    expect(JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs WHERE id=?').get(`boat-result:${id(2)}`) as {reason:string}).reason)).toMatchObject({quality:'verified-official-outcome-v2'});
   });
   it('collects purchased results with missing, invalid, or exhausted legacy reservation state',async()=>{
     seed();sqlite.prepare("DELETE FROM settings WHERE key='roi_d1_write_budget_utc'").run();
     const fetcher=vi.fn(fetchPage);
     expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({status:'success',attempted:1,verified:1});
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boat_results_hour'").get()).toMatchObject({n:1});
+    expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boat_results_ten_minute'").get()).toMatchObject({n:1});
     expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:6});
   });
   it('fails closed on malformed results without entry changes or settlement',async()=>{
@@ -170,7 +177,17 @@ describe('purchased real boat hourly results',()=>{
     seed();sqlite.prepare("INSERT INTO results(race_id,number,finish_order,data_origin) VALUES(?,1,2,'real')").run(id());
     expect(await collectResults(DB,now,{fetch:fetchPage})).toMatchObject({status:'failed',records:0});expect(sqlite.prepare('SELECT finish_order FROM results').get()).toMatchObject({finish_order:2});
   });
-  it('prevents duplicate hourly runs, rotates failed targets fairly, and keeps one log per race',async()=>{
+  it('rejects a persisted race identity mismatch and leaves an already-settled purchase unchanged',async()=>{
+    const mismatched=seed(1);sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES('10','boat','Mismatch')").run();sqlite.prepare("UPDATE races SET venue_id='10' WHERE id=?").run(mismatched);
+    const fetcher=vi.fn(fetchPage);
+    expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({status:'failed',verified:0});
+    expect(fetcher).not.toHaveBeenCalled();
+    sqlite.prepare("UPDATE bets SET status='lost' WHERE race_id=?").run(mismatched);
+    const settled=seed(2);sqlite.prepare("UPDATE bets SET status='lost',payout=0,profit=-100,settled_at='2026-10-11T03:30:00Z' WHERE race_id=?").run(settled);
+    expect(await collectResults(DB,new Date(now.getTime()+10*60_000),{fetch:fetcher})).toMatchObject({status:'skipped'});
+    expect(sqlite.prepare('SELECT status,payout,profit,settled_at FROM bets WHERE race_id=?').get(settled)).toMatchObject({status:'lost',payout:0,profit:-100,settled_at:'2026-10-11T03:30:00Z'});
+  });
+  it('prevents duplicate ten-minute runs, rotates failed targets fairly, and keeps one log per race',async()=>{
     seed(1);seed(2);const fetcher=vi.fn(async(_input:string)=>new Response('not ready'));
     await collectResults(DB,now,{maxAttempts:1,fetch:fetcher});
     await collectResults(DB,now,{maxAttempts:1,fetch:fetcher});expect(fetcher).toHaveBeenCalledTimes(1);
@@ -280,15 +297,16 @@ describe('purchased real boat hourly results',()=>{
     expect((await app.request('/api/admin/settle',init({'X-ROI-Proxy':'test-proxy'},{}),env)).status).toBe(400);
     expect(fetcher).not.toHaveBeenCalled();expect(sqlite.prepare("SELECT COUNT(*) n FROM settings WHERE key='boat_results_manual_until'").get()).toMatchObject({n:0});
   });
-  it('manual result route bypasses only the hourly marker and leaves settlement to the second invocation',async()=>{
+  it('manual result route bypasses only the scheduled marker and leaves settlement to the second invocation',async()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);vi.stubGlobal('fetch',fetchPage);
-    sqlite.prepare("INSERT INTO settings(key,value) VALUES('boat_results_hour',?)").run(now.toISOString().slice(0,13));
+    const window=`${now.toISOString().slice(0,13)}:00`;
+    sqlite.prepare("INSERT INTO settings(key,value) VALUES('boat_results_ten_minute',?)").run(window);
     const env={DB,PROXY_TOKEN:'test-proxy',ENABLE_BOATRACE_RESULTS_SCRAPE:'true'};
     const init={method:'POST',headers:{'content-type':'application/json','X-ROI-Proxy':'test-proxy'},body:JSON.stringify({confirmed:true})};
     const response=await app.request('/api/admin/collect-boat-results',init,env);
     expect(response.status).toBe(200);expect(await response.json()).toMatchObject({verified:1,targets:1,attempted:1});
     expect(sqlite.prepare('SELECT status FROM bets').get()).toMatchObject({status:'open'});
-    expect(sqlite.prepare("SELECT value FROM settings WHERE key='boat_results_hour'").get()).toMatchObject({value:now.toISOString().slice(0,13)});
+    expect(sqlite.prepare("SELECT value FROM settings WHERE key='boat_results_ten_minute'").get()).toMatchObject({value:window});
     const settlement=await app.request('/api/admin/settle',init,env);
     expect(await settlement.json()).toEqual({settled:1});expect(sqlite.prepare('SELECT status,profit FROM bets').get()).toMatchObject({status:'won',profit:330});
   });
@@ -347,10 +365,10 @@ describe('purchased real boat hourly results',()=>{
     expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(terminalRace)).toMatchObject({n:5});
     expect(sqlite.prepare("SELECT features_json FROM entries WHERE race_id=? AND number=6").get(terminalRace)).toMatchObject({features_json:expect.not.stringContaining('finish_code')});
   });
-  it('keeps the flag off by default and only collects at hourly boundaries',async()=>{
+  it('keeps the flag off by default and collects every ten-minute boundary',async()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);const fetcher=vi.fn(fetchPage);vi.stubGlobal('fetch',fetcher);
     await worker.scheduled({cron:'* * * * *',scheduledTime:now.getTime()+60000} as ScheduledController,{DB,ENABLE_BOATRACE_RESULTS_SCRAPE:'true'});
-    await worker.scheduled({cron:'* * * * *',scheduledTime:now.getTime()+5*60000} as ScheduledController,{DB});expect(fetcher).not.toHaveBeenCalled();
-    await worker.scheduled({cron:'* * * * *',scheduledTime:now.getTime()+5*60000} as ScheduledController,{DB,ENABLE_BOATRACE_RESULTS_SCRAPE:'true'});expect(fetcher).toHaveBeenCalledTimes(1);
+    await worker.scheduled({cron:'* * * * *',scheduledTime:now.getTime()+10*60000} as ScheduledController,{DB});expect(fetcher).not.toHaveBeenCalled();
+    await worker.scheduled({cron:'* * * * *',scheduledTime:now.getTime()+10*60000} as ScheduledController,{DB,ENABLE_BOATRACE_RESULTS_SCRAPE:'true'});expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });

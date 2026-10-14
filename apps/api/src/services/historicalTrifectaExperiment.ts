@@ -5,6 +5,7 @@ import { predictHistoricalTrifecta, historicalTrifectaModelMetadata, HISTORICAL_
 import { primaryPaperTiming } from './paperTiming.js'
 import { sizeExperimentalPortfolioResult } from './experimentalSizing.js'
 import { HISTORICAL_ARCHIVE_SCHEMA, type HistoricalObservation } from './historicalTrifectaArchive.js'
+import { verifiedNoRefundCapsize, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './trifectaSettlement.js'
 
 const CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1'
 const MODEL_TRAINED_AT = Date.parse('2026-10-13T16:21:26.363521Z')
@@ -181,25 +182,51 @@ export async function historicalTrifectaExperimentDecision(db: Db, decisionAt = 
 }
 
 export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
-  const open = await all<any>(db, `SELECT b.* FROM historical_trifecta_experiment_bets b JOIN races r ON r.id=b.race_id
+  const open = await all<any>(db, `SELECT b.*,r.race_date,r.venue_id,r.race_no FROM historical_trifecta_experiment_bets b JOIN races r ON r.id=b.race_id
     WHERE b.status='open' AND r.status='finished' AND r.data_origin='real'
-    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id) ORDER BY b.placed_at,b.id LIMIT 4`)
+    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
+    AND (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')=6
+    AND (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')+
+      (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real' AND json_valid(e.features_json) AND (
+        json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走')
+        OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))=6
+    AND NOT EXISTS(SELECT 1 FROM entries e JOIN results x ON x.race_id=e.race_id AND x.number=e.number AND x.data_origin=e.data_origin
+      WHERE e.race_id=r.id AND e.data_origin='real' AND json_valid(e.features_json) AND (
+        json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走')
+        OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))
+    AND (SELECT COUNT(DISTINCT x.number) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
+    AND (SELECT COUNT(DISTINCT x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
+    AND COALESCE((SELECT MIN(x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real'),0)=1
+    AND (SELECT MAX(x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
+    AND (SELECT COUNT(*) FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0)=1
+    AND EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
+      AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||
+        (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||
+        (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3))
+    AND ${verifiedSelectedTerminalOutcomeSql}
+    ORDER BY b.placed_at,b.id LIMIT 32`)
   let count = 0
   for (const bet of open) {
     const results = await all<any>(db, `SELECT number,finish_order FROM results WHERE race_id=? AND data_origin='real' ORDER BY finish_order`, bet.race_id)
     const entries = await all<any>(db, `SELECT number,features_json FROM entries WHERE race_id=? AND data_origin='real' ORDER BY number`, bet.race_id)
     const entryNumbers = entries.map(e => Number(e.number)), resultNumbers = results.map(r => Number(r.number))
-    const terminal = entries.some(e => {
-      const finish = parseFeatures(e.features_json)?.finish_code
-      return typeof finish === 'string' && (['F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走'].includes(finish) || /^K\d$/.test(finish))
-    })
     const payouts = await all<any>(db, `SELECT selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND payout>0`, bet.race_id)
-    if (entryNumbers.length !== 6 || entryNumbers.some((n, i) => n !== i + 1) || terminal || results.length !== 6
-      || results.some((r, i) => Number(r.finish_order) !== i + 1)
-      || new Set(resultNumbers).size !== 6 || resultNumbers.some(n => !entryNumbers.includes(n))
-      || payouts.length !== 1 || payouts[0].selection !== results.slice(0, 3).map(r => String(r.number)).join('-')) continue
-    const won = bet.selection === payouts[0].selection
-    const payout = won ? Math.floor(Number(bet.stake) * Number(payouts[0].payout) / 100) : 0
+    if (entryNumbers.length !== 6 || entryNumbers.some((n, i) => n !== i + 1)
+      || new Set(resultNumbers).size !== results.length || resultNumbers.some(n => !entryNumbers.includes(n))) continue
+    const mappedEntries=entries.map(e => ({
+      number: Number(e.number), finishCode: parseFeatures(e.features_json)?.finish_code ?? null,
+    }))
+    const verifiedTerminalNumbers:number[]=[]
+    for(const entry of mappedEntries){
+      if(entry.finishCode==='転覆'&&String(bet.selection).split('-').includes(String(entry.number))
+        &&await verifiedNoRefundCapsize(db,{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no},entry.number))verifiedTerminalNumbers.push(entry.number)
+    }
+    const outcome = verifiedTrifectaOutcome(String(bet.selection), mappedEntries,
+      results.map(r => ({ number: Number(r.number), finishOrder: Number(r.finish_order) })),
+      payouts.map(p => ({ selection: String(p.selection), payout: Number(p.payout) })),verifiedTerminalNumbers)
+    if (!outcome) continue
+    const won = outcome.won
+    const payout = won ? Math.floor(Number(bet.stake) * outcome.payoutPer100 / 100) : 0
     if (!db.batch) break
     const settledAt = new Date().toISOString()
     const changes = await db.batch([

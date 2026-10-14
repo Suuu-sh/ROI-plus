@@ -1,6 +1,7 @@
 import { normalHistorySnapshot, resetNormalHistory, validSnapshot } from './services/resetNormalHistory.js';
 import { fetchPurchaseOdds, purchaseOddsContext, type PurchaseOdds, type PurchaseOddsContext } from './services/purchaseOdds.js';
 import { finalTrifectaOdds } from './services/finalTrifectaOdds.js';
+import { verifiedNoRefundCapsize, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './services/trifectaSettlement.js';
 import { collectionIssues } from './services/collectionIssues.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
@@ -48,25 +49,14 @@ const isTerminalFinishCode = (value: unknown): boolean =>
   typeof value === 'string' && (['F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走'].includes(value)
     || /^K\d$/.test(value));
 async function hasVerifiedCapsizeNoRefund(db: Db, race: {id:string;race_date:string;venue_id:string;race_no:number}, number: number): Promise<boolean> {
-  const record=await first<any>(db,'SELECT target_date,status,reason FROM collection_runs WHERE id=? AND source=? AND sport=\'boat\'',`boat-result:${race.id}`,RESULTS_SOURCE);
-  if(!record||record.status!=='success'||record.target_date!==race.race_date)return false;
-  let evidence:any;
-  try{evidence=JSON.parse(record.reason||'{}')}catch{return false;}
-  const expectedUrl=resultUrl({id:race.id,venue_id:race.venue_id,race_no:race.race_no,race_date:race.race_date});
-  const fetchedAtMs=typeof evidence?.fetchedAt==='string'&&/(Z|[+-]\d{2}:\d{2})$/i.test(evidence.fetchedAt)?Date.parse(evidence.fetchedAt):NaN;
-  return evidence?.raceId===race.id && evidence?.quality==='verified-official-outcome-v2'
-    && evidence?.url===expectedUrl && typeof evidence?.sha256==='string' && /^[a-f0-9]{64}$/.test(evidence.sha256)
-    && Number.isFinite(fetchedAtMs) && fetchedAtMs<=Date.now()
-    && evidence?.refundTablePresent===true && evidence?.refundPolicy==='official-post-start-capsize-v1'
-    && Array.isArray(evidence?.nonRefundableNumbers) && evidence.nonRefundableNumbers.includes(number)
-    && Array.isArray(evidence?.terminalEntries) && evidence.terminalEntries.some((x:any)=>x?.number===number&&x?.finishCode==='転覆');
+  return verifiedNoRefundCapsize(db,race,number);
 }
 const app = new Hono<Ctx>().basePath('/api');
 // Static deployment diagnostic only: no build SHA, account data, or secrets.
 // Register first so it also marks CORS, proxy-guard, auth, and cache responses.
 app.use('*', async (c, next) => {
   await next();
-  c.header('X-ROI-API-Revision', 'fresh-t60-purchase-odds-v1');
+  c.header('X-ROI-API-Revision', 'ten-minute-results-settlement-v1');
 });
 app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','OPTIONS'], allowHeaders: ['Content-Type','Authorization','X-ROI-Cache-Bypass'], exposeHeaders: ['X-ROI-Read-Cache'] }));
 // 本番では閲覧系 API を、Cloudflare Access で保護された画面 Worker（Service Binding）経由に限定する。
@@ -443,7 +433,7 @@ async function settleOpen(db: Db) {
       b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,
       b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.bet_type,b.race_id,b.data_origin,b.race_id,b.data_origin,b.selection);
     if (!integrity || integrity.entry_count <= 0
-        || integrity.result_count + integrity.terminal_entry_count !== integrity.entry_count
+        || (b.bet_type !== 'trifecta' && integrity.result_count + integrity.terminal_entry_count !== integrity.entry_count)
         || integrity.terminal_result_conflict_count > 0
         || integrity.distinct_result_count !== integrity.result_count
         || integrity.matched_result_count !== integrity.result_count
@@ -451,12 +441,24 @@ async function settleOpen(db: Db) {
         || (b.bet_type === 'win' && integrity.nonwinner_win_payout_count > 0)
         || (b.bet_type === 'win' ? integrity.paid_winner_count !== integrity.winner_count : integrity.ticket_payout_count <= 0)) continue;
     if (b.bet_type === 'trifecta') {
-      const fullOrder = await all<any>(db, 'SELECT number,finish_order FROM results WHERE race_id=? AND data_origin=? ORDER BY finish_order,number', b.race_id, b.data_origin);
-      if (integrity.entry_count !== 6 || integrity.winner_count !== 1 || fullOrder.length !== 6
-          || fullOrder.some((x: any, i: number) => x.finish_order !== i + 1)) continue;
-      const winningSelection = fullOrder.slice(0,3).map((x: any) => String(x.number)).join('-');
+      const [partialOrder, entries] = await Promise.all([
+        all<any>(db, 'SELECT number,finish_order FROM results WHERE race_id=? AND data_origin=? ORDER BY finish_order,number', b.race_id, b.data_origin),
+        all<any>(db, 'SELECT number,features_json FROM entries WHERE race_id=? AND data_origin=? ORDER BY number', b.race_id, b.data_origin),
+      ]);
       const trifectaPayouts = await all<any>(db, "SELECT selection,payout FROM payouts WHERE race_id=? AND data_origin=? AND bet_type='trifecta' AND payout>0", b.race_id, b.data_origin);
-      if (trifectaPayouts.length !== 1 || trifectaPayouts[0].selection !== winningSelection) continue;
+      const mappedEntries=entries.map((entry:any)=>{
+        let finishCode:string|null=null;try{const parsed=JSON.parse(entry.features_json??'{}');if(typeof parsed.finish_code==='string')finishCode=parsed.finish_code;}catch{/* malformed metadata stays unknown */}
+        return {number:Number(entry.number),finishCode};
+      });
+      const verifiedTerminalNumbers:number[]=[];
+      for(const entry of mappedEntries){
+        if(isTerminalFinishCode(entry.finishCode)&&String(b.selection).split('-').includes(String(entry.number))
+          &&await verifiedNoRefundCapsize(db,{id:b.race_id,race_date:b.race_date,venue_id:b.venue_id,race_no:b.race_no},entry.number))verifiedTerminalNumbers.push(entry.number);
+      }
+      const outcome = verifiedTrifectaOutcome(String(b.selection), mappedEntries,
+        partialOrder.map((row:any)=>({number:Number(row.number),finishOrder:Number(row.finish_order)})),
+        trifectaPayouts.map((row:any)=>({selection:String(row.selection),payout:Number(row.payout)})),verifiedTerminalNumbers);
+      if (!outcome) continue;
     } else if (b.bet_type !== 'win') {
       // Other ticket settlement semantics require their own exact outcome
       // contract; leave historical/manual rows open rather than guessing.
@@ -489,11 +491,26 @@ async function settleOpen(db: Db) {
   return settled + await settleExperimentalOpen(db) + await settleHistoricalTrifectaExperimentOpen(db);
 }
 async function settleExperimentalOpen(db: Db) {
- const open=await all<any>(db,`SELECT b.* FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id
+ const open=await all<any>(db,`SELECT b.*,r.race_date,r.venue_id,r.race_no FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id
    WHERE b.status='open' AND r.status='finished' AND r.data_origin='real'
    AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id)
    AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-   ORDER BY b.placed_at,b.id LIMIT 4`);
+   AND (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real')=6
+   AND (SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')+
+       (SELECT COUNT(*) FROM entries e WHERE e.race_id=r.id AND e.data_origin='real' AND ${terminalFinishCodeSql})=6
+   AND NOT EXISTS(SELECT 1 FROM entries e JOIN results x ON x.race_id=e.race_id AND x.number=e.number AND x.data_origin=e.data_origin
+     WHERE e.race_id=r.id AND e.data_origin='real' AND ${terminalFinishCodeSql})
+   AND (SELECT COUNT(DISTINCT x.number) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
+   AND (SELECT COUNT(DISTINCT x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
+   AND COALESCE((SELECT MIN(x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real'),0)=1
+   AND (SELECT MAX(x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
+   AND (SELECT COUNT(*) FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0)=1
+   AND EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
+     AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||
+       (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||
+       (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3))
+   AND ${verifiedSelectedTerminalOutcomeSql}
+   ORDER BY b.placed_at,b.id LIMIT 32`);
  let settled=0;
  for(const bet of open){
    const integrity=await first<any>(db,`SELECT
@@ -505,13 +522,28 @@ async function settleExperimentalOpen(db: Db) {
       (SELECT MAX(finish_order) FROM results WHERE race_id=? AND data_origin='real') max_order,
       (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin='real' AND ${terminalFinishCodeSql}) terminal_count`,
      bet.race_id,bet.race_id,bet.race_id,bet.race_id,bet.race_id,bet.race_id,bet.race_id);
-   if(!integrity||integrity.entry_count!==6||integrity.result_count!==6||integrity.distinct_count!==6||integrity.order_count!==6
-      ||integrity.min_order!==1||integrity.max_order!==6||integrity.terminal_count!==0)continue;
-   const order=await all<any>(db,'SELECT number FROM results WHERE race_id=? AND data_origin=\'real\' ORDER BY finish_order',bet.race_id);
-   const winningSelection=order.slice(0,3).map((x:any)=>String(x.number)).join('-');
+   if(!integrity||integrity.entry_count!==6||integrity.result_count+integrity.terminal_count!==6
+      ||integrity.distinct_count!==integrity.result_count||integrity.order_count!==integrity.result_count
+      ||integrity.min_order!==1||integrity.max_order!==integrity.result_count)continue;
+   const [order,entries]=await Promise.all([
+     all<any>(db,'SELECT number,finish_order FROM results WHERE race_id=? AND data_origin=\'real\' ORDER BY finish_order',bet.race_id),
+     all<any>(db,'SELECT number,features_json FROM entries WHERE race_id=? AND data_origin=\'real\' ORDER BY number',bet.race_id),
+   ]);
    const payouts=await all<any>(db,"SELECT selection,payout FROM payouts WHERE race_id=? AND data_origin='real' AND bet_type='trifecta' AND payout>0",bet.race_id);
-   if(payouts.length!==1||payouts[0].selection!==winningSelection)continue;
-   const won=bet.selection===winningSelection,payout=won?payoutYen(Number(bet.stake),Number(payouts[0].payout)):0;
+   const mappedEntries=entries.map((entry:any)=>{
+     let finishCode:string|null=null;try{const parsed=JSON.parse(entry.features_json??'{}');if(typeof parsed.finish_code==='string')finishCode=parsed.finish_code;}catch{/* malformed metadata stays unknown */}
+     return {number:Number(entry.number),finishCode};
+   });
+   const verifiedTerminalNumbers:number[]=[];
+   for(const entry of mappedEntries){
+     if(isTerminalFinishCode(entry.finishCode)&&String(bet.selection).split('-').includes(String(entry.number))
+       &&await verifiedNoRefundCapsize(db,{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no},entry.number))verifiedTerminalNumbers.push(entry.number);
+   }
+   const outcome=verifiedTrifectaOutcome(String(bet.selection),mappedEntries,
+     order.map((row:any)=>({number:Number(row.number),finishOrder:Number(row.finish_order)})),
+     payouts.map((row:any)=>({selection:String(row.selection),payout:Number(row.payout)})),verifiedTerminalNumbers);
+   if(!outcome)continue;
+   const won=outcome.won,payout=won?payoutYen(Number(bet.stake),outcome.payoutPer100):0;
    if(!await reserveWorkerWrites(db,2))break;
    if(!db.batch)break;
    const settledAt=now();
@@ -1844,13 +1876,13 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
   const paperEnabled=env.ENABLE_AUTO_BET==='true' || (await setting(env.DB,'auto_bet_enabled','false'))==='true';
   if (paperEnabled) {
     // Every existing minute tick evaluates the bounded T-60 window before
-    // collector work and before the special :05 early return.
+    // collector work and before ten-minute result collection.
     const paper=await autoBetWithReport(env.DB,true,Date.now(),oddsContext);
     console.info(JSON.stringify({event:'paper-decision-timing',...paper.report}));
   }
   // Experimental trifecta decisions use a minute-resolution T-60 window and
   // therefore run on every tick, independently from normal auto-bet settings.
-  // This is before the hourly :05 early return and before ten-minute maintenance.
+  // This is before ten-minute result collection and maintenance.
   const experimental=await experimentalPaperDecision(env.DB,Date.now(),oddsContext);
   console.info(JSON.stringify({event:'experimental-paper-decision',...experimental}));
   const historical=await historicalTrifectaExperimentDecision(env.DB,Date.now(),oddsContext);
@@ -1866,20 +1898,21 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
     console.info(JSON.stringify({event:'historical-trifecta-r2-archive',failed:archiveObservations.length,reason:'archive_binding_unavailable'}));
   }
   const paperBoundary = Math.floor(event.scheduledTime / 60_000) % 10 === 0;
-  // Reserve minute :05 for the hourly result pass. This is not a ten-minute
-  // maintenance boundary; isolating it avoids consuming the 50-query free
-  // D1 allowance needed by odds + settlement in the same invocation.
-  if (env.ENABLE_BOATRACE_RESULTS_SCRAPE === 'true' && Math.floor(event.scheduledTime/60_000)%60===5) {
+  // Recover open-purchase outcomes every ten minutes before settlement. The
+  // collector prioritizes open normal/experimental/historical tickets and is
+  // bounded by its request and write budgets; paper decisions already ran.
+  if (env.ENABLE_BOATRACE_RESULTS_SCRAPE === 'true' && paperBoundary) {
+    let collection: any = { status:'failed', reason:'ten-minute-pass-failed' };
+    let settlement: number | null = null;
     try {
       let archiveTargets={raceIds:[] as string[],scanned:0,truncated:false,fromDate:'',throughDate:''};
       if(env.ENABLE_HISTORICAL_TRIFECTA_ARCHIVE==='true'&&env.TRIFECTA_ARCHIVE){
         try{archiveTargets=await listHistoricalLabelTargetRaceIds(env.TRIFECTA_ARCHIVE,new Date());}catch{archiveTargets={...archiveTargets,raceIds:[]};}
       }
-      const result=await collectResults(env.DB,new Date(),{requestBudget,archiveRaceIds:archiveTargets.raceIds});
-      console.info(JSON.stringify({event:'boat-hourly-results',status:result.status,targets:result.targets,verified:result.verified,records:result.records,attempted:result.attempted,archiveCandidates:archiveTargets.raceIds.length,archiveScanned:archiveTargets.scanned,reason:'reason' in result?result.reason:null,fetchFailures:'fetchFailures' in result?result.fetchFailures:[]}));
-    } catch {
-      console.info(JSON.stringify({event:'boat-hourly-results',status:'failed',reason:'hourly-pass-failed'}));
-    }
+      collection=await collectResults(env.DB,new Date(),{requestBudget,archiveRaceIds:archiveTargets.raceIds});
+    } catch { /* Saved evidence still gets a settlement attempt. */ }
+    try { settlement=(await cron(env.DB,false)).settled; } catch { /* Retry settlement and maintenance next scheduled tick. */ }
+    console.info(JSON.stringify({event:'boat-ten-minute-results',status:collection.status,targets:collection.targets,verified:collection.verified,records:collection.records,attempted:collection.attempted,settled:settlement,reason:collection.reason??null,fetchFailures:collection.fetchFailures??[]}));
     return;
   }
   if (paperBoundary) {

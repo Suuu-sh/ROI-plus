@@ -109,8 +109,8 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   const trifecta = payouts.find(payout => payout.betType === 'trifecta');
   const firstThree = [1, 2, 3].map(rank => numericRows.find(row => row.finishOrder === rank)!.number).join('-');
   if (trifecta && trifecta.selection !== firstThree) fail();
-  const nonRefundableNumbers = refundTableEmpty && terminalRows.length === 1 && terminalRows[0].finishCode === '転覆'
-    ? [terminalRows[0].number] : [];
+  const nonRefundableNumbers = refundTableEmpty && terminalRows.length > 0 && terminalRows.every(row => row.finishCode === '転覆')
+    ? terminalRows.map(row => row.number) : [];
   return { results: numericRows.map(({ number, finishOrder }) => ({ number, finishOrder: finishOrder! })),
     terminalEntries: terminalRows.map(({number,finishCode})=>({number,finishCode:finishCode!})),
     refundTablePresent: refundTables.length === 1, nonRefundableNumbers, payouts };
