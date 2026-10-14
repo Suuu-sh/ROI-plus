@@ -41,7 +41,17 @@ const protectedScopes = [
 function fail(message) { throw new Error(message) }
 function run(args, timeout=60000) {
   const result = spawnSync(process.execPath,[wrangler,...args],{cwd:apiRoot,encoding:'utf8',timeout,maxBuffer:maxBytes,env:{...process.env,CI:'true'}})
-  if (result.error || result.status!==0) fail('A bounded remote D1 operation failed.')
+  if (result.error || result.status!==0) {
+    const output=`${result.stderr||''}\n${result.stdout||''}`
+    const category=result.error?.code==='ETIMEDOUT'?'timeout'
+      :/syntax error/i.test(output)?'sql_syntax'
+      :/too long|too large|statement.{0,20}limit|max.{0,20}length/i.test(output)?'statement_limit'
+      :/foreign key/i.test(output)?'foreign_key'
+      :/transaction|rollback/i.test(output)?'transaction'
+      :/unauthorized|authentication|not authenticated/i.test(output)?'auth'
+      :'remote_d1_nonzero'
+    fail(`A bounded remote D1 operation failed [${category}].`)
+  }
   return result.stdout
 }
 function parseQuery(output) {
@@ -51,37 +61,55 @@ function parseQuery(output) {
   return payload[0].results
 }
 function query(sql) { return parseQuery(run(['d1','execute','roi-plus','--remote','--json','--command',sql])) }
+function preflightSnapshot(snapshot) {
+  for(const check of buildSnapshotGuardChecks(snapshot)){
+    const rows=query(check.sql)
+    if(rows.length!==1||Number(rows[0].ok)!==1)fail(`Read-only purchase snapshot preflight mismatch (${check.table}_${check.part}).`)
+  }
+}
 function digest(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex') }
 function quote(value) { return "'"+String(value).replaceAll("'","''")+"'" }
-function scopedSelect([,select], limit=null, offset=0) { return `${select}${limit===null?'':` LIMIT ${limit} OFFSET ${offset}`}` }
-function projection(rows) {
-  const keys=Object.keys(rows[0]||{})
-  if(!keys.length) fail('Cannot construct a row guard without a known schema.')
-  return keys.flatMap(k=>[quote(k),`"${k}"`]).join(',')
-}
 export function buildSnapshotGuardStatements(snapshot) {
+  return buildSnapshotGuardChecks(snapshot).map(check=>`SELECT CASE WHEN ${check.condition} THEN 1 ELSE json('snapshot_guard_${check.table}_${check.part}') END;`)
+}
+export function buildSnapshotGuardChecks(snapshot) {
   const result=[]
   for(const [name,select] of scopes){
     const rows=snapshot.tables[name]
     if(!Array.isArray(rows))fail('Scoped snapshot table is missing.')
     if(!rows.length){
-      result.push(`SELECT CASE WHEN (SELECT COUNT(*) FROM (${select}))=0 THEN 1 ELSE json('snapshot changed') END;`)
+      const condition=`(SELECT COUNT(*) FROM (${select}))=0`
+      result.push({table:name,part:0,condition,sql:`SELECT CASE WHEN ${condition} THEN 1 ELSE 0 END AS ok;`})
       continue
     }
-    const fields=projection(rows)
-    let offset=0
-    while(offset<rows.length){
-      let count=0, statement=''
-      for(let n=1;offset+n<=rows.length;n++){
-        const expected=JSON.stringify(rows.slice(offset,offset+n))
-        const candidate=`SELECT CASE WHEN (SELECT COALESCE(json_group_array(json_object(${fields})),'[]') FROM (${scopedSelect([name,select],n,offset)}))=${quote(expected)} THEN 1 ELSE json('snapshot changed') END;`
-        if(Buffer.byteLength(candidate)>maxSqlStatementBytes)break
-        count=n;statement=candidate
-      }
-      if(!count)fail('A scoped snapshot row exceeds the bounded D1 statement size.')
-      result.push(statement);offset+=count
+    let part=0,conditions=[]
+    const flush=()=>{
+      if(!conditions.length)return
+      const condition=conditions.join(' AND ')
+      result.push({table:name,part,condition,sql:`SELECT CASE WHEN ${condition} THEN 1 ELSE 0 END AS ok;`})
+      conditions=[];part++
     }
-    result.push(`SELECT CASE WHEN (SELECT COUNT(*) FROM (${select}))=${rows.length} THEN 1 ELSE json('snapshot row count changed') END;`)
+    for(const row of rows){
+      const keys=Object.keys(row)
+      if(!keys.length)fail('Scoped snapshot row has no fields.')
+      const values=keys.map(key=>{
+        const value=row[key]
+        if(value===null)return 'NULL'
+        if(typeof value==='string')return quote(value)
+        if(typeof value==='number'&&Number.isFinite(value))return String(value)
+        fail('Scoped snapshot contains an unsupported SQLite value.')
+      })
+      const condition=`EXISTS(SELECT 1 FROM (${select}) AS s WHERE ${keys.map((key,i)=>`s."${key}" IS ${values[i]}`).join(' AND ')})`
+      const candidate=[...conditions,condition].join(' AND ')
+      if(Buffer.byteLength(`SELECT CASE WHEN ${candidate} THEN 1 ELSE 0 END AS ok;`)>maxSqlStatementBytes){
+        flush()
+        if(Buffer.byteLength(`SELECT CASE WHEN ${condition} THEN 1 ELSE 0 END AS ok;`)>maxSqlStatementBytes)fail('A scoped snapshot row exceeds the bounded D1 statement size.')
+      }
+      conditions.push(condition)
+    }
+    flush()
+    const countCondition=`(SELECT COUNT(*) FROM (${select}))=${rows.length}`
+    result.push({table:name,part,condition:countCondition,sql:`SELECT CASE WHEN ${countCondition} THEN 1 ELSE 0 END AS ok;`})
   }
   if(result.length>maxSqlStatements)fail('Scoped snapshot requires too many atomic guard statements.')
   return result
@@ -179,6 +207,7 @@ async function deleteScoped() {
   if(!validateSnapshotIdentity(snapshot,process.env.GITHUB_SHA)) fail('Scoped backup identity or source SHA mismatch.')
   const currentTrigger=await schemaInfo()
   if (digest(currentTrigger)!==digest(snapshot.triggerSchema)) fail('Trigger schema changed since backup.')
+  preflightSnapshot(snapshot)
   const sql=sqlFile(snapshot)
   await writeFile(sqlPath,sql,{mode:0o600})
   if((await stat(sqlPath)).size>maxBytes) fail('Deletion transaction exceeded size limit.')

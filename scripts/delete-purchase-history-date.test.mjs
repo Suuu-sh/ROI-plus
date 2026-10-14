@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import Database from 'better-sqlite3'
-import { assertPreservedRows, buildSnapshotGuardStatements, ledgerInvariantSql, sqlFile, validateSnapshotIdentity } from './delete-purchase-history-date.mjs'
+import { assertPreservedRows, buildSnapshotGuardChecks, buildSnapshotGuardStatements, ledgerInvariantSql, sqlFile, validateSnapshotIdentity } from './delete-purchase-history-date.mjs'
 
 const trigger = `CREATE TRIGGER trg_experimental_paper_bet_reconciliations_no_delete BEFORE DELETE ON experimental_paper_bet_reconciliations BEGIN SELECT RAISE(ABORT, 'experimental paper bet reconciliations are immutable'); END`
 function fixture() {
@@ -11,7 +11,7 @@ function fixture() {
  CREATE TABLE daily_summaries(date TEXT,sport TEXT,PRIMARY KEY(date,sport));
  CREATE TABLE paper_decisions(race_id TEXT,phase TEXT,audit TEXT,PRIMARY KEY(race_id,phase));
  CREATE TABLE experimental_paper_decisions(id TEXT PRIMARY KEY,race_id TEXT REFERENCES races(id));
- CREATE TABLE experimental_paper_bets(id TEXT PRIMARY KEY,decision_id TEXT REFERENCES experimental_paper_decisions(id) ON DELETE RESTRICT,race_id TEXT REFERENCES races(id),status TEXT,stake INTEGER,payout INTEGER);
+ CREATE TABLE experimental_paper_bets(id TEXT PRIMARY KEY,decision_id TEXT REFERENCES experimental_paper_decisions(id) ON DELETE RESTRICT,race_id TEXT REFERENCES races(id),status TEXT,stake INTEGER,payout INTEGER,probability REAL,prob_std REAL);
  CREATE TABLE experimental_paper_bet_reconciliations(bet_id TEXT PRIMARY KEY REFERENCES experimental_paper_bets(id) ON DELETE RESTRICT,refund_amount INTEGER);
  CREATE TABLE historical_trifecta_experiment_decisions(id TEXT PRIMARY KEY,race_id TEXT REFERENCES races(id));
  CREATE TABLE historical_trifecta_experiment_bets(id TEXT PRIMARY KEY,decision_id TEXT REFERENCES historical_trifecta_experiment_decisions(id) ON DELETE RESTRICT,race_id TEXT REFERENCES races(id),status TEXT,stake INTEGER,payout INTEGER);
@@ -23,7 +23,7 @@ function fixture() {
  db.prepare('INSERT INTO daily_summaries VALUES(?,?)').run('2026-10-13','boat');db.prepare('INSERT INTO daily_summaries VALUES(?,?)').run('2026-10-14','boat')
  db.prepare('INSERT INTO paper_decisions VALUES(?,?,?)').run('r13','primary_t60','keep-guard')
  db.prepare('INSERT INTO experimental_paper_decisions VALUES(?,?)').run('ed13','r13');db.prepare('INSERT INTO experimental_paper_decisions VALUES(?,?)').run('ed14','r14')
- const exp=db.prepare('INSERT INTO experimental_paper_bets VALUES(?,?,?,?,?,?)')
+ const exp=db.prepare('INSERT INTO experimental_paper_bets(id,decision_id,race_id,status,stake,payout) VALUES(?,?,?,?,?,?)')
  exp.run('open13','ed13','r13','open',100,null);exp.run('lost13','ed13','r13','lost',200,0);exp.run('reconciled22','ed13','r13','void',22,22);exp.run('future14','ed14','r14','open',100,null);exp.run('futureLost14','ed14','r14','lost',200,0);exp.run('futureWin14','ed14','r14','won',300,700);exp.run('futureVoid14','ed14','r14','void',100,100)
  db.prepare('INSERT INTO experimental_paper_bet_reconciliations VALUES(?,?)').run('reconciled22',22)
  db.prepare('INSERT INTO historical_trifecta_experiment_decisions VALUES(?,?)').run('hd13','r13');db.prepare('INSERT INTO historical_trifecta_experiment_decisions VALUES(?,?)').run('hd14','r14')
@@ -109,4 +109,18 @@ test('accepts the uploaded version-2 scoped backup manifest at its approved SHA'
  assert.equal(validateSnapshotIdentity({...captured,version:1},sha),false)
  assert.equal(validateSnapshotIdentity(captured,'b'.repeat(40)),false)
  assert.equal(validateSnapshotIdentity({...captured,date:'2026-10-14'},sha),false)
+})
+
+test('REAL-affinity snapshots compare numeric values without JSON text formatting',()=>{
+ const db=fixture()
+ db.prepare("UPDATE experimental_paper_bets SET probability=1.0,prob_std=0.05 WHERE id='open13'").run()
+ const before=snapshot(db)
+ const rows=before.tables.experimental_paper_bets
+ const fields=Object.keys(rows[0]).flatMap(k=>[`'${k}'`,`"${k}"`]).join(',')
+ const sql="SELECT COALESCE(json_group_array(json_object("+fields+")),'[]') AS j FROM (SELECT * FROM experimental_paper_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13') ORDER BY id)"
+ assert.notEqual(db.prepare(sql).get().j,JSON.stringify(rows))
+ assert.ok(buildSnapshotGuardChecks(before).every(check=>db.prepare(check.sql).get().ok===1))
+ db.exec(sqlFile(before))
+ assert.equal(db.prepare("SELECT count(*) n FROM experimental_paper_bets WHERE race_id='r13'").get().n,0)
+ db.close()
 })
