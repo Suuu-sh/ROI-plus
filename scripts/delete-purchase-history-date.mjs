@@ -119,6 +119,14 @@ export function assertPreservedSummaries(before, after) {
     for(const field of ['bets','stake','payout'])if(Number(current[field])<Number(old[field]))fail('Non-target daily summary moved backwards.')
   }
 }
+export function validateSnapshotIdentity(snapshot, sourceSha) {
+  return snapshot?.version===2
+    && snapshot.date===targetDate
+    && typeof sourceSha==='string'
+    && snapshot.sourceSha===sourceSha
+    && typeof snapshot.restorePointBookmark==='string'
+    && snapshot.tables && snapshot.protection && snapshot.hashes && Array.isArray(snapshot.triggerSchema)
+}
 function validateApproval() {
   if (!/^[a-f0-9]{40}$/.test(process.env.APPROVED_SOURCE_SHA||'') || process.env.APPROVED_SOURCE_SHA!==process.env.GITHUB_SHA) fail('Approved source SHA must exactly match this workflow commit.')
   if (process.env.DELETE_CONFIRMATION!==confirmation) fail('Explicit date-scoped deletion confirmation is required.')
@@ -168,7 +176,7 @@ export function sqlFile(snapshot) {
 async function deleteScoped() {
   validateApproval()
   const snapshot=JSON.parse(await readFile(backupPath,'utf8'))
-  if(snapshot.version!==1||snapshot.date!==targetDate||snapshot.sourceSha!==process.env.GITHUB_SHA||!snapshot.tables) fail('Scoped backup identity or source SHA mismatch.')
+  if(!validateSnapshotIdentity(snapshot,process.env.GITHUB_SHA)) fail('Scoped backup identity or source SHA mismatch.')
   const currentTrigger=await schemaInfo()
   if (digest(currentTrigger)!==digest(snapshot.triggerSchema)) fail('Trigger schema changed since backup.')
   const sql=sqlFile(snapshot)

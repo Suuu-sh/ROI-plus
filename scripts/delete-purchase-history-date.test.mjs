@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import Database from 'better-sqlite3'
-import { assertPreservedRows, buildSnapshotGuardStatements, ledgerInvariantSql, sqlFile } from './delete-purchase-history-date.mjs'
+import { assertPreservedRows, buildSnapshotGuardStatements, ledgerInvariantSql, sqlFile, validateSnapshotIdentity } from './delete-purchase-history-date.mjs'
 
 const trigger = `CREATE TRIGGER trg_experimental_paper_bet_reconciliations_no_delete BEFORE DELETE ON experimental_paper_bet_reconciliations BEGIN SELECT RAISE(ABORT, 'experimental paper bet reconciliations are immutable'); END`
 function fixture() {
@@ -100,4 +100,13 @@ test('non-target preservation allows only an open-to-settled mutable transition'
  assert.doesNotThrow(()=>assertPreservedRows('bets',[old],[{...old,status:'lost',payout:0,profit:-100,settled_at:'2026-10-14T00:00:00Z'}],'id',['status','payout','profit','settled_at']))
  assert.throws(()=>assertPreservedRows('bets',[old],[{...old,selection:'2'}],'id',['status','payout','profit','settled_at']),/immutable value changed/)
  assert.throws(()=>assertPreservedRows('bets',[old],[],'id',['status','payout','profit','settled_at']),/disappeared/)
+})
+
+test('accepts the uploaded version-2 scoped backup manifest at its approved SHA',()=>{
+ const sha='a'.repeat(40)
+ const captured={version:2,date:'2026-10-13',sourceSha:sha,restorePointBookmark:'opaque-restore-point',tables:{bets:[]},protection:{bets:[]},hashes:{bets:'sha256'},triggerSchema:[]}
+ assert.equal(validateSnapshotIdentity(captured,sha),true)
+ assert.equal(validateSnapshotIdentity({...captured,version:1},sha),false)
+ assert.equal(validateSnapshotIdentity(captured,'b'.repeat(40)),false)
+ assert.equal(validateSnapshotIdentity({...captured,date:'2026-10-14'},sha),false)
 })
