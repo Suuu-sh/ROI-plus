@@ -1,0 +1,68 @@
+name: Apply approved ROI+ official refund schema
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact reviewed source commit SHA (must equal this workflow's commit)
+        required: true
+        type: string
+      confirmation:
+        description: Type APPLY ROI+ MIGRATION 0015
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: roi-plus-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Snapshot and apply only migration 0015
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate explicit approval
+        env:
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          test "$APPROVED_SHA" = "$GITHUB_SHA"
+          test "$CONFIRMATION" = "APPLY ROI+ MIGRATION 0015"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.approved_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate schema preservation and migration safeguards
+        run: node --test db/migrations/0015_official_paper_refunds.test.mjs scripts/apply-official-paper-refund-schema.test.mjs
+      - name: Capture bounded backup and Time Travel restore point
+        run: node scripts/apply-official-paper-refund-schema.mjs --prepare
+        env:
+          APPROVED_SOURCE_SHA: ${{ inputs.approved_sha }}
+          REFUND_SCHEMA_CONFIRMATION: ${{ inputs.confirmation }}
+          REFUND_BACKUP_DIR: ${{ runner.temp }}/roi-plus-refund-backup
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Preserve encrypted-in-transit production data artifact before migration
+        uses: actions/upload-artifact@v4
+        with:
+          name: roi-plus-refund-schema-backup-${{ github.run_id }}
+          path: ${{ runner.temp }}/roi-plus-refund-backup/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Apply sole approved migration and verify preserved data
+        run: node scripts/apply-official-paper-refund-schema.mjs --apply
+        env:
+          APPROVED_SOURCE_SHA: ${{ inputs.approved_sha }}
+          REFUND_SCHEMA_CONFIRMATION: ${{ inputs.confirmation }}
+          REFUND_BACKUP_DIR: ${{ runner.temp }}/roi-plus-refund-backup
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
