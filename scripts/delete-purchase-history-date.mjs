@@ -26,8 +26,8 @@ const criticalGuardFields = {
   paper_decisions:['race_id','phase'],
   experimental_paper_decisions:['id','race_id'],
   historical_trifecta_experiment_decisions:['id','race_id'],
-  experimental_bankroll:['experiment_key','initial_balance','available_balance'],
-  historical_trifecta_experiment_bankroll:['experiment_key','initial_balance','available_balance'],
+  experimental_bankroll:['experiment_key','initial_balance'],
+  historical_trifecta_experiment_bankroll:['experiment_key','initial_balance'],
 }
 const childTable = 'experimental_paper_bet_reconciliations'
 const childTrigger = 'trg_experimental_paper_bet_reconciliations_no_delete'
@@ -227,13 +227,11 @@ export function sqlFile(snapshot) {
   }
   const triggerSql=snapshot.triggerSchema.find(x=>x.name===childTrigger)?.sql
   if (!triggerSql || !/^[\s\S]+$/.test(triggerSql)) fail('Reconciliation trigger backup missing.')
-  const expExpected=expectedAvailable(snapshot.tables.experimental_bankroll,snapshot.tables.experimental_paper_bets,snapshot.tables.experimental_paper_bet_reconciliations)
-  const histExpected=expectedAvailable(snapshot.tables.historical_trifecta_experiment_bankroll,snapshot.tables.historical_trifecta_experiment_bets)
-  const assertBalance=(table,key,expected)=>`SELECT CASE WHEN (SELECT available_balance FROM ${table} WHERE experiment_key=${quote(key)})=${expected} THEN 1 ELSE json('bankroll reversal mismatch') END;`
+  const assertLedger=(experimental)=>`SELECT CASE WHEN EXISTS(SELECT 1 FROM (${ledgerInvariantSql(experimental)}) AS ledger_check WHERE available_balance=ledger_expected) THEN 1 ELSE json('bankroll ledger invariant mismatch') END;`
   // Wrangler's remote --command sends this as one Cloudflare D1 query request.
   // D1 executes semicolon-separated statements as an atomic batch; --file uses
   // the database-import path and temporarily blocks the database.
-  return `${guardSql.join('\n')}\n${balanceAdjust('experimental_bankroll','boat-trifecta-small-sample-v1','experimental_paper_bets',true)}\n${balanceAdjust('historical_trifecta_experiment_bankroll','boat-trifecta-historical-base-v1','historical_trifecta_experiment_bets')}\n${assertBalance('experimental_bankroll','boat-trifecta-small-sample-v1',expExpected)}\n${assertBalance('historical_trifecta_experiment_bankroll','boat-trifecta-historical-base-v1',histExpected)}\nDROP TRIGGER ${childTrigger};\nDELETE FROM ${childTable} WHERE bet_id IN (SELECT b.id FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id WHERE r.race_date='2026-10-13');\nDELETE FROM experimental_paper_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\n${triggerSql};\nDELETE FROM historical_trifecta_experiment_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\nDELETE FROM bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\nDELETE FROM daily_summaries WHERE date='2026-10-13';\n`
+  return `${guardSql.join('\n')}\n${assertLedger(true)}\n${assertLedger(false)}\n${balanceAdjust('experimental_bankroll','boat-trifecta-small-sample-v1','experimental_paper_bets',true)}\n${balanceAdjust('historical_trifecta_experiment_bankroll','boat-trifecta-historical-base-v1','historical_trifecta_experiment_bets')}\nDROP TRIGGER ${childTrigger};\nDELETE FROM ${childTable} WHERE bet_id IN (SELECT b.id FROM experimental_paper_bets b JOIN races r ON r.id=b.race_id WHERE r.race_date='2026-10-13');\nDELETE FROM experimental_paper_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\n${triggerSql};\nDELETE FROM historical_trifecta_experiment_bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\nDELETE FROM bets WHERE race_id IN (SELECT id FROM races WHERE race_date='2026-10-13');\nDELETE FROM daily_summaries WHERE date='2026-10-13';\n${assertLedger(true)}\n${assertLedger(false)}\n`
 }
 async function deleteScoped() {
   validateApproval()

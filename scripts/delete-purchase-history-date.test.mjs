@@ -82,6 +82,26 @@ test('snapshot guard rolls back all changes on concurrent target write',()=>{
  assert.equal(db.prepare("SELECT count(*) n FROM experimental_paper_bet_reconciliations").get().n,1)
  db.close()
 })
+test('allows a post-backup non-target purchase and reverses only the scoped target ledger effect',()=>{
+ const db=fixture(), before=snapshot(db)
+ db.prepare("INSERT INTO experimental_paper_bets(id,decision_id,race_id,status,stake,payout) VALUES('new14','ed14','r14','open',50,NULL)").run()
+ db.prepare("UPDATE experimental_bankroll SET available_balance=available_balance-50 WHERE experiment_key='boat-trifecta-small-sample-v1'").run()
+ db.prepare("INSERT INTO historical_trifecta_experiment_bets VALUES('hnew14','hd14','r14','open',50,NULL)").run()
+ db.prepare("UPDATE historical_trifecta_experiment_bankroll SET available_balance=available_balance-50 WHERE experiment_key='boat-trifecta-historical-base-v1'").run()
+ db.transaction(()=>db.exec(sqlFile(before)))()
+ assert.equal(db.prepare("SELECT available_balance FROM experimental_bankroll").get().available_balance,100050)
+ assert.equal(db.prepare("SELECT available_balance FROM historical_trifecta_experiment_bankroll").get().available_balance,100050)
+ for(const experimental of [true,false]){const invariant=db.prepare(ledgerInvariantSql(experimental)).get();assert.equal(invariant.available_balance,invariant.ledger_expected)}
+ db.close()
+})
+test('target ticket status or stake drift since backup aborts before mutation',()=>{
+ const db=fixture(), before=snapshot(db)
+ db.prepare("UPDATE experimental_paper_bets SET stake=90 WHERE id='open13'").run()
+ assert.throws(()=>db.transaction(()=>db.exec(sqlFile(before)))(),/malformed JSON/)
+ assert.equal(db.prepare("SELECT count(*) n FROM experimental_paper_bets WHERE race_id='r13'").get().n,3)
+ assert.equal(db.prepare("SELECT available_balance FROM experimental_bankroll").get().available_balance,99800)
+ db.close()
+})
 test('later delete failure rolls back balance adjustment and child cleanup',()=>{
  const db=fixture(), before=snapshot(db)
  db.exec("CREATE TRIGGER deny_parent BEFORE DELETE ON experimental_paper_bets BEGIN SELECT RAISE(ABORT,'blocked'); END")
