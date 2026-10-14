@@ -11,6 +11,7 @@ import { t } from '../i18n'
 import { EquityChart } from '../components/EquityChart'
 import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
 import { mergePurchaseHistory, type HistoryBet } from '../lib/purchaseHistory'
+import { useVisibleRefresh } from '../lib/useVisibleRefresh'
 import { HistoricalTrifectaExperiment } from '../components/HistoricalTrifectaExperiment'
 import { CountUp, Empty, ErrorState, LiveDot, Loading, Section, Segmented, SportIcon } from '../components/ui'
 
@@ -54,18 +55,19 @@ function raceState(race: PurchasedRace): Exclude<RaceFilter, 'all'> {
 export function OverviewPage() {
   const { origin } = useOrigin()
   const load = async (fresh = false) => {
-    const [performance, normal, experimental] = await Promise.all([api.overview(origin, undefined, fresh), api.bets(origin, undefined, fresh), origin === 'sample' ? Promise.resolve([]) : api.experimentalBets()])
-    return [performance, mergePurchaseHistory(normal, experimental), normal] as const
+    const [performance, historyPerformance, normal, experimental] = await Promise.all([api.overview(origin, undefined, fresh), api.overview(origin, undefined, fresh, 'purchase-history'), api.bets(origin, undefined, fresh), origin === 'sample' ? Promise.resolve([]) : api.experimentalBets()])
+    return [performance, historyPerformance, mergePurchaseHistory(normal, experimental)] as const
   }
   const all = useAsync(() => load(), [origin], () => load(true))
-  const purchasedRaces = useMemo(() => all.data ? groupPurchasedRaces(all.data[1]) : [], [all.data])
+  useVisibleRefresh(all.reload)
+  const purchasedRaces = useMemo(() => all.data ? groupPurchasedRaces(all.data[2]) : [], [all.data])
   const [filter, setFilter] = useState<RaceFilter>('all')
   const [visible, setVisible] = useState(PAGE_SIZE)
 
   if (all.error) return <div className="card"><ErrorState error={all.error} onRetry={all.reload} /></div>
   if (!all.data) return <div className="card"><Loading rows={5} /></div>
-  const [performance, bets] = all.data
-  const unresolved = all.data[2].filter((bet) => bet.status === 'open').length
+  const [performance, historyPerformance, bets] = all.data
+  const unresolved = historyPerformance.betCount - historyPerformance.settledCount
   const counts = { all: purchasedRaces.length, open: 0, won: 0, lost: 0 }
   for (const race of purchasedRaces) counts[raceState(race)] += 1
   const filtered = filter === 'all' ? purchasedRaces : purchasedRaces.filter((race) => raceState(race) === filter)
@@ -85,10 +87,10 @@ export function OverviewPage() {
 
     <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
       <div className="min-w-0 space-y-5">
-        <Section title="運用成績" right={<span className="text-xs text-muted">確定分の払戻と損益 · 初期資金 {yen(performance.initialBankroll)}</span>}>
-          <Scoreboard performance={performance} unresolved={unresolved} />
+        <Section title="運用成績" right={<span className="text-xs text-muted">資産は通常台帳 · 損益 / 回収率は通常＋実験</span>}>
+          <Scoreboard performance={performance} historyPerformance={historyPerformance} unresolved={unresolved} />
           <div className="border-t border-line px-2 pb-3 pt-2">
-            {performance.equityCurve.length > 1 ? <EquityChart data={performance.equityCurve} base={performance.initialBankroll} /> : <Empty>確定した仮想購入がまだありません。</Empty>}
+            {historyPerformance.equityCurve.length > 1 ? <EquityChart data={historyPerformance.equityCurve} base={historyPerformance.equityCurve[0].bankroll} valueLabel="累計損益" baseLabel="損益 0円" /> : <Empty>確定した仮想購入がまだありません。</Empty>}
           </div>
         </Section>
 
@@ -128,24 +130,24 @@ function RefreshIcon({ spinning }: { spinning: boolean }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24" className={`h-3.5 w-3.5 ${spinning ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" /></svg>
 }
 
-function Scoreboard({ performance, unresolved }: { performance: Overview; unresolved: number }) {
-  const roi = performance.roi
+function Scoreboard({ performance, historyPerformance, unresolved }: { performance: Overview; historyPerformance: Overview; unresolved: number }) {
+  const roi = historyPerformance.roi
   const meterMax = 2
   const fill = roi == null ? 0 : Math.min(1, Math.max(0, roi / meterMax))
   return <div className="grid gap-px bg-line md:grid-cols-[1.25fr_1fr]">
     <div className="bg-surface p-5">
-      <div className="label">仮想資産</div>
+      <div className="label">通常台帳の仮想資産</div>
       <div className="figure mt-2 text-[44px] sm:text-[56px]"><CountUp value={yen(performance.bankroll)} duration={1200} /></div>
       <div className="mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="label">確定損益</span>
-        <span className={`figure text-2xl ${tone(performance.totalProfit)}`}><CountUp value={signedYen(performance.totalProfit)} /></span>
-        <span className="num text-xs text-muted">初期 {yen(performance.initialBankroll)} から</span>
+        <span className="label">累計損益</span>
+        <span className={`figure text-2xl ${tone(historyPerformance.totalProfit)}`}><CountUp value={signedYen(historyPerformance.totalProfit)} /></span>
+        <span className="num text-xs text-muted">通常＋実験 · 確定 {historyPerformance.settledCount}点</span>
       </div>
     </div>
     <div className="bg-surface p-5">
       <div className="flex items-baseline justify-between gap-2">
         <span className="label">回収率</span>
-        <span className="text-[10px] text-muted">確定払戻 ÷ 確定購入額（返還除外）</span>
+        <span className="text-[10px] text-muted">通常＋実験 · 確定払戻 ÷ 購入額</span>
       </div>
       <div className={`figure mt-2 text-[40px] ${roi == null ? '' : roi >= 1 ? 'text-pos' : 'text-neg'}`}><CountUp value={pct(roi)} /></div>
       <div className="relative mt-3 h-3 rounded-[2px] border border-ink/20 bg-raised" role="img" aria-label={roi == null ? '回収率は未確定' : `回収率 ${pct(roi)}、損益分岐 100%`}>
@@ -155,9 +157,9 @@ function Scoreboard({ performance, unresolved }: { performance: Overview; unreso
       <div className="num mt-1 flex justify-between text-[10px] text-faint"><span>0%</span><span className="font-bold text-muted">損益分岐 100%</span><span>200%</span></div>
     </div>
     <div className="grid grid-cols-2 gap-px bg-line md:col-span-2 md:grid-cols-4">
-      <MiniStat label="購入点数" value={performance.betCount.toLocaleString()} sub={`確定 ${performance.settledCount}`} />
-      <MiniStat label="的中率" value={pct(performance.hitRate)} />
-      <MiniStat label="最大ドローダウン" value={yen(performance.maxDrawdown)} sub={pct(performance.maxDrawdownPct)} />
+      <MiniStat label="購入点数" value={historyPerformance.betCount.toLocaleString()} sub={`確定 ${historyPerformance.settledCount}`} />
+      <MiniStat label="的中率" value={pct(historyPerformance.hitRate)} />
+      <MiniStat label="累計損益の最大下落" value={yen(historyPerformance.maxDrawdown)} sub="最高益から" />
       <MiniStat label="未確定" value={unresolved.toLocaleString()} sub="損益・回収率の集計対象外" live={unresolved > 0} />
     </div>
   </div>

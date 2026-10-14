@@ -2,9 +2,11 @@ import { api, type HistoricalTrifectaPerformance } from '../lib/api'
 import { useAsync } from '../lib/useAsync'
 import { dateTime, yen } from '../lib/format'
 import { Empty, ErrorState, Loading, Section } from './ui'
+import { useVisibleRefresh } from '../lib/useVisibleRefresh'
 
 export function HistoricalTrifectaExperiment({ compact = false }: { compact?: boolean }) {
   const q = useAsync(() => api.historicalTrifectaPerformance(), [])
+  useVisibleRefresh(q.reload)
   if (q.error) return <Section title="過去データ基礎モデル・未検証"><div className="p-4"><ErrorState error={q.error} onRetry={q.reload} /></div></Section>
   if (!q.data) return <Section title="過去データ基礎モデル・未検証"><div className="p-4"><Loading rows={compact ? 2 : 4} /></div></Section>
   if (!isHistoricalTrifectaPerformance(q.data)) return <Section title="過去データ基礎モデル・未検証"><div className="p-4"><ErrorState error={new Error('実験データの形式が不正です。')} onRetry={q.reload} /></div></Section>

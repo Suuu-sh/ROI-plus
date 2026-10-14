@@ -10,6 +10,7 @@ import { BetsTable } from '../components/BetsTable'
 import { ExperimentalPerformance } from '../components/ExperimentalPerformance'
 import { HistoricalTrifectaExperiment } from '../components/HistoricalTrifectaExperiment'
 import { CountUp, Empty, ErrorState, Loading, Section, SportIcon } from '../components/ui'
+import { useVisibleRefresh } from '../lib/useVisibleRefresh'
 
 const axis = { fontSize: 11, fill: 'rgb(var(--faint))' }
 const tip = { contentStyle: { background: 'rgb(var(--surface))', border: '1px solid rgb(var(--line))', borderRadius: 8, fontSize: 12 } }
@@ -17,6 +18,7 @@ const tip = { contentStyle: { background: 'rgb(var(--surface))', border: '1px so
 export function PerformancePage() {
   const { origin } = useOrigin()
   const q = useAsync(() => Promise.all([api.breakdown(origin), api.bets(origin), origin === 'all' ? Promise.resolve(null) : api.rankComparison(origin)]), [origin], () => Promise.all([api.breakdown(origin), api.bets(origin, undefined, true), origin === 'all' ? Promise.resolve(null) : api.rankComparison(origin)]))
+  useVisibleRefresh(q.reload)
   if (q.error) return <div className="card"><ErrorState error={q.error} onRetry={q.reload} /></div>
   if (!q.data) return <div className="card"><Loading rows={6} /></div>
   const [bd, bets, rankComparison] = q.data

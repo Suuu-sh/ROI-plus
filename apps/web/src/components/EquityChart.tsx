@@ -2,7 +2,7 @@ import { useId } from 'react'
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { yen } from '../lib/format'
 
-export function EquityChart({ data, base, compact = false }: { data: { at: string; bankroll: number }[]; base: number; compact?: boolean }) {
+export function EquityChart({ data, base, compact = false, valueLabel = '仮想資産', baseLabel = '初期資金' }: { data: { at: string; bankroll: number }[]; base: number; compact?: boolean; valueLabel?: string; baseLabel?: string }) {
   const last = data.at(-1)?.bankroll ?? base
   const up = last >= base
   const color = up ? 'rgb(var(--pos))' : 'rgb(var(--neg))'
@@ -21,12 +21,12 @@ export function EquityChart({ data, base, compact = false }: { data: { at: strin
           <CartesianGrid vertical={false} stroke="rgb(var(--line))" strokeDasharray="2 4" />
           <XAxis dataKey="at" tickFormatter={(v: string) => v.slice(5, 10).replace('-', '/')} tick={{ fontSize: 11, fill: 'rgb(var(--faint))' }} tickLine={false} axisLine={false} minTickGap={32} />
           <YAxis tickFormatter={(v: number) => `${Math.round(v / 1000)}k`} tick={{ fontSize: 11, fill: 'rgb(var(--faint))' }} tickLine={false} axisLine={false} width={40} domain={['auto', 'auto']} />
-          <ReferenceLine y={base} stroke="rgb(var(--ink))" strokeOpacity={0.5} strokeDasharray="4 4" label={{ value: '初期資金', position: 'insideTopLeft', fontSize: 10, fill: 'rgb(var(--muted))' }} />
+          <ReferenceLine y={base} stroke="rgb(var(--ink))" strokeOpacity={0.5} strokeDasharray="4 4" label={{ value: baseLabel, position: 'insideTopLeft', fontSize: 10, fill: 'rgb(var(--muted))' }} />
           <Tooltip
             contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--ink))', borderRadius: 4, fontSize: 12, boxShadow: '3px 3px 0 rgb(var(--ink))' }}
             cursor={{ stroke: 'rgb(var(--ink))', strokeWidth: 1, strokeDasharray: '3 3' }}
             labelStyle={{ color: 'rgb(var(--muted))' }}
-            formatter={(v) => [yen(Number(v)), '仮想資産']}
+            formatter={(v) => [yen(Number(v)), valueLabel]}
             labelFormatter={(v) => String(v).slice(0, 16).replace('T', ' ')}
           />
           <Area type="monotone" dataKey="bankroll" stroke={color} strokeWidth={2.25} fill={`url(#${gradient})`} dot={false}

@@ -1349,6 +1349,17 @@ it('lists placed experimental paper tickets separately from ordinary bet history
  expect(experimentBody.metrics).toMatchObject({races:1,bets:1,stake:100,payout:500,profit:400});
  expect(experimentBody.decisions.find((row:any)=>row.raceId===placedRace)).toMatchObject({outcome:'placed',stake:100,probability:0.2});
  expect(experimentBody.decisions.find((row:any)=>row.raceId===voidRace)).toMatchObject({outcome:'void',reason:'invalid_stake_unit',stake:0,probability:null,odds:null});
+
+ // The combined overview is SQL-aggregated, not limited by the ticket-history endpoint's 500-row cap.
+ const insertNormal=sqlite.prepare(`INSERT INTO bets(id,race_id,sport,bet_type,selection,stake,mode,placed_at,status,payout,profit,settled_at,data_origin,edge_label)
+   VALUES(?,?,'boat','trifecta',?,100,'manual',?,?,?, ?,?,'real','INSUFFICIENT_DATA')`);
+ for(let i=0;i<501;i++)insertNormal.run(`aggregate-normal-${i}`,placedRace,`1-${i}-3`,new Date(Date.now()-10_000+i).toISOString(),i<497?'lost':'open',i<497?0:null,i<497?-100:null,i<497?settledAt:null);
+ sqlite.prepare('UPDATE experimental_paper_bets SET settled_at=? WHERE id=?').run(new Date(Date.now()+10_000).toISOString(),'history-exp-1');
+ const scoped=await (await app.request('/api/performance/overview?origin=real&sport=boat&scope=purchase-history',{},env())).json() as any;
+ expect(scoped).toMatchObject({betCount:502,settledCount:498,totalProfit:-49300,roi:500/49800,maxDrawdown:49700,maxDrawdownPct:0.497});
+ expect(scoped.equityCurve).toHaveLength(499);
+ const ordinaryOnly=await (await app.request('/api/performance/overview?origin=real&sport=boat',{},env())).json() as any;
+ expect(ordinaryOnly).toMatchObject({betCount:501,totalProfit:-49700});
 });
 
 it('settles only fully evidenced experimental trifecta outcomes and credits the separate bankroll',async()=>{

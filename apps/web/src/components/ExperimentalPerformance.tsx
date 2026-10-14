@@ -2,6 +2,7 @@ import { api, type ExperimentalPerformance as ExperimentalPerformanceData } from
 import { useAsync } from '../lib/useAsync'
 import { dateTime, pct, signedYen, tone, yen } from '../lib/format'
 import { CountUp, Empty, ErrorState, Loading, Section } from './ui'
+import { useVisibleRefresh } from '../lib/useVisibleRefresh'
 
 const caveat = '小標本の実験です。通常の件数基準を満たさず、天候データが欠ける場合があります。精度・収益性は未検証です。'
 
@@ -19,6 +20,7 @@ function reasonLabel(reason: string) {
 /** `narrow` lays the summary out for a side column. */
 export function ExperimentalPerformance({ compact = false, narrow = false }: { compact?: boolean; narrow?: boolean }) {
   const q = useAsync(() => api.experimentalPerformance(), [])
+  useVisibleRefresh(q.reload)
   if (q.error) return <Section title="三連単モデル実験"><div className="p-4"><ErrorState error={q.error} onRetry={q.reload} /></div></Section>
   if (!q.data) return <Section title="三連単モデル実験"><div className="p-4"><Loading rows={compact ? 2 : 4} /></div></Section>
   const data = q.data

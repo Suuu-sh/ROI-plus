@@ -1425,25 +1425,35 @@ app.get('/performance/rank-comparison',async c=>{
    note:'同じ比較対象レース・同じ総賭け金で比較。rank 1を含む複数選択グループの全券が確定したレースだけを対象とし、単独購入はrank 1の実際の結果・公式払戻で再計算。rank 1のみへ総額を配分する仮想払戻は1円未満切り捨て。旧記録の順位不明・未確定・取消は除外。利益や将来成績を保証しない。'});
 });
 app.get('/performance/overview',async c=>{
- const sport=c.req.query('sport'),origin=originFilter(c.req.query('origin'));
+ const sport=c.req.query('sport'),origin=originFilter(c.req.query('origin')),purchaseHistory=c.req.query('scope')==='purchase-history';
  if(sport&&!validSport(sport))return jsonError(c,'invalid sport');
  const db=c.env.DB,initial=Number(await setting(db,'initial_bankroll','100000'));
- const bets=await all<any>(db,`SELECT * FROM bets b WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at,b.id`,sport||null,sport||null,origin,origin);
- let bankroll=initial,settled=0,scored=0,hits=0,stake=0,payout=0;
- const equity=[{at:bets[0]?.placed_at??now(),bankroll}];
+ const bets=await all<any>(db,purchaseHistory?`SELECT 'normal:'||b.id id,b.race_id,b.sport,b.stake,b.placed_at,b.status,b.payout,b.profit,b.settled_at,b.data_origin
+   FROM bets b WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()}
+   UNION ALL
+   SELECT 'experimental:'||b.id id,b.race_id,'boat' sport,b.stake,b.placed_at,b.status,b.payout,b.profit,b.settled_at,b.data_origin
+   FROM experimental_paper_bets b WHERE (? IS NULL OR ?='boat') AND (? IS NULL OR ?='real') AND b.data_origin='real'
+     AND NOT EXISTS(SELECT 1 FROM experimental_paper_bet_reconciliations q WHERE q.bet_id=b.id)
+   ORDER BY placed_at,id`:`SELECT * FROM bets b WHERE (? IS NULL OR b.sport=?) AND (? IS NULL OR b.data_origin=?) AND ${nonQuarantinedBet()} ORDER BY b.placed_at,b.id`,
+   ...(purchaseHistory?[sport||null,sport||null,origin,origin,sport||null,sport||null,origin,origin]:[sport||null,sport||null,origin,origin]));
+ let bankroll=initial,normalBankroll=initial,settled=0,scored=0,hits=0,stake=0,payout=0;
+ let curveBankroll=purchaseHistory?0:initial;
+ const equity=[{at:bets[0]?.placed_at??now(),bankroll:curveBankroll}];
  const settledBets=bets.filter((b:any)=>b.status==='won'||b.status==='lost'||b.status==='void')
-   .sort((a:any,b:any)=>String(a.settled_at??a.placed_at).localeCompare(String(b.settled_at??b.placed_at))||String(a.id).localeCompare(String(b.id)));
+   .sort((a:any,b:any)=>Date.parse(String(a.settled_at??a.placed_at))-Date.parse(String(b.settled_at??b.placed_at))||String(a.id).localeCompare(String(b.id)));
  for(const b of settledBets){
    bankroll+=b.profit??0;settled++;
+   if(!purchaseHistory||String(b.id).startsWith('normal:'))normalBankroll+=purchaseHistory?(b.profit??0):0;
+   curveBankroll+=b.profit??0;
    if(b.status==='won'||b.status==='lost'){
      scored++;stake+=b.stake;payout+=b.payout??0;
      if(b.status==='won')hits++;
    }
-   equity.push({at:b.settled_at??b.placed_at,bankroll});
+   equity.push({at:b.settled_at??b.placed_at,bankroll:curveBankroll});
  }
  let peak=initial,dd=0,ddPct=0;
- for(const e of equity){peak=Math.max(peak,e.bankroll);dd=Math.max(dd,peak-e.bankroll);if(peak>0)ddPct=Math.max(ddPct,(peak-e.bankroll)/peak);}
- return c.json({initialBankroll:initial,bankroll,totalProfit:bankroll-initial,roi:stake?payout/stake:null,betCount:bets.length,settledCount:settled,hitRate:scored?hits/scored:null,maxDrawdown:dd,maxDrawdownPct:ddPct,equityCurve:equity,quarantined:await quarantineSummary(db,sport||null,origin)});
+ for(const e of equity){const financialValue=purchaseHistory?initial+e.bankroll:e.bankroll;peak=Math.max(peak,financialValue);dd=Math.max(dd,peak-financialValue);if(peak>0)ddPct=Math.max(ddPct,(peak-financialValue)/peak);}
+ return c.json({initialBankroll:initial,bankroll:purchaseHistory?normalBankroll:bankroll,totalProfit:purchaseHistory?curveBankroll:bankroll-initial,roi:stake?payout/stake:null,betCount:bets.length,settledCount:settled,hitRate:scored?hits/scored:null,maxDrawdown:dd,maxDrawdownPct:ddPct,equityCurve:equity,quarantined:await quarantineSummary(db,sport||null,origin)});
 });
 app.post('/ingest/experimental-trifecta/model',async c=>{
  if(!auth(c))return jsonError(c,'unauthorized',401);

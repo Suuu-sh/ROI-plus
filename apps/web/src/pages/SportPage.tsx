@@ -1,16 +1,17 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import type { Bet, RankingCandidate, TicketCandidate, EntryView, RaceDetail, RaceSummary, Sport } from '@edgelab/shared/src/types'
 import { api } from '../lib/api'
 import { useOrigin } from '../lib/origin'
 import { useAsync } from '../lib/useAsync'
-import { dateTime, freshness, num, odds, pct, signedPct, signedYen, yen, timeOf, todayJst, tone } from '../lib/format'
+import { dateTime, freshness, num, odds, pct, signedPct, signedYen, timeOf, todayJst, tone } from '../lib/format'
 import { t } from '../i18n'
 import { CountUp, EdgeBadge, Empty, ErrorState, LiveDot, Loading, OriginBadge, ProbBar, Section, SportIcon } from '../components/ui'
 import { BetSheet } from '../components/BetSheet'
 import { EquityChart } from '../components/EquityChart'
 import { betTypeLabel } from '../lib/betType'
 import { mergePurchaseHistory, type HistoryBet } from '../lib/purchaseHistory'
+import { useVisibleRefresh } from '../lib/useVisibleRefresh'
 
 function shiftDate(d: string, days: number) {
   const x = new Date(`${d}T00:00:00Z`)
@@ -30,6 +31,13 @@ export function SportPage({ sport }: { sport: Sport }) {
     return mergePurchaseHistory(normal, experimental)
   }
   const bets = useAsync(() => loadBets(), [sport, origin], () => loadBets(true))
+  const refreshLiveBoard = useCallback(() => {
+    if (sport === 'boat') {
+      bets.reload()
+      setPerformanceVersion((version) => version + 1)
+    }
+  }, [bets.reload, sport])
+  useVisibleRefresh(refreshLiveBoard)
   useEffect(() => { if (raceId) setResearchOpen(true) }, [raceId])
 
   const accent = sport === 'horse' ? 'text-horse' : 'text-boat'
@@ -73,15 +81,15 @@ function Chevron() {
   return <svg aria-hidden="true" viewBox="0 0 24 24" className="chev h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
 }
 
-function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeof useOrigin>['origin']; sport: Sport; version: number }) {
-  const q = useAsync(() => api.overview(origin, sport, version > 0), [origin, sport, version], () => api.overview(origin, sport, true))
+export function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeof useOrigin>['origin']; sport: Sport; version: number }) {
+  const q = useAsync(() => api.overview(origin, sport, version > 0, 'purchase-history'), [origin, sport, version], () => api.overview(origin, sport, true, 'purchase-history'))
   if (q.error) return <Section className="w-full min-w-0" title="仮想運用成績"><ErrorState error={q.error} onRetry={q.reload} /></Section>
   if (!q.data) return <Section className="w-full min-w-0" title="仮想運用成績"><Loading rows={2} /></Section>
   const ov = q.data
   return <section className="card w-full min-w-0 overflow-hidden border-t-[3px] border-t-ink" aria-label="全期間の仮想運用成績">
     <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line px-4 py-2.5">
       <h2 className="text-[15px] font-bold">仮想運用成績</h2>
-      <p className="text-right text-[11px] text-muted">全期間・初期資金 {yen(ov.initialBankroll)}・損益 / 回収率は確定分</p>
+      <p className="text-right text-[11px] text-muted">全期間・通常＋実験購入 · 損益 / 回収率は確定分</p>
     </header>
     <div className="grid grid-cols-2 divide-x divide-y divide-line md:grid-cols-4 md:divide-y-0">
       <PerformanceMetric label="累計損益" value={signedYen(ov.totalProfit)} valueClass={tone(ov.totalProfit)} />
@@ -91,10 +99,10 @@ function SportPerformance({ origin, sport, version }: { origin: ReturnType<typeo
     </div>
     <div className="border-t border-line">
       <div className="flex items-center justify-between gap-3 px-4 pt-2">
-        <h3 className="text-xs font-bold">資産推移</h3>
+        <h3 className="text-xs font-bold">累計損益推移</h3>
         <span className="text-[11px] text-muted">確定損益のみ</span>
       </div>
-      {ov.equityCurve.length > 1 ? <EquityChart data={ov.equityCurve} base={ov.initialBankroll} compact /> : <div className="px-4 py-4 text-center text-xs text-muted">確定した仮想購入がまだありません。</div>}
+      {ov.equityCurve.length > 1 ? <EquityChart data={ov.equityCurve} base={0} compact valueLabel="累計損益" baseLabel="損益 0円" /> : <div className="px-4 py-4 text-center text-xs text-muted">確定した仮想購入がまだありません。</div>}
     </div>
   </section>
 }

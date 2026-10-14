@@ -71,7 +71,7 @@ export const api = {
     return result
   },
   bets: (origin: OriginFilter, sport?: Sport, fresh = false) => req<Bet[]>(`/bets${qs({ sport, origin })}`, fresh || Date.now() < readFreshUntil ? { headers: { 'X-ROI-Cache-Bypass': '1' } } : undefined),
-  overview: (origin: OriginFilter, sport?: Sport, fresh = false) => req<Overview>(`/performance/overview${qs({ sport, origin })}`, fresh || Date.now() < readFreshUntil ? { headers: { 'X-ROI-Cache-Bypass': '1' } } : undefined),
+  overview: (origin: OriginFilter, sport?: Sport, fresh = false, scope?: 'purchase-history') => req<Overview>(`/performance/overview${qs({ sport, origin, scope })}`, fresh || Date.now() < readFreshUntil ? { headers: { 'X-ROI-Cache-Bypass': '1' } } : undefined),
   breakdown: (origin: OriginFilter) => req<Breakdown>(`/performance/breakdown${qs({ origin })}`),
   rankComparison: (origin: OriginFilter) => req<RankComparison>(`/performance/rank-comparison${qs({ origin })}`),
   experimentalPerformance: () => req<ExperimentalPerformance>('/performance/experimental'),
