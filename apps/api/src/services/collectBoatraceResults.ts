@@ -61,7 +61,9 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
   // Least recently attempted first prevents an unpublished race starving others.
   const jstDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);
   const archiveIds=archiveRaceIds.filter(id=>/^boat-\d{8}-\d{2}-\d{2}$/.test(id)).slice(0,80)
-  const archiveIdSql=archiveIds.length?`r.id IN (${archiveIds.map(()=>'?').join(',')})`:'0'
+  // Keep the D1 statement below its 100-bind limit even with all 80 R2 IDs;
+  // this membership predicate appears twice in the query.
+  const archiveIdSql=archiveIds.length?`r.id IN (SELECT value FROM json_each(?))`:'0'
   return all<RaceTarget>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date,r.betting_cutoff_at,r.betting_cutoff_source FROM races r
     LEFT JOIN collection_runs cr ON cr.id='boat-result:'||r.id AND cr.source=?
     WHERE r.sport='boat' AND r.data_origin='real' AND r.status IN ('scheduled','closed','finished')
@@ -119,8 +121,8 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
         OR EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open') THEN 0 ELSE 1 END,
       julianday(cr.started_at) ASC,julianday(r.post_time) ASC,r.id ASC LIMIT ?`, RESULTS_SOURCE,
     new Date(now.getTime()-5*60_000).toISOString(),Number(labelOnly),Number(labelOnly),jstDate,
-    new Date(now.getTime()).toISOString(),RESULTS_SOURCE,...archiveIds,new Date(now.getTime()-5*60_000).toISOString(),RESULTS_SOURCE,
-    Number(labelOnly),...archiveIds,Math.max(0, Math.floor(maximum)));
+    new Date(now.getTime()).toISOString(),RESULTS_SOURCE,...(archiveIds.length?[JSON.stringify(archiveIds)]:[]),new Date(now.getTime()-5*60_000).toISOString(),RESULTS_SOURCE,
+    Number(labelOnly),...(archiveIds.length?[JSON.stringify(archiveIds)]:[]),Math.max(0, Math.floor(maximum)));
 }
 
 type FetchFailureCode = 'http-status' | 'http-redirect-rejected' | 'body-missing' | 'body-too-large' | 'body-read-failed' | 'utf8-rejected' | 'hash-failed' | 'fetch-timeout' | 'fetch-rejected';

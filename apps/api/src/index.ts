@@ -2043,7 +2043,13 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
         try{archiveTargets=await listHistoricalLabelTargetRaceIds(env.TRIFECTA_ARCHIVE,new Date());}catch{archiveTargets={...archiveTargets,raceIds:[]};}
       }
       collection=await collectResults(env.DB,new Date(),{requestBudget,archiveRaceIds:archiveTargets.raceIds});
-    } catch { /* Saved evidence still gets a settlement attempt. */ }
+    } catch (error) {
+      // Keep the failure diagnosable without exposing arbitrary D1/upstream text.
+      const bindLimit=error instanceof Error&&/too many (?:sql )?variables/i.test(error.message);
+      const errorClass=error instanceof Error&&/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)?error.name:'Error';
+      collection={status:'failed',reason:bindLimit?'d1-bind-parameter-limit':'results-collection-failed'};
+      console.info(JSON.stringify({event:'boat-ten-minute-results-collection',status:'failed',reason:collection.reason,errorClass}));
+    }
     try { settlement=(await cron(env.DB,false)).settled; } catch { /* Retry settlement and maintenance next scheduled tick. */ }
     console.info(JSON.stringify({event:'boat-ten-minute-results',status:collection.status,targets:collection.targets,verified:collection.verified,records:collection.records,attempted:collection.attempted,settled:settlement,reason:collection.reason??null,fetchFailures:collection.fetchFailures??[]}));
     return;

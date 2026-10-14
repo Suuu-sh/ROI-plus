@@ -229,7 +229,12 @@ describe('purchased real boat results',()=>{
       .run('2026-10-11T03:00:00Z',unlisted);
     const wrongCutoff=seed(9);sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(wrongCutoff);
     sqlite.prepare('UPDATE races SET betting_cutoff_at=? WHERE id=?').run('2026-10-11T03:00:00Z',wrongCutoff);
-    const targets=await selectResultsTargets(DB,now,8,false,[archived,wrongCutoff]);
+    const archiveIds=Array.from({length:80},(_,index)=>index===0?archived:index===1?wrongCutoff:id(index+20));
+    const prepare=DB.prepare.bind(DB);
+    vi.spyOn(DB,'prepare').mockImplementation((sql:string)=>({
+      bind(...values:unknown[]){expect(values.length).toBeLessThanOrEqual(100);return prepare(sql).bind(...values);},
+    } as any));
+    const targets=await selectResultsTargets(DB,now,8,false,archiveIds);
     expect(targets.map(row=>row.id)).toContain(archived);
     expect(targets.map(row=>row.id)).not.toContain(unlisted);
     expect(targets.map(row=>row.id)).not.toContain(wrongCutoff);
