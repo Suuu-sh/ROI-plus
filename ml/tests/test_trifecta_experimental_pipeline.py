@@ -1,6 +1,9 @@
 import json
 import io
 import os
+import re
+import subprocess
+import textwrap
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -305,21 +308,47 @@ def test_experimental_workflow_schedules_learning_only_and_gates_registry_foreca
 def test_separate_minute_experimental_forecast_workflow_is_read_only_to_learning_state():
     workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/trifecta-experimental-forecast.yml").read_text()
     schedule = (Path(__file__).resolve().parents[2] / ".github/workflows/daily.yml").read_text()
+    forecast_cron = "7,37 23,0-13 * * *"
+    assert f"cron: '{forecast_cron}'" in workflow
+    assert "08:07–22:37 JST" in workflow
     assert "workflow_call:" in workflow
-    assert "uses: ./.github/workflows/trifecta-experimental-forecast.yml" in schedule
-    assert "secrets: inherit" in schedule
-    forecast_cron = "40 0,5,10 * * *"
-    assert f"cron: '{forecast_cron}'" in schedule
-    assert schedule.count(f"github.event.schedule == '{forecast_cron}'") == 2
-    assert schedule.count(f"github.event.schedule != '{forecast_cron}'") == 1
-    assert "run-name: daily boat pipeline (${{ github.event.schedule || github.event_name }})" in schedule
-    assert "boat-experimental-forecast-trigger" in schedule
+    assert "workflow_dispatch:" in workflow
+    assert "7,37 23,0-13 * * *" not in schedule
+    assert "trifecta-experimental-forecast.yml" not in schedule
+    assert "boat-learning-state" in schedule
+    assert "boat-experimental-forecast-trigger" not in schedule
     assert "group: boat-experimental-forecast" in workflow
     assert "cancel-in-progress: false" in workflow
+    assert "Skip scheduled runs outside the JST market window" in workflow
+    assert "10#$hour < 8 || 10#$hour >= 23" in workflow
+    assert "Bound scheduled loop to the JST market window" in workflow
+    assert "remaining=$(( (23 - 10#$hour) * 60 - 10#$minute ))" in workflow
+    assert "if: steps.window.outputs.active == 'true'" in workflow
+    assert "if: steps.duration.outputs.active == 'true'" in workflow
     assert "actions/cache/restore@v4" in workflow
     assert "actions/cache/save@v4" not in workflow
-    assert "python -u -m edgelab.experimental_forecast_job --duration-minutes 300" in workflow
+    assert 'python -u -m edgelab.experimental_forecast_job --duration-minutes "${{ steps.duration.outputs.minutes }}"' in workflow
     assert "timeout-minutes: 320" in workflow
     assert "INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}" in workflow
     assert "train-trifecta-experimental" not in workflow
     assert "Register only" not in workflow
+
+
+def test_forecast_schedule_duration_respects_jst_market_window_boundaries():
+    workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/trifecta-experimental-forecast.yml").read_text()
+    step = workflow.split("      - name: Bound scheduled loop to the JST market window", 1)[1].split("      - name:", 1)[0]
+    match = re.search(r"\n        run: \|\n((?:          .*\n)+)", step)
+    assert match is not None
+    script = textwrap.dedent(match.group(1))
+    for hour, minute, expected in (("08", "07", ("true", "300")),
+                                   ("22", "59", ("true", "1")),
+                                   ("23", "00", ("false", "0")),
+                                   ("00", "01", ("false", "0"))):
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "github-output"
+            env = {**os.environ, "GITHUB_EVENT_NAME": "schedule", "GITHUB_OUTPUT": str(output),
+                   "TEST_HOUR": hour, "TEST_MINUTE": minute}
+            clock = 'date(){ if [[ "$*" == *"+%H"* ]]; then printf "%s\\n" "$TEST_HOUR"; else printf "%s\\n" "$TEST_MINUTE"; fi; }\n'
+            subprocess.run(["bash", "-c", clock + script], check=True, env=env, capture_output=True, text=True)
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            assert (values["active"], values["minutes"]) == expected
