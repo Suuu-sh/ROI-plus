@@ -4,7 +4,7 @@ import { parseBoatraceCutoff, BOATRACE_CUTOFF_REFRESH_MS } from './boatraceCutof
 import { estimateWorkerWriteUnits, reserveWriteBudget, utcDate } from './writeBudget.js';
 
 type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string; betting_cutoff_at:string|null; betting_cutoff_source:string|null; betting_cutoff_observed_at:string|null };
-type FetchResponse = { ok: boolean; status: number; headers?: Headers; text(): Promise<string> };
+type FetchResponse = { ok: boolean; status: number; headers?: Headers; body?: ReadableStream<Uint8Array> | null; text(): Promise<string> };
 export type CollectOddsOptions = {
   maxRequests?: number;
   requestBudget?: { used: number; max: number };
@@ -15,11 +15,54 @@ export type CollectOddsOptions = {
 const jstIso = (ms: number) => new Date(ms + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
 const jstDate = (ms: number) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+const MAX_403_DIAGNOSTIC_BYTES = 4 * 1024;
 function classifyResponseServer(headers?: Headers): 'cloudflare' | 'webotx' | 'other' {
   const server = headers?.get('server')?.trim().toLowerCase();
   if (server === 'cloudflare') return 'cloudflare';
   if (server === 'webotx_web_server' || server === 'webotx') return 'webotx';
   return 'other';
+}
+async function classify403Body(body?: ReadableStream<Uint8Array> | null): Promise<string> {
+  if (!body) return 'body_unavailable';
+  const reader = body.getReader();
+  const cancelWithoutWaiting = () => {
+    try { void reader.cancel().catch(() => undefined); } catch { /* classification must not block collection */ }
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const readMarker = async () => {
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    while (length < MAX_403_DIAGNOSTIC_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      const remaining = MAX_403_DIAGNOSTIC_BYTES - length;
+      const chunk = value.slice(0, remaining);
+      chunks.push(chunk);
+      length += chunk.byteLength;
+      if (value.byteLength > remaining) break;
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const text = new TextDecoder().decode(bytes);
+    const cloudflareCode = text.match(/error\s*code\s*:\s*(1003|1006|1010|1015|1020)\b/i)?.[1];
+    if (cloudflareCode) return `cf_error_${cloudflareCode}`;
+    const title = text.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? '';
+    if (/access\s+denied/i.test(title)) return 'title_access_denied';
+    return length ? 'body_unclassified' : 'body_empty';
+  };
+  try {
+    const timeout = new Promise<string>(resolve => {
+      timer = setTimeout(() => { cancelWithoutWaiting(); resolve('body_read_timeout'); }, 1_000);
+    });
+    return await Promise.race([readMarker(), timeout]);
+  } catch {
+    return 'body_read_failed';
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    cancelWithoutWaiting();
+  }
 }
 
 export async function selectOddsTargets(db: Db, now: Date, maxRequests = 30): Promise<RaceTarget[]> {
@@ -67,7 +110,8 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
             if (!response.ok) {
               const status = Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
                 ? String(response.status) : 'other';
-              throw new Error(`HTTP ${status} ${classifyResponseServer(response.headers)}`);
+              const bodyClass = response.status === 403 ? ` ${await classify403Body(response.body)}` : '';
+              throw new Error(`HTTP ${status} ${classifyResponseServer(response.headers)}${bodyClass}`);
             }
             html = await response.text();
             requestError = undefined;

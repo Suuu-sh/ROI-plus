@@ -163,16 +163,48 @@ describe('win odds quality exclusions', () => {
   });
   it('keeps the HTTP status and only an allowlisted response server class',async()=>{
     race('denied-race',now.getTime()+300000);
+    const bodyText='Error code: 1010\n'+('private response text '.repeat(400));
+    const bodyBytes=new TextEncoder().encode(bodyText);
+    let cancelled=false;
+    const makeBody=()=>{
+      let bodyOffset=0;
+      return new ReadableStream<Uint8Array>({
+        pull(controller){
+          if(bodyOffset>=bodyBytes.length){controller.close();return;}
+          const next=bodyBytes.subarray(bodyOffset,bodyOffset+1024);bodyOffset+=next.length;controller.enqueue(next);
+        },
+        cancel(){cancelled=true;},
+      });
+    };
     const fetch=vi.fn(async()=>({ok:false,status:403,
-      headers:new Headers({server:'cloudflare','x-private-marker':'must-not-be-recorded'}),
+      headers:new Headers({server:'cloudflare','x-private-marker':'must-not-be-recorded'}),body:makeBody(),
       text:async()=>{throw new Error('response body must not be read');}}));
     expect(await collectOdds(DB,now,{fetch,sleep:async()=>{}})).toMatchObject({status:'failed',failed:1});
     expect(fetch).toHaveBeenCalledTimes(2);
     const logged=sqlite.prepare('SELECT error,reason FROM collection_runs').get() as any;
-    expect(logged.error).toBe('denied-race: HTTP 403 cloudflare');
+    expect(logged.error).toBe('denied-race: HTTP 403 cloudflare cf_error_1010');
+    expect(cancelled).toBe(true);
     expect(logged.error).not.toContain('must-not-be-recorded');
-    expect(logged.error).not.toContain('response body');
+    expect(logged.error).not.toContain('private response text');
   });
+  it('does not let an unresponsive 403 body stream block the odds retry',async()=>{
+    race('stalled-denial-race',now.getTime()+300000);
+    const html=readFileSync(resolve(root,'data/fixtures/boatrace/oddstf_24_12_20261009.html'),'utf8');
+    let cancelled=false,calls=0;
+    const fetch=vi.fn(async(url:string)=>{
+      calls++;
+      if(calls===1)return {ok:false,status:403,headers:new Headers({server:'cloudflare'}),
+        body:new ReadableStream<Uint8Array>({start(){},cancel(){cancelled=true;return new Promise<void>(()=>{});}}),
+        text:async()=>{throw new Error('the error body is never decoded as text');}};
+      return {ok:true,status:200,text:async()=>collectionPage(html,url)};
+    });
+    const started=performance.now();
+    const result=await collectOdds(DB,now,{fetch,sleep:async()=>{}});
+    expect(performance.now()-started).toBeLessThan(2500);
+    expect(result).toMatchObject({status:'success',failed:0,records:6});
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(cancelled).toBe(true);
+  },4000);
   it('treats changed markup as a parse error, not a pool quality skip',async()=>{
     race('parse-race',now.getTime()+300000);
     expect(await collectOdds(DB,now,{fetch:async()=>({ok:true,status:200,text:async()=>'<html>maintenance</html>'}),sleep:async()=>{}})).toMatchObject({status:'failed',failed:1,excluded:0});
