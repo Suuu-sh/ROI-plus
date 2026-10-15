@@ -32,12 +32,13 @@ jobs:
           key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
           restore-keys: |
             daily-${{ runner.os }}-
-      - name: Validate exact registered model and cached artifact
+      - name: Refresh saved archives and run no-submit forecast diagnostic
         env:
           PYTHONPATH: ml
           EDGELAB_API_URL: https://roi-plus-api.suuu-sh.workers.dev
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
           EXPERIMENTAL_ARTIFACT_DIR: ml/artifacts
+          EXPERIMENTAL_STORE_PATH: ml/data/rows.json
         run: set -o pipefail; python -u -m edgelab.experimental_forecast_preflight | tee preflight.json
       - name: Upload sanitized preflight result
         if: always()

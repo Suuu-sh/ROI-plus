@@ -11,6 +11,35 @@ from edgelab.storage import DEFAULT_STORE, load_rows, save_rows
 from edgelab.sync import fetch_prerace_capture_archives
 
 
+ARCHIVE_EXCLUSION_REASONS = (
+    "export_page_invalid", "archive_wrapper_invalid", "timestamp_missing",
+    "timestamp_timezone_missing", "archive_checksum_missing", "archive_checksum_mismatch",
+    "archive_json_invalid", "archive_schema_invalid", "archive_race_invalid",
+    "archive_date_mismatch", "race_identity_or_real_race_missing", "archive_id_mismatch",
+    "archive_sources_missing", "archive_parser_version_unsupported", "archive_source_identity_mismatch",
+    "source_checksum_invalid", "racelist_beforeinfo_cutoff_mismatch",
+    "archive_capture_or_cutoff_order_invalid", "odds_market_not_verified_nonfinal",
+    "exhibition_lanes_incomplete", "exhibition_lane_invalid", "exhibition_lane_duplicate",
+    "exhibition_value_invalid", "weather_observation_after_capture", "weather_observation_missing",
+    "weather_label_invalid", "weather_values_invalid", "weather_field_unsupported",
+    "weather_value_invalid", "racelist_entries_incomplete", "racelist_cached_entries_incomplete",
+    "racelist_entry_invalid", "racelist_entry_duplicate", "racelist_entry_identity_mismatch",
+    "odds_market_incomplete", "odds_row_invalid", "archive_id_checksum_conflict",
+    "cutoff_evidence_invalid", "cutoff_evidence_conflict", "immutable_capture_key_conflict",
+    "other",
+)
+
+
+def _safe_exclusion_counts(value: Any) -> dict[str, int]:
+    counts = {reason: 0 for reason in ARCHIVE_EXCLUSION_REASONS}
+    if isinstance(value, dict):
+        for reason, count in value.items():
+            safe_reason = reason if reason in counts else "other"
+            if type(count) is int and count >= 0:
+                counts[safe_reason] += count
+    return counts
+
+
 def refresh_current_day_archives(target_date: str, *, store_path: str | Path = str(DEFAULT_STORE),
                                  base_url: str, token: str) -> dict[str, Any]:
     """Import only newly exported source-verified captures for the actual JST day.
@@ -34,7 +63,8 @@ def refresh_current_day_archives(target_date: str, *, store_path: str | Path = s
                 "date": target_date, "archiveDates": 1,
                 "importedArchives": count,
                 "weatherMissingArchivesImported": int(imported.get("weatherMissingArchivesImported", 0)),
-                "excludedArchives": int(imported.get("excludedArchives", 0))}
+                "excludedArchives": int(imported.get("excludedArchives", 0)),
+                "exclusionCounts": _safe_exclusion_counts(imported.get("exclusionCounts"))}
     except Exception as exc:
         allowed = {"ValueError", "TypeError", "KeyError", "AttributeError", "IndexError",
                    "RuntimeError", "OSError", "ImportError", "TimeoutError"}

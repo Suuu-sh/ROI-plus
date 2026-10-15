@@ -4,7 +4,7 @@ import { parseBoatraceCutoff, BOATRACE_CUTOFF_REFRESH_MS } from './boatraceCutof
 import { estimateWorkerWriteUnits, reserveWriteBudget, utcDate } from './writeBudget.js';
 
 type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string; betting_cutoff_at:string|null; betting_cutoff_source:string|null; betting_cutoff_observed_at:string|null };
-type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
+type FetchResponse = { ok: boolean; status: number; headers?: Headers; text(): Promise<string> };
 export type CollectOddsOptions = {
   maxRequests?: number;
   requestBudget?: { used: number; max: number };
@@ -15,6 +15,12 @@ export type CollectOddsOptions = {
 const jstIso = (ms: number) => new Date(ms + 9 * 60 * 60 * 1000).toISOString().replace('Z', '+09:00');
 const jstDate = (ms: number) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+function classifyResponseServer(headers?: Headers): 'cloudflare' | 'webotx' | 'other' {
+  const server = headers?.get('server')?.trim().toLowerCase();
+  if (server === 'cloudflare') return 'cloudflare';
+  if (server === 'webotx_web_server' || server === 'webotx') return 'webotx';
+  return 'other';
+}
 
 export async function selectOddsTargets(db: Db, now: Date, maxRequests = 30): Promise<RaceTarget[]> {
   const at = now.getTime(), after = jstIso(at), before = jstIso(at + 15 * 60_000), fresh = jstIso(at - 50_000);
@@ -58,7 +64,11 @@ export async function collectOdds(db: Db, now: Date, opts: CollectOddsOptions = 
           attempted++; requestBudget.used++;
           try {
             const response = await fetcher(oddsUrl(race.race_no, race.venue_id, race.race_date), { headers: { 'User-Agent': USER_AGENT } });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            if (!response.ok) {
+              const status = Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
+                ? String(response.status) : 'other';
+              throw new Error(`HTTP ${status} ${classifyResponseServer(response.headers)}`);
+            }
             html = await response.text();
             requestError = undefined;
             break;

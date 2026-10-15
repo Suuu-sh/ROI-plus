@@ -146,6 +146,28 @@ describe('data-only prerace capture archive',()=>{
     expect(sqlite.prepare('SELECT race_id FROM boatrace_prerace_capture_archives').get()).toMatchObject({race_id:second});
   });
 
+  it.each([
+    ['racelist',1],['beforeinfo',2],['odds3t',3],
+  ] as const)('records only the source kind and HTTP status for a %s denial',async(source,failedCall)=>{
+    const raceId=addRace(),valid=fetchFor('2026-10-11',1);
+    let calls=0;
+    const result=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{
+      now:()=>FIXED_NOW,sleep:async()=>{},fetch:async url=>{
+        calls++;
+        if(calls===failedCall)return new Response('untrusted response body',{
+          status:403,headers:{server:'cloudflare','x-untrusted-header':'must-not-be-recorded'},
+        });
+        return valid(url);
+      },
+    });
+    const category=`source_http_403_${source}_cloudflare`;
+    expect(result).toMatchObject({status:'failed',failures:[{raceId,reason:category}]});
+    const logged=sqlite.prepare("SELECT error,reason FROM collection_runs WHERE source='boatrace-prerace-archive-worker-v1'").get() as any;
+    expect(logged.error).toContain(`${raceId}:${category}`);
+    expect(logged.error).not.toContain('untrusted response body');
+    expect(logged.error).not.toContain('must-not-be-recorded');
+  });
+
   it('rejects a cutoff that disagrees with the independently observed official racelist',async()=>{
     addRace();
     const result=await collectBoatraceCaptureArchives(DB,new Date(FIXED_NOW),{

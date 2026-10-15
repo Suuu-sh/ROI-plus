@@ -74,6 +74,19 @@ def test_forecast_job_rejects_pathologically_unbounded_envelope():
     assert error.value.failure_category == "invalid_forecast_envelope"
 
 
+def test_prediction_diagnostics_are_fixed_bounded_aggregate_only():
+    from edgelab.experimental_forecast_job import _safe_prediction_diagnostics
+    safe = _safe_prediction_diagnostics({"candidateRaceCount": 3000, "raceId": "private-race",
+        "abstentionReasonCounts": {"market_incomplete": 2, "untrusted": 99,
+                                    "outside_t60_window": -3, "exhibition_incomplete": True}})
+    assert safe == {"candidateRaceCount": 1000, "abstentionReasonCounts": {
+        "invalid_cutoff": 0, "invalid_cutoff_source": 0, "post_passed": 0,
+        "outside_t60_window": 0, "cutoff_observation_late": 0,
+        "entry_coverage_incomplete": 0, "market_incomplete": 2,
+        "exhibition_incomplete": 0}}
+    assert "raceId" not in safe
+
+
 def test_loop_refreshes_each_tick_and_recovers_from_safe_failure():
     from edgelab.experimental_forecast_job import run_forecast_loop
     clock = [0.0]
@@ -112,7 +125,9 @@ def test_job_submits_all_races_independently_after_one_rejection(monkeypatch, tm
     forecasts = [{"raceId": f"race-{i}", "predictedAt": "2026-10-13T04:00:00Z",
                   "predictions": [{"selection": "1-2-3"}] * 120} for i in range(6)]
     envelope = {"modelId": model_id, "artifactSha256": digest,
-                "trainingMode": "experimental", "experimentalOnly": True, "races": forecasts}
+                "trainingMode": "experimental", "experimentalOnly": True, "races": forecasts,
+                "diagnostics": {"candidateRaceCount": 6,
+                    "abstentionReasonCounts": {"market_incomplete": 2}}}
     monkeypatch.chdir(tmp_path)
     output = tmp_path / "ml/data/learning/trifecta-experimental-forecast.json"
     output.parent.mkdir(parents=True)
@@ -123,6 +138,7 @@ def test_job_submits_all_races_independently_after_one_rejection(monkeypatch, tm
         "betting_cutoff_at": "2026-10-13T04:05:00Z"} for i in range(6)]})
     calls = []
     def submit(envelope, **kwargs):
+        assert "diagnostics" not in envelope
         assert len(envelope["races"]) == 1
         race_id = envelope["races"][0]["raceId"]
         calls.append(race_id)

@@ -19,6 +19,24 @@ from edgelab.experimental_forecast_submit import submit_forecasts
 from edgelab.storage import DEFAULT_STORE, load_rows
 
 
+_ABSTENTION_REASONS = ("invalid_cutoff", "invalid_cutoff_source", "post_passed",
+                       "outside_t60_window", "cutoff_observation_late",
+                       "entry_coverage_incomplete", "market_incomplete", "exhibition_incomplete")
+
+
+def _safe_prediction_diagnostics(value: Any) -> dict[str, Any]:
+    """Retain only bounded aggregate counters from the local predictor envelope."""
+    diagnostics = value if isinstance(value, dict) else {}
+    counts = diagnostics.get("abstentionReasonCounts")
+    counts = counts if isinstance(counts, dict) else {}
+    safe_counts = {key: max(0, min(1000, count)) if isinstance(count, int) and not isinstance(count, bool) else 0
+                   for key in _ABSTENTION_REASONS for count in [counts.get(key)]}
+    candidates = diagnostics.get("candidateRaceCount")
+    return {"candidateRaceCount": max(0, min(1000, candidates))
+            if isinstance(candidates, int) and not isinstance(candidates, bool) else 0,
+            "abstentionReasonCounts": safe_counts}
+
+
 class ExperimentalForecastJobError(RuntimeError):
     """Fixed safe failure category; never carries remote response details."""
 
@@ -88,7 +106,7 @@ def _eligible_forecasts(envelope: dict[str, Any], store: dict[str, Any]) -> dict
     if not eligible:
         return None
     eligible.sort(key=lambda row: (row[0], row[1]))
-    return {**{key: value for key, value in envelope.items() if key != "races"},
+    return {**{key: value for key, value in envelope.items() if key not in {"races", "diagnostics"}},
             "races": [row[2] for row in eligible]}
 
 
@@ -125,13 +143,14 @@ def run_forecast_job(*, base_url: str, token: str, artifact_dir: str | Path = "m
                 or envelope.get("artifactSha256") != model["artifactSha256"]
                 or envelope.get("trainingMode") != "experimental" or envelope.get("experimentalOnly") is not True):
             raise ValueError
+        diagnostics = _safe_prediction_diagnostics(envelope.get("diagnostics"))
         selected = _eligible_forecasts(envelope, load_rows(store_path))
     except (OSError, ValueError, TypeError, KeyError):
         raise ExperimentalForecastJobError("invalid_forecast_envelope") from None
     if selected is None:
         return {"status": "no_eligible_forecast", "reason": "no_actual_t60_race_in_window",
                 "modelId": model["modelId"], "asOf": as_of,
-                "archiveRefresh": refreshed.get("status")}
+                "archiveRefresh": refreshed.get("status"), "predictionDiagnostics": diagnostics}
     stored: list[str] = []
     failures: list[dict[str, Any]] = []
     metadata = {key: value for key, value in selected.items() if key != "races"}

@@ -85,7 +85,7 @@ def test_experimental_trainer_persists_shadow_report_and_full_cohort_remains_unq
                                     artifact_dir=tmp_path, training_cohort_fingerprint="f" * 64)
 
 
-def test_experimental_forecast_is_separate_empty_envelope_without_eligible_live_inputs():
+def test_experimental_forecast_reports_first_failed_gate_counts_without_race_ids():
     columns = list(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
     fitted = _fit(race("test-fit", "2026-01-01"), columns)
     artifact = {"metadata": {"id": "experimental-model", "status": "candidate",
@@ -96,11 +96,23 @@ def test_experimental_forecast_is_separate_empty_envelope_without_eligible_live_
         "ticketBetType": "trifecta", "trainedAt": "2026-01-01T00:00:00+00:00",
         "metrics": {"promotionEligible": False, "profitabilityProven": False}},
         "model": fitted, "bootstrap_models": [], "columns": columns, "temperature": 1.0}
-    report = experimental_ticket_predictions({}, artifact=artifact, model_id="experimental-model",
+    report = experimental_ticket_predictions({"races": [
+        {"id": "synthetic-invalid-cutoff", "sport": "boat", "data_origin": "real",
+         "status": "scheduled", "race_date": "2026-01-02", "post_time": "not-a-time"},
+        {"id": "synthetic-invalid-source", "sport": "boat", "data_origin": "real",
+         "status": "scheduled", "race_date": "2026-01-02", "post_time": "2026-01-02T00:00:00Z",
+         "betting_cutoff_at": "2026-01-02T00:00:00Z",
+         "betting_cutoff_observed_at": "2026-01-01T23:00:00Z",
+         "betting_cutoff_source": "unverified"}]}, artifact=artifact, model_id="experimental-model",
         cutoff="2026-01-02T00:00:00+00:00", artifact_sha256="a" * 64)
     assert report["schema"] == "edgelab-experimental-trifecta-forecast-v1"
     assert report["trainingMode"] == "experimental" and report["experimentalOnly"] is True
     assert report["races"] == []
+    assert report["diagnostics"] == {"candidateRaceCount": 2, "abstentionReasonCounts": {
+        "invalid_cutoff": 1, "invalid_cutoff_source": 1, "post_passed": 0,
+        "outside_t60_window": 0, "cutoff_observation_late": 0,
+        "entry_coverage_incomplete": 0, "market_incomplete": 0,
+        "exhibition_incomplete": 0}}
 
 
 def test_experimental_forecast_window_matches_target_minus_five_minutes_to_target():

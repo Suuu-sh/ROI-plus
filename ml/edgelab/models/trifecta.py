@@ -1077,15 +1077,29 @@ def experimental_ticket_predictions(store: Mapping[str, Any], *, artifact: Mappi
 
     history = completed_racer_history(store)
     predictions_by_race: list[dict[str, Any]] = []
+    # Aggregate only the first failed gate for each scheduled real race.  These
+    # counters are operational diagnostics, not prediction inputs or labels.
+    abstention_reason_counts = {
+        "invalid_cutoff": 0,
+        "invalid_cutoff_source": 0,
+        "post_passed": 0,
+        "outside_t60_window": 0,
+        "cutoff_observation_late": 0,
+        "entry_coverage_incomplete": 0,
+        "market_incomplete": 0,
+        "exhibition_incomplete": 0,
+    }
     for race_id, race in sorted(races.items()):
         try:
             post = datetime.fromisoformat(str(race.get("post_time", "")).replace("Z", "+00:00"))
             official_cutoff = datetime.fromisoformat(str(race.get("betting_cutoff_at", "")).replace("Z", "+00:00"))
             cutoff_observed = datetime.fromisoformat(str(race.get("betting_cutoff_observed_at", "")).replace("Z", "+00:00"))
         except (TypeError, ValueError):
+            abstention_reason_counts["invalid_cutoff"] += 1
             continue
         if (race.get("betting_cutoff_source") != "boatrace-racelist-cutoff-v1"
                 or post.tzinfo is None or official_cutoff.tzinfo is None or cutoff_observed.tzinfo is None):
+            abstention_reason_counts["invalid_cutoff_source"] += 1
             continue
         t60 = official_cutoff.astimezone(timezone.utc) - timedelta(seconds=60)
         post = post.astimezone(timezone.utc)
@@ -1094,9 +1108,20 @@ def experimental_ticket_predictions(store: Mapping[str, Any], *, artifact: Mappi
         complete, source_proven, _ = _entry_coverage(entries, as_of)
         # Do not generate an earlier snapshot that ingest could persist but
         # the Worker decision query would never consider.
-        if (post <= as_of or not _within_experimental_worker_window(as_of, t60)
-                or cutoff_observed > as_of or cutoff_observed > t60
-                or not complete or not source_proven or not _has_complete_market(store, race, as_of)):
+        if post <= as_of:
+            abstention_reason_counts["post_passed"] += 1
+            continue
+        if not _within_experimental_worker_window(as_of, t60):
+            abstention_reason_counts["outside_t60_window"] += 1
+            continue
+        if cutoff_observed > as_of or cutoff_observed > t60:
+            abstention_reason_counts["cutoff_observation_late"] += 1
+            continue
+        if not complete or not source_proven:
+            abstention_reason_counts["entry_coverage_incomplete"] += 1
+            continue
+        if not _has_complete_market(store, race, as_of):
+            abstention_reason_counts["market_incomplete"] += 1
             continue
         fresh_lanes: set[int] = set()
         fresh_observations = []
@@ -1123,6 +1148,7 @@ def experimental_ticket_predictions(store: Mapping[str, Any], *, artifact: Mappi
                 fresh_lanes.add(lane)
                 fresh_observations.append(observation)
         if fresh_lanes != {1, 2, 3, 4, 5, 6} or len(entries) != 6:
+            abstention_reason_counts["exhibition_incomplete"] += 1
             continue
         features = build_boat_prerace_v2_features(entries, race=race, predicted_at=as_of,
             history=history, observations=observations_by_race.get(race_id, []))
@@ -1140,4 +1166,6 @@ def experimental_ticket_predictions(store: Mapping[str, Any], *, artifact: Mappi
             "artifactSha256": artifact_sha256, "trainingMode": "experimental", "experimentalOnly": True,
             "ticketModelSchemaVersion": TICKET_SCHEMA, "ticketPredictionSemantics": PREDICTION_SEMANTICS,
             "boatFeatureSchemaVersion": TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
-            "races": predictions_by_race}
+            "races": predictions_by_race,
+            "diagnostics": {"candidateRaceCount": len(races),
+                            "abstentionReasonCounts": abstention_reason_counts}}

@@ -28,6 +28,14 @@ type RaceCandidate = {
 };
 type SavedEntry = { number: number; features_json: string | null };
 type Failure = { raceId: string; reason: string };
+type CaptureSourceKind = 'racelist' | 'beforeinfo' | 'odds3t';
+const SAFE_HTTP_STATUS_CODES = new Set([400, 401, 403, 404, 408, 429, 500, 502, 503, 504]);
+function classifySourceServer(headers: Headers): 'cloudflare' | 'webotx' | 'other' {
+  const server = headers.get('server')?.trim().toLowerCase();
+  if (server === 'cloudflare') return 'cloudflare';
+  if (server === 'webotx_web_server' || server === 'webotx') return 'webotx';
+  return 'other';
+}
 type FetchResponse = Pick<Response, 'ok' | 'status' | 'headers' | 'body'>;
 export type CaptureArchiveOptions = {
   requestBudget?: SharedCaptureRequestBudget;
@@ -154,7 +162,7 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
         }
         if (savedRacers.size !== 6) throw new CaptureFailure('saved_registry_incomplete');
 
-        const raceList = await fetchSource(raceListPageUrl, requestBudget, attempted, fetcher, sleep, clock);
+        const raceList = await fetchSource(raceListPageUrl, 'racelist', requestBudget, attempted, fetcher, sleep, clock);
         attempted++;
         const raceListEntries = parseRaceListEntries(raceList.text, identity);
         const raceListCutoff = `${race.race_date}T${parseBoatraceCutoff(raceList.text, identity)}:00+09:00`;
@@ -162,7 +170,7 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
           throw new CaptureFailure('racelist_registry_mismatch');
         }
 
-        const beforeinfo = await fetchSource(beforeUrl, requestBudget, attempted, fetcher, sleep, clock);
+        const beforeinfo = await fetchSource(beforeUrl, 'beforeinfo', requestBudget, attempted, fetcher, sleep, clock);
         attempted++;
         const parsedBeforeinfo = parseBeforeinfoCapture(beforeinfo.text, identity, beforeinfo.capturedAt);
         if (raceListCutoff !== parsedBeforeinfo.cutoffAt) throw new CaptureFailure('racelist_cutoff_mismatch');
@@ -177,7 +185,7 @@ export async function collectBoatraceCaptureArchives(db: Db, scheduledAt: Date, 
             || parsedBeforeinfo.exhibitions.some((entry, index) => entry.lane !== index + 1)
             || !Object.keys(parsedBeforeinfo.weather).length) throw new CaptureFailure('beforeinfo_observations_incomplete');
 
-        const odds = await fetchSource(oddsUrl, requestBudget, attempted, fetcher, sleep, clock);
+        const odds = await fetchSource(oddsUrl, 'odds3t', requestBudget, attempted, fetcher, sleep, clock);
         attempted++;
         const oddsAt = Date.parse(odds.capturedAt);
         if (!Number.isFinite(oddsAt) || oddsAt < earliestMs || oddsAt > t60Ms) throw new CaptureFailure('odds_outside_t60_window');
@@ -247,7 +255,7 @@ class CaptureFailure extends Error {
   constructor(readonly code: string) { super(code); }
 }
 
-async function fetchSource(url: string, budget: SharedCaptureRequestBudget, requestsMade: number,
+async function fetchSource(url: string, source: CaptureSourceKind, budget: SharedCaptureRequestBudget, requestsMade: number,
   fetcher: NonNullable<CaptureArchiveOptions['fetch']>, sleep: NonNullable<CaptureArchiveOptions['sleep']>, clock: () => number) {
   if (budget.used >= budget.max) throw new CaptureFailure('shared_subrequest_budget_exhausted');
   if (requestsMade > 0 || budget.used > 0) await sleep(3_000);
@@ -257,7 +265,9 @@ async function fetchSource(url: string, budget: SharedCaptureRequestBudget, requ
   catch { throw new CaptureFailure('source_fetch_failed'); }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    throw new CaptureFailure('source_http_error');
+    const status = Number.isInteger(response.status) && SAFE_HTTP_STATUS_CODES.has(response.status)
+      ? String(response.status) : 'other';
+    throw new CaptureFailure(`source_http_${status}_${source}_${classifySourceServer(response.headers)}`);
   }
   const bytes = await readBoundedBody(response);
   let text: string;

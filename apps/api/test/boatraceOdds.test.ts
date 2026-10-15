@@ -159,7 +159,19 @@ describe('win odds quality exclusions', () => {
     race('quality-race',now.getTime()+300000);race('network-race',now.getTime()+360000,'real','scheduled',2);
     const fetch=vi.fn(async(url:string)=>url.includes('rno=2&')?{ok:false,status:503,text:async()=>''}:{ok:true,status:200,text:async()=>collectionPage(html().replaceAll(/<td class="oddsPoint">[^<]*<\/td>/g,'<td class="oddsPoint">99.9</td>'),url)});
     expect(await collectOdds(DB,now,{fetch,sleep:async()=>{}})).toMatchObject({status:'partial',failed:1,excluded:1});
-    expect(sqlite.prepare('SELECT error,reason FROM collection_runs').get()).toMatchObject({error:'network-race: HTTP 503',reason:expect.stringContaining('quality-race')});
+    expect(sqlite.prepare('SELECT error,reason FROM collection_runs').get()).toMatchObject({error:'network-race: HTTP 503 other',reason:expect.stringContaining('quality-race')});
+  });
+  it('keeps the HTTP status and only an allowlisted response server class',async()=>{
+    race('denied-race',now.getTime()+300000);
+    const fetch=vi.fn(async()=>({ok:false,status:403,
+      headers:new Headers({server:'cloudflare','x-private-marker':'must-not-be-recorded'}),
+      text:async()=>{throw new Error('response body must not be read');}}));
+    expect(await collectOdds(DB,now,{fetch,sleep:async()=>{}})).toMatchObject({status:'failed',failed:1});
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const logged=sqlite.prepare('SELECT error,reason FROM collection_runs').get() as any;
+    expect(logged.error).toBe('denied-race: HTTP 403 cloudflare');
+    expect(logged.error).not.toContain('must-not-be-recorded');
+    expect(logged.error).not.toContain('response body');
   });
   it('treats changed markup as a parse error, not a pool quality skip',async()=>{
     race('parse-race',now.getTime()+300000);
