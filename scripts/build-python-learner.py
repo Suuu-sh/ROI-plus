@@ -32,7 +32,23 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str], label: str) -> st
     result = subprocess.run(command, cwd=cwd, env=env, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if result.returncode:
-        print(f"{label}: failed (exit {result.returncode}); detailed output suppressed", file=sys.stderr)
+        output = result.stdout.lower()
+        if re.search(r"(too large|exceeds? (the )?(maximum|limit)|bundle.{0,20}(size|limit)|script.{0,20}(size|limit))", output):
+            category = "bundle_or_resource_limit"
+        elif re.search(r"(unauthorized|forbidden|authentication|invalid api token)", output):
+            category = "authorization"
+        elif re.search(r"(invalid binding|binding.{0,20}(missing|not found)|configuration error)", output):
+            category = "configuration"
+        elif re.search(r"(compatibility date|unsupported runtime|runtime failed to start)", output):
+            category = "runtime_compatibility"
+        else:
+            category = "other"
+        codes = sorted(set(re.findall(r"\b(?:100\d{2}|101\d{2})\b", output)))
+        statuses = sorted(set(re.findall(r"\bHTTP(?: status)?[ :]+([45]\d\d)\b", output)))
+        suffix = (f"; cloudflare_code={','.join(codes)}" if codes else "")
+        suffix += (f"; http_status={','.join(statuses)}" if statuses else "")
+        print(f"{label}: failed (exit {result.returncode}; category={category}{suffix}); details suppressed",
+              file=sys.stderr)
         raise SystemExit(1)
     return result.stdout
 
