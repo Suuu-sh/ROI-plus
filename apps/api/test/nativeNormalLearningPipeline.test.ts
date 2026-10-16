@@ -86,14 +86,15 @@ describe('native normal daily learner', () => {
     const now = Date.parse('2026-10-16T18:00:00Z');
     markSourcesReady(sqlite, date);
     sqlite.prepare('INSERT INTO settings(key,value) VALUES(?,?)').run(`native_normal_learning_state_v1:${date}`, JSON.stringify({ schema: 'native-normal-learning-v1', date,
-      state: 'failed', attempts: 4, updatedAt: new Date(now).toISOString(), lastAttemptAt: new Date(now).toISOString(),
-      nextAttemptAt: null, reason: 'learning-service-unavailable', reportStatus: null, candidateArtifactCreated: false }));
+      state: 'failed', attempts: 5, updatedAt: new Date(now).toISOString(), lastAttemptAt: new Date(now).toISOString(),
+      nextAttemptAt: null, reason: 'learning-service-unavailable', reportStatus: null, candidateArtifactCreated: false,
+      diagnosticRevision: 1, diagnostic: { stage: 'fit', errorClass: 'OtherError' }, recoveryRetryUsed: true }));
     let calls = 0;
     const recovered = await runNativeNormalLearningPipeline(db, { now: () => now, runLearning: async () => {
       calls++; return { status: 'failed', reason: 'learning-service-unavailable', retryable: true,
         diagnostic: { stage: 'fit', errorClass: 'ValueError' } };
     } });
-    expect(recovered.state).toMatchObject({ state: 'failed', attempts: 5, recoveryRetryUsed: true,
+    expect(recovered.state).toMatchObject({ state: 'failed', attempts: 6, recoveryRetryUsed: true, revision2RecoveryRetryUsed: true,
       diagnosticRevision: 2, diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
     expect(await readNativeNormalLearningStatus(db, now)).toMatchObject({ diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
     await runNativeNormalLearningPipeline(db, { now: () => now + 5 * 60_000, runLearning: async () => { calls++; return { status: 'success' }; } });
