@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 from sklearn.linear_model import LogisticRegression
 
-from edgelab.models.numpy_logistic import NumpyLogisticRegression
+from edgelab.models.numpy_logistic import (NumpyImputedLogisticRegression,
+                                           NumpyLogisticRegression)
 
 
 @pytest.mark.parametrize("seed", [11, 29])
@@ -87,4 +88,35 @@ def test_rejects_nonconvergence_instead_of_silently_returning_estimate():
     y = np.array([0, 0, 1, 1])
     with pytest.raises(RuntimeError, match="did not converge"):
         NumpyLogisticRegression(max_iter=1, tol=1e-14).fit(x, y)
+
+
+def test_imputed_wrapper_fits_training_only_statistics_and_reuses_them_for_inference():
+    x = np.array([
+        [1.0, np.nan, 0.0], [2.0, 2.0, 0.0], [3.0, None, 0.0],
+        [np.nan, 4.0, 0.0], [5.0, 5.0, 0.0], [6.0, 6.0, 0.0],
+    ], dtype=object)
+    y = np.array([0, 1, 0, 0, 1, 1])
+    fitted = NumpyImputedLogisticRegression().fit(x, y)
+    assert fitted.medians_.shape == fitted.means_.shape == fitted.scales_.shape == (3,)
+    np.testing.assert_allclose(fitted.medians_, [3.0, 4.5, 0.0])
+    assert fitted.scales_[2] == 1.0
+    assert fitted.converged_ and fitted.gradient_norm_ <= 1e-8
+
+    held_out = np.array([[np.nan, 3.5, 0.0], [1000.0, np.inf, 0.0]])
+    before = tuple(array.copy() for array in
+                   (fitted.medians_, fitted.means_, fitted.scales_))
+    probabilities = fitted.predict_proba(held_out)
+    assert probabilities.shape == (2, 2) and np.isfinite(probabilities).all()
+    for original, current in zip(before,
+                                 (fitted.medians_, fitted.means_, fitted.scales_)):
+        np.testing.assert_array_equal(current, original)
+
+    restored = pickle.loads(pickle.dumps(fitted))
+    np.testing.assert_array_equal(restored.predict_proba(held_out), probabilities)
+
+
+def test_finite_only_estimator_still_rejects_missing_values():
+    with pytest.raises(ValueError, match="finite"):
+        NumpyLogisticRegression().fit(
+            np.array([[0.0], [np.nan], [1.0], [2.0]]), np.array([0, 0, 1, 1]))
 

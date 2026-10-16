@@ -153,3 +153,74 @@ class NumpyLogisticRegression:
         positive = self._sigmoid(x @ self.coef_[0])
         return np.column_stack((1.0 - positive, positive))
 
+
+class NumpyImputedLogisticRegression:
+    """Logistic regression with training-fitted median imputation/scaling.
+
+    This wrapper is intended for candidate-only learning paths whose feature
+    matrices may contain missing values. Every preprocessing statistic is
+    learned only from the fit matrix and is reused unchanged for inference.
+    NaN, None, and infinities are treated as missing values; a wholly missing
+    feature receives a median of zero. The wrapped estimator itself remains
+    finite-input-only.
+    """
+
+    def __init__(self, C: float = 0.25, max_iter: int = 1000, tol: float = 1e-8):
+        self.C = C
+        self.max_iter = max_iter
+        self.tol = tol
+
+    @staticmethod
+    def _as_matrix(values, *, name: str) -> np.ndarray:
+        try:
+            matrix = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a numeric 2-D matrix") from exc
+        if matrix.ndim != 2 or matrix.shape[0] == 0 or matrix.shape[1] == 0:
+            raise ValueError(f"{name} must be a non-empty 2-D matrix")
+        return matrix
+
+    def _transform(self, values, *, name: str) -> np.ndarray:
+        matrix = self._as_matrix(values, name=name)
+        if matrix.shape[1] != self.n_features_in_:
+            raise ValueError(f"{name} must have {self.n_features_in_} features")
+        finite = np.isfinite(matrix)
+        imputed = np.where(finite, matrix, self.medians_[None, :])
+        return (imputed - self.means_[None, :]) / self.scales_[None, :]
+
+    def fit(self, X, y):
+        """Fit preprocessing and the finite-only NumPy estimator."""
+        matrix = self._as_matrix(X, name="X")
+        finite = np.isfinite(matrix)
+        medians = np.zeros(matrix.shape[1], dtype=np.float64)
+        for index in range(matrix.shape[1]):
+            column = matrix[finite[:, index], index]
+            if column.size:
+                medians[index] = float(np.median(column))
+        imputed = np.where(finite, matrix, medians[None, :])
+        means = imputed.mean(axis=0)
+        scales = imputed.std(axis=0)
+        scales[scales < 1e-9] = 1.0
+
+        self.medians_ = medians
+        self.means_ = means
+        self.scales_ = scales
+        self.n_features_in_ = matrix.shape[1]
+        transformed = (imputed - means[None, :]) / scales[None, :]
+        self.estimator_ = NumpyLogisticRegression(
+            C=self.C, fit_intercept=False, max_iter=self.max_iter, tol=self.tol).fit(
+                transformed, y)
+        self.classes_ = self.estimator_.classes_.copy()
+        self.coef_ = self.estimator_.coef_.copy()
+        self.n_iter_ = self.estimator_.n_iter_.copy()
+        self.converged_ = self.estimator_.converged_
+        self.gradient_norm_ = self.estimator_.gradient_norm_
+        self.objective_ = self.estimator_.objective_
+        return self
+
+    def predict_proba(self, X) -> np.ndarray:
+        """Impute and scale using fit-time statistics, then predict."""
+        if not hasattr(self, "estimator_"):
+            raise RuntimeError("estimator is not fitted")
+        return self.estimator_.predict_proba(self._transform(X, name="X"))
+

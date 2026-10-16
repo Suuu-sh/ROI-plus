@@ -65,6 +65,19 @@ def _synthetic_labeled_rows() -> list[dict]:
     return rows
 
 
+def _synthetic_rows_with_missing_features() -> list[dict]:
+    rows = _synthetic_labeled_rows()
+    for row in rows:
+        lane = row["number"]
+        race_date = row.get("race_date", "")
+        # Fixed, test-only missingness occurs in both the train and held-out dates.
+        if race_date and (lane + int(race_date[-2:])) % 5 == 0:
+            row["national_win_rate"] = None
+        else:
+            row["national_win_rate"] = 9.0 - lane * 0.4
+    return rows
+
+
 def test_numpy_logistic_is_separate_candidate_and_keeps_data_gates(tmp_path, monkeypatch):
     # The selected branch must not import runtime scipy, sklearn, or LightGBM.
     original_import = builtins.__import__
@@ -108,7 +121,9 @@ def test_numpy_logistic_is_separate_candidate_and_keeps_data_gates(tmp_path, mon
     json_metadata = json.loads((tmp_path / f"{metadata['id']}.json").read_text())
     assert artifact["metadata"] == json_metadata == metadata
     assert artifact["metadata"]["backend"] == "numpy-logistic"
-    assert type(artifact["model"]).__name__ == "NumpyLogisticRegression"
+    assert type(artifact["model"]).__name__ == "NumpyImputedLogisticRegression"
+    assert artifact["metadata"]["preprocessing"]["method"] == (
+        "training_median_imputation_then_standardization")
     assert artifact["metadata"]["artifactProvenance"]["artifactName"] == (
         f"candidate-model-artifact-{metadata['id']}")
 
@@ -142,4 +157,53 @@ def test_numpy_candidate_cannot_use_incumbent_model_id(tmp_path):
         assert "incumbent LightGBM model id" in str(exc)
     else:
         raise AssertionError("NumPy candidate must not write under the incumbent model id")
+
+
+def test_numpy_candidate_imputes_missing_features_from_train_only(tmp_path):
+    rows = _synthetic_rows_with_missing_features()
+    assert any(row.get("national_win_rate") is None for row in rows
+               if row.get("race_date", "").endswith(("01", "02", "03", "04", "05")))
+    assert any(row.get("national_win_rate") is None for row in rows
+               if row.get("race_date", "").endswith(("27", "28", "29", "30")))
+
+    baseline = train_model(
+        rows,
+        model_id="boat-win-numpy-logistic-missing-base",
+        feature_columns=["lane", "national_win_rate"],
+        artifact_dir=tmp_path / "base",
+        min_train_races=20,
+        n_bootstrap=2,
+        estimator_backend="numpy-logistic",
+    )
+    assert baseline["status"] == "candidate"
+    assert baseline["nBootstrapModels"] == 2
+    transform = baseline["preprocessing"]
+    assert transform["method"] == "training_median_imputation_then_standardization"
+    assert transform["featureColumns"] == ["lane", "national_win_rate"]
+    assert len(transform["medians"]) == len(transform["means"]) == len(transform["scales"]) == 2
+    assert all(math.isfinite(value) for key in ("medians", "means", "scales")
+               for value in transform[key])
+    with (tmp_path / "base" / f"{baseline['id']}.pkl").open("rb") as artifact_file:
+        artifact = pickle.load(artifact_file)
+    assert artifact["model"].medians_.tolist() == transform["medians"]
+    assert artifact["model"].means_.tolist() == transform["means"]
+    assert artifact["model"].scales_.tolist() == transform["scales"]
+
+    # Change only test-period values, including new missing values. Fitted preprocessing
+    # statistics must remain derived from the unchanged training period only.
+    perturbed_rows = [dict(row) for row in rows]
+    for row in perturbed_rows:
+        if row.get("race_date", "") >= "2026-01-27" and row.get("race_date", "") <= "2026-01-30":
+            row["national_win_rate"] = None if row["number"] % 2 else 10_000.0 + row["number"]
+    perturbed = train_model(
+        perturbed_rows,
+        model_id="boat-win-numpy-logistic-missing-perturbed",
+        feature_columns=["lane", "national_win_rate"],
+        artifact_dir=tmp_path / "perturbed",
+        min_train_races=20,
+        n_bootstrap=2,
+        estimator_backend="numpy-logistic",
+    )
+    assert perturbed["status"] == "candidate"
+    assert perturbed["preprocessing"] == transform
 

@@ -26,6 +26,7 @@ import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, re
 import { runForecastWatchdog } from './services/forecastWatchdog.js';
 import { readDailyCloudPipelineStatus, runDailyCloudPipeline } from './services/dailyCloudPipeline.js';
 import { runNativeDailyLearner } from './services/runNativeDailyLearner.js';
+import { readNativeNormalLearningStatus, runNativeNormalLearningPipeline } from './services/nativeNormalLearningPipeline.js';
 import { syncBoatraceProgramFile } from './services/boatraceProgramSync.js';
 import { runNativeExperimentalForecast, type NativeExperimentalHistorySnapshot } from './services/runNativeExperimentalForecast.js';
 import nativeExperimentalModel from './models/experimental-worker-model.json';
@@ -1755,7 +1756,7 @@ app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,
  const errors=classified.filter(r=>(r.status==='failed'||r.status==='partial') && (r.error||!r.quality.length)).slice(0,50).map(r=>({at:r.started_at,source:r.source,error:r.error??r.reason??r.status}));
  const recentQualityCutoff=Date.now()-60*60_000;
  const qualityExclusions=classified.filter(r=>r.quality.length && Date.parse(r.started_at)>=recentQualityCutoff).slice(0,50).map(r=>({at:r.started_at,source:r.source,count:r.quality.length,reason:r.quality.join(' | ')}));
- return c.json({sources,errors,qualityExclusions,tableCounts,nativeDailyStatus:await readDailyCloudPipelineStatus(db),d1WriteBudget:await readWriteBudget(db),freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowsNote:'合計は保存中のテーブル行数の概算で、Cloudflareアカウント全体のquota使用量ではありません。'}});
+ return c.json({sources,errors,qualityExclusions,tableCounts,nativeDailyStatus:await readDailyCloudPipelineStatus(db),nativeNormalLearning:await readNativeNormalLearningStatus(db),d1WriteBudget:await readWriteBudget(db),freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowsNote:'合計は保存中のテーブル行数の概算で、Cloudflareアカウント全体のquota使用量ではありません。'}});
 });
 for(const route of Object.keys(ingestTables)) app.post(`/ingest/${route}` as any,c=>ingest(c,route));
 app.get('/ingest/models',async c=>{
@@ -2014,6 +2015,12 @@ const waitForNextPaperT60Target=async(options:{
   return {status:'ready' as const,targetMs,actualMs};
 };
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env, ctx?: ExecutionContext) => {
+  if (event.cron === '2-57/5 * * * *') {
+    if (env.ENABLE_NATIVE_DAILY_PIPELINE === 'true') {
+      await runNativeNormalLearningPipeline(env.DB, { learner: env.FORECAST_LEARNER });
+    }
+    return;
+  }
   if (event.cron === '*/5 * * * *') {
     if(env.ENABLE_NATIVE_DAILY_PIPELINE==='true'){
       if(!env.TRIFECTA_ARCHIVE){

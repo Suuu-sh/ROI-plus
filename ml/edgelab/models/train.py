@@ -216,8 +216,8 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
                 num_leaves=15, max_depth=-1, min_child_samples=20, reg_lambda=1.0,
                 random_state=seed, verbosity=-1, n_jobs=1)
         else:
-            from .numpy_logistic import NumpyLogisticRegression
-            classifier = NumpyLogisticRegression(C=0.25, fit_intercept=False, max_iter=1000, tol=1e-8)
+            from .numpy_logistic import NumpyImputedLogisticRegression
+            classifier = NumpyImputedLogisticRegression(C=0.25, max_iter=1000, tol=1e-8)
         classifier.fit(_features(train, columns), [_target(r) for r in train])
     except Exception as exc:
         reason = (f"lightgbm_unavailable_or_fit_failed: {type(exc).__name__}: {exc}"
@@ -284,7 +284,7 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
                     num_leaves=15, min_child_samples=20, reg_lambda=1.0,
                     random_state=seed + i + 1, verbosity=-1, n_jobs=1)
             else:
-                replica = NumpyLogisticRegression(C=0.25, fit_intercept=False, max_iter=1000, tol=1e-8)
+                replica = NumpyImputedLogisticRegression(C=0.25, max_iter=1000, tol=1e-8)
             replica.fit(_features(sample, columns), [_target(r) for r in sample])
             bootstrap_models.append(replica)
         except Exception:
@@ -299,6 +299,14 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
         "calibration": "validation race-wise temperature scaling", "metrics": metrics,
         "trainedAt": datetime.now(timezone.utc).isoformat(), "featureColumns": columns,
         "nBootstrapModels": len(bootstrap_models), "notes": "prob_std is standard deviation across race-bootstrap models"}
+    if estimator_backend == "numpy-logistic":
+        meta["preprocessing"] = {
+            "method": "training_median_imputation_then_standardization",
+            "featureColumns": columns,
+            "medians": [float(value) for value in classifier.medians_],
+            "means": [float(value) for value in classifier.means_],
+            "scales": [float(value) for value in classifier.scales_],
+        }
     from edgelab.artifact_bundle import candidate_artifact_provenance
     meta["artifactProvenance"] = candidate_artifact_provenance(model_id)
     if sport == "boat" and boat_venue_schema_version:

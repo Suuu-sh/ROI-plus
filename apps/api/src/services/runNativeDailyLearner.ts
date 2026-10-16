@@ -1,4 +1,5 @@
 const LEARNER_URL = 'https://learner/learn';
+const NORMAL_LEARNER_URL = 'https://learner/learn/normal';
 const MAX_REPORT_BYTES = 64 * 1024;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
@@ -67,13 +68,13 @@ function reportResult(report: Record<string, unknown>, date: string): NativeLear
 }
 
 /** Calls the private candidate-only learner binding and stores no report text or model identifiers. */
-export async function runNativeDailyLearner(learner: Fetcher, targetDate: string): Promise<NativeLearnerResult> {
+async function runLearner(learner: Fetcher, targetDate: string, url: string): Promise<NativeLearnerResult> {
   if (!validDate(targetDate)) {
     return { status: 'failed', reason: 'learning-not-ready', retryable: false };
   }
   let response: Response;
   try {
-    response = await learner.fetch(LEARNER_URL, {
+    response = await learner.fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify({ date: targetDate, confirmed: true }), redirect: 'manual',
     });
@@ -98,4 +99,12 @@ export async function runNativeDailyLearner(learner: Fetcher, targetDate: string
   }
   const result = report ? reportResult(report, targetDate) : null;
   return result ?? { status: 'failed', reason: 'learning-not-ready', retryable: false };
+}
+
+export function runNativeDailyLearner(learner: Fetcher, targetDate: string): Promise<NativeLearnerResult> {
+  return runLearner(learner, targetDate, LEARNER_URL);
+}
+
+export function runNativeNormalDailyLearner(learner: Fetcher, targetDate: string): Promise<NativeLearnerResult> {
+  return runLearner(learner, targetDate, NORMAL_LEARNER_URL);
 }

@@ -290,6 +290,32 @@ def test_experimental_shadow_holdout_uses_whole_later_date_and_keeps_gates_false
     assert result["modelSpecificIndependentValidation"] is False
 
 
+def test_experimental_shadow_passes_selected_estimator_backend(monkeypatch):
+    from edgelab.models import trifecta
+    backends = []
+
+    def fake_fit(rows, columns, *, estimator_backend="sklearn"):
+        backends.append(estimator_backend)
+        return {"train_races": len({row["race_id"] for row in rows})}
+
+    def uniform(model, group):
+        return {f"{a}-{b}-{c}": 1 / 120 for a in range(1, 7)
+                for b in range(1, 7) if b != a
+                for c in range(1, 7) if c not in {a, b}}
+
+    monkeypatch.setattr(trifecta, "_fit", fake_fit)
+    monkeypatch.setattr(trifecta, "ordered_triple_probabilities", uniform)
+    groups = []
+    for day in ("2026-10-10", "2026-10-11"):
+        race_id = f"boat-{day.replace('-', '')}-01-01"
+        groups.append([{"race_id": race_id, "race_date": day, "number": lane,
+                        "finish_order": lane, "x": lane} for lane in range(1, 7)])
+    report = trifecta._experimental_temporal_shadow(groups, ["x"],
+        estimator_backend="numpy-newton")
+    assert backends == ["numpy-newton"]
+    assert report["promotionEligible"] is False
+
+
 def test_experimental_workflow_schedules_learning_only_and_gates_registry_forecast():
     workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/trifecta-experimental-pipeline.yml").read_text()
     assert "'50 0 * * *' # 09:50 JST, learning only" in workflow
