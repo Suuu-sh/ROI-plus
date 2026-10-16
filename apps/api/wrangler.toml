@@ -13,11 +13,12 @@ binding = "TRIFECTA_ARCHIVE"
 bucket_name = "roi-plus-trifecta-archive"
 
 [triggers]
-crons = ["* * * * *"]
+crons = ["* * * * *", "*/5 * * * *"]
 
 [vars]
 ENABLE_AUTO_BET = "true"
 ENABLE_NATIVE_EXPERIMENTAL_FORECAST = "true"
+ENABLE_NATIVE_DAILY_PIPELINE = "true"
 ENABLE_BOATRACE_ODDS_SCRAPE = "true"
 
 ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE = "true"

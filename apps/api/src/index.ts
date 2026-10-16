@@ -24,12 +24,14 @@ import { splitRowsForD1 } from './services/d1Batch.js';
 import { boatArchiveEvidenceValid } from './services/boatArchiveEvidence.js';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import { runForecastWatchdog } from './services/forecastWatchdog.js';
+import { readDailyCloudPipelineStatus, runDailyCloudPipeline } from './services/dailyCloudPipeline.js';
+import { syncBoatraceProgramFile } from './services/boatraceProgramSync.js';
 import { runNativeExperimentalForecast, type NativeExperimentalHistorySnapshot } from './services/runNativeExperimentalForecast.js';
 import nativeExperimentalModel from './models/experimental-worker-model.json';
 import nativeRacerHistory from './models/native-racer-history.json';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
-interface Env { DB: Db; TRIFECTA_ARCHIVE?: R2Bucket; INGEST_TOKEN?: string; FORECAST_GITHUB_TOKEN?: string; ENABLE_NATIVE_EXPERIMENTAL_FORECAST?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; ENABLE_HISTORICAL_TRIFECTA_ARCHIVE?: string; PROXY_TOKEN?: string; }
+interface Env { DB: Db; TRIFECTA_ARCHIVE?: R2Bucket; INGEST_TOKEN?: string; FORECAST_GITHUB_TOKEN?: string; ENABLE_NATIVE_EXPERIMENTAL_FORECAST?: string; ENABLE_NATIVE_DAILY_PIPELINE?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; ENABLE_HISTORICAL_TRIFECTA_ARCHIVE?: string; PROXY_TOKEN?: string; }
 type Ctx = { Bindings: Env };
 const SAFE_BOAT_SCHEMA = 'boat-venue-v2';
 const TICKET_MODEL_SCHEMA = 'ticket-selection-v1';
@@ -1752,7 +1754,7 @@ app.get('/collection/status',async c=>{const db=c.env.DB,runs=await all<any>(db,
  const errors=classified.filter(r=>(r.status==='failed'||r.status==='partial') && (r.error||!r.quality.length)).slice(0,50).map(r=>({at:r.started_at,source:r.source,error:r.error??r.reason??r.status}));
  const recentQualityCutoff=Date.now()-60*60_000;
  const qualityExclusions=classified.filter(r=>r.quality.length && Date.parse(r.started_at)>=recentQualityCutoff).slice(0,50).map(r=>({at:r.started_at,source:r.source,count:r.quality.length,reason:r.quality.join(' | ')}));
- return c.json({sources,errors,qualityExclusions,tableCounts,d1WriteBudget:await readWriteBudget(db),freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowsNote:'合計は保存中のテーブル行数の概算で、Cloudflareアカウント全体のquota使用量ではありません。'}});
+ return c.json({sources,errors,qualityExclusions,tableCounts,nativeDailyStatus:await readDailyCloudPipelineStatus(db),d1WriteBudget:await readWriteBudget(db),freeTier:{d1RowsApprox:Object.values(tableCounts).reduce((a,b)=>a+b,0),d1RowsNote:'合計は保存中のテーブル行数の概算で、Cloudflareアカウント全体のquota使用量ではありません。'}});
 });
 for(const route of Object.keys(ingestTables)) app.post(`/ingest/${route}` as any,c=>ingest(c,route));
 app.get('/ingest/models',async c=>{
@@ -2012,6 +2014,18 @@ const waitForNextPaperT60Target=async(options:{
 };
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env, ctx?: ExecutionContext) => {
   if (event.cron === '*/5 * * * *') {
+    if(env.ENABLE_NATIVE_DAILY_PIPELINE==='true'){
+      if(!env.TRIFECTA_ARCHIVE){
+        console.info(JSON.stringify({event:'daily-cloud-pipeline',status:'unconfigured',reason:'archive-binding-unavailable'}));
+        return;
+      }
+      await runDailyCloudPipeline(env.DB,{
+        syncProgramFile:(kind,targetDate,scheduledAt)=>syncBoatraceProgramFile(env.DB,env.TRIFECTA_ARCHIVE!,scheduledAt,kind,{targetDate}),
+      });
+      return;
+    }
+    // Keep the legacy forecast fallback disabled while native inference is active;
+    // daily collection has its own explicit flag and can be enabled independently.
     if(env.ENABLE_NATIVE_EXPERIMENTAL_FORECAST==='true')return;
     // Separate scheduled invocation keeps GitHub dispatch I/O out of the
     // minute-level T-60, odds, settlement, and shared fetch-budget path.

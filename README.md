@@ -1,7 +1,7 @@
 # EdgeLab
 
 競馬（JRA）とボートレースの **AI 予測・期待値分析・仮想運用** プラットフォーム。
-実際の投票・購入機能はありません（仮想購入のみ）。費用 0 円（Cloudflare 無料枠 + ローカル / GitHub Actions の Python）で動かす前提です。
+実際の投票・購入機能はありません（仮想購入のみ）。Worker は Cloudflare Workers Paid 環境を前提とし、Containers は追加しません。ローカル / GitHub Actions の Python 処理も一部残ります。
 
 設計・作業時は [AGENTS.md](AGENTS.md) と [docs/SPEC.md](docs/SPEC.md) を確認してください。実装構成と開発・運用上の注意は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) にまとめています。
 
@@ -42,7 +42,7 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab feedback
 | `data/fixtures` | テスト用の合成ボートレースデータ（実データを含まない） |
 | `data/private_fixtures` | ローカル専用の公式データ置き場（Git 管理外） |
 
-実験三連単の予測は、登録済みモデルを照合して Worker 内で生成します（Python版との実データ一致を検証）。通常モデルの推論・学習・日次データ同期には既存の Python 処理を使います。
+実験三連単の予測は、登録済みモデルを照合して Worker 内で生成します（Python版との実データ一致を検証）。通常モデルの推論・学習は既存の Python 処理を使います。`ENABLE_NATIVE_DAILY_PIPELINE=true` の場合、別の5分 Worker Cron が公式 B/K を1ファイルずつ D1/R2 に同期し、大きな同期はR2 cursorから継続します。08:00 JST の B readiness deadline 後も当日内は bounded retry します。同期状況は `/api/collection/status` の `nativeDailyStatus` で確認できます。Worker learning は未接続で `unconfigured` のままです。既存の Actions 日次・学習 workflow は停止していません。
 
 ## セットアップ
 
