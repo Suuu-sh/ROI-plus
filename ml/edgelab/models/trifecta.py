@@ -144,7 +144,8 @@ def _finite(value: Any) -> bool:
         return False
 
 
-def _fit(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]):
+def _fit(rows: Sequence[Mapping[str, Any]], columns: Sequence[str], *,
+         estimator_backend: str = "sklearn"):
     """Fit pairwise logistic preference from *complete* ordered races."""
     complete = [g for g in _group_races(rows) if _complete_race(g)]
     flat = [r for g in complete for r in g]
@@ -162,9 +163,15 @@ def _fit(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]):
                 labels.append(0)
     if not complete or len(pair_x) == 0:
         raise ValueError("no complete six-boat finish-order races")
-    from sklearn.linear_model import LogisticRegression
-    estimator = LogisticRegression(C=0.25, fit_intercept=False, max_iter=1000,
-                                   solver="lbfgs", random_state=17)
+    if estimator_backend == "sklearn":
+        from sklearn.linear_model import LogisticRegression
+        estimator = LogisticRegression(C=0.25, fit_intercept=False, max_iter=1000,
+                                       solver="lbfgs", random_state=17)
+    elif estimator_backend == "numpy-newton":
+        from edgelab.models.numpy_logistic import NumpyLogisticRegression
+        estimator = NumpyLogisticRegression(C=0.25, fit_intercept=False, max_iter=1000, tol=1e-8)
+    else:
+        raise ValueError("unsupported pairwise logistic estimator backend")
     estimator.fit(np.asarray(pair_x), np.asarray(labels))
     return {"estimator": estimator, "columns": list(columns), "medians": medians,
             "means": means, "scales": scales, "trainRaces": len(complete)}
@@ -448,7 +455,8 @@ def _paired_delta_interval(groups, candidate_values, baseline_values, *, cluster
 
 
 def _experimental_temporal_shadow(groups: Sequence[Sequence[Mapping[str, Any]]],
-                                  columns: Sequence[str]) -> dict[str, Any]:
+                                  columns: Sequence[str], *,
+                                  estimator_backend: str = "sklearn") -> dict[str, Any]:
     """Score a train-only candidate against a train-only lane prior on later dates.
 
     This is a shadow development diagnostic: the final artifact is subsequently
@@ -485,7 +493,8 @@ def _experimental_temporal_shadow(groups: Sequence[Sequence[Mapping[str, Any]]],
     if not train or not holdout:
         return {**report, "status": "not_evaluated", "reason": "empty_temporal_partition"}
     train_rows = [row for group in train for row in group]
-    candidate = _fit(train_rows, columns)
+    candidate = (_fit(train_rows, columns) if estimator_backend == "sklearn"
+                 else _fit(train_rows, columns, estimator_backend=estimator_backend))
     candidate_distributions = [ordered_triple_probabilities(candidate, group) for group in holdout]
     baseline_distribution = _lane_order_model(train, alpha=1.0)
     baseline_distributions = [baseline_distribution for _ in holdout]
@@ -891,7 +900,8 @@ def train_trifecta(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], 
 
 def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mapping[str, Any], *,
                                 model_id: str, artifact_dir: str | Path = "ml/artifacts",
-                                training_cohort_fingerprint: str | None = None) -> dict[str, Any]:
+                                training_cohort_fingerprint: str | None = None,
+                                estimator_backend: str = "sklearn") -> dict[str, Any]:
     """Fit an explicitly experimental, weatherless model without relaxing candidate gates.
 
     This separate path uses only real, complete outcomes whose own T-60 entry,
@@ -920,8 +930,12 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
     training_cohort_fingerprint = actual_cohort_fingerprint
 
     columns = list(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
-    temporal_shadow = _experimental_temporal_shadow(groups, columns)
-    model = _fit(training_rows, columns)
+    temporal_shadow = (_experimental_temporal_shadow(groups, columns)
+                       if estimator_backend == "sklearn"
+                       else _experimental_temporal_shadow(groups, columns,
+                                                          estimator_backend=estimator_backend))
+    model = (_fit(training_rows, columns) if estimator_backend == "sklearn"
+             else _fit(training_rows, columns, estimator_backend=estimator_backend))
     bootstrap_models = []
     rng = random.Random(17013)
     for replicate in range(4):
@@ -929,7 +943,9 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
         bootstrap_rows = [{**row, "race_id": f"{row['race_id']}#experimental-bootstrap-{replicate}-{i}"}
                           for i, group in enumerate(sampled) for row in group]
         try:
-            bootstrap_models.append(_fit(bootstrap_rows, columns))
+            bootstrap_models.append(_fit(bootstrap_rows, columns) if estimator_backend == "sklearn"
+                                    else _fit(bootstrap_rows, columns,
+                                              estimator_backend=estimator_backend))
         except (ValueError, RuntimeError):
             continue
 
@@ -962,6 +978,26 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
         "repository": os.environ.get("GITHUB_REPOSITORY") or None,
         "commitSha": os.environ.get("GITHUB_SHA", "").lower() if re.fullmatch(r"[a-fA-F0-9]{40}", os.environ.get("GITHUB_SHA", "")) else None,
     }
+    estimator_fit = None
+    if estimator_backend == "numpy-newton":
+        primary_estimator = model["estimator"]
+        estimator_fit = {
+            "backend": "numpy-newton",
+            "objective": "summed binary logistic loss + L2 ||w||^2/(2*C)",
+            "C": 0.25, "fitIntercept": False,
+            "tolerance": float(primary_estimator.tol),
+            "maxIterations": int(primary_estimator.max_iter),
+            "primary": {"converged": bool(primary_estimator.converged_),
+                        "iterations": int(primary_estimator.n_iter_[0]),
+                        "gradientInfinityNorm": float(primary_estimator.gradient_norm_),
+                        "objectiveValue": float(primary_estimator.objective_)},
+            "bootstrap": [{"converged": bool(item["estimator"].converged_),
+                           "iterations": int(item["estimator"].n_iter_[0]),
+                           "gradientInfinityNorm": float(item["estimator"].gradient_norm_),
+                           "objectiveValue": float(item["estimator"].objective_)}
+                          for item in bootstrap_models],
+            "compatibilityNote": "NumPy damped Newton fit; not bitwise sklearn LBFGS-equivalent",
+        }
     trained_at = datetime.now(timezone.utc).isoformat()
     metadata = {
         "id": model_id, "sport": "boat", "betType": "trifecta", "status": "candidate",
@@ -970,6 +1006,8 @@ def train_trifecta_experimental(rows: Sequence[Mapping[str, Any]], store: Mappin
         "ticketBetType": "trifecta", "boatFeatureSchemaVersion": TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
         "featureColumns": columns,
         "algorithm": "pairwise logistic ranking + Plackett-Luce exact-order distribution",
+        "estimatorBackend": estimator_backend,
+        "estimatorFit": estimator_fit,
         "trainFrom": dates[0], "trainTo": dates[-1], "validFrom": None, "validTo": None,
         "testFrom": None, "testTo": None, "nTrainRaces": len(groups), "nValidRaces": 0,
         "nTestRaces": 0, "temperature": 1.0, "calibration": "none; experimental model",

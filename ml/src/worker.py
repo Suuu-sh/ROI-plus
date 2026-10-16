@@ -16,6 +16,7 @@ from typing import Any
 MAX_RACES = 500
 LOOKBACK_DAYS = 120
 _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_NORMAL_RACE_ID = re.compile(r"^boat-\d{8}-\d{2}-\d{2}$")
 
 
 def _rows(result: Any) -> list[dict[str, Any]]:
@@ -213,11 +214,13 @@ async def handle_learning(db: Any, archive_bucket: Any, request_body: Any) -> di
         from edgelab.models.trifecta import train_trifecta_experimental
         with tempfile.TemporaryDirectory(prefix="edgelab-candidate-") as directory:
             report = train_trifecta_experimental(rows, store, model_id=model_id,
-                artifact_dir=Path(directory) / "candidate")
+                artifact_dir=Path(directory) / "candidate",
+                estimator_backend="numpy-newton")
             report.pop("artifactManifest", None)
             report.pop("artifactManifestData", None)
             report = {**report, "inputCounts": counts,
                       "inputSelection": "most-recent-bounded-real-cohort",
+                      "inputSelectionTruncation": "reported-count-is-a-lower-bound",
                       "candidateOnly": True, "registered": False, "promoted": False,
                       "runtimePackages": _runtime_package_versions()}
             prefix = f"learning-candidates/{today.isoformat()}/{model_id}/"
@@ -233,10 +236,194 @@ async def handle_learning(db: Any, archive_bucket: Any, request_body: Any) -> di
             await db.prepare("DELETE FROM settings WHERE key=? AND value=?").bind(lease_key, lease_value).run()
 
 
+async def handle_normal_learning(db: Any, archive_bucket: Any, request_body: Any) -> dict[str, Any]:
+    """Run guarded lightweight logistic candidate learning without promotion."""
+    now = datetime.now(timezone.utc)
+    today = now.astimezone(timezone(timedelta(hours=9))).date()
+    if (not isinstance(request_body, dict) or set(request_body) != {"date", "confirmed"}
+            or request_body.get("date") != today.isoformat() or request_body.get("confirmed") is not True):
+        return {"status": "rejected", "reason": "request_confirmation_invalid"}
+    lease_key = f"native_normal_learning:{today.isoformat()}"
+    lease_until = (now + timedelta(minutes=45)).isoformat()
+    lease_value = json.dumps({"until": lease_until, "owner": uuid.uuid4().hex}, separators=(",", ":"))
+    claimed = await db.prepare("""
+      INSERT INTO settings(key,value) VALUES(?,?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value
+      WHERE julianday(json_extract(settings.value,'$.until'))<=julianday(?)
+    """).bind(lease_key, lease_value, now.isoformat()).run()
+    if not bool(getattr(getattr(claimed, "meta", None), "changes", 0)):
+        return {"status": "skipped", "reason": "daily_lease_active", "candidateOnly": True}
+    keep_lease = False
+    try:
+        store, counts = await load_training_store(db, today=today)
+        from edgelab.importers.experimental_result_labels import verified_experimental_result_race_ids
+        verified_ids = verified_experimental_result_race_ids(store)
+        normal_store = dict(store)
+        normal_store["models"] = []  # This private learner has no authoritative registry snapshot.
+        for key in ("races", "entries", "results", "payouts", "collection_runs"):
+            def row_race_id(row: dict[str, Any]) -> str:
+                if key == "races":
+                    value = row.get("id")
+                elif key == "collection_runs":
+                    value = str(row.get("id") or "").removeprefix("boat-result:")
+                else:
+                    value = row.get("race_id")
+                return str(value or "")
+            normal_store[key] = [row for row in store.get(key, []) if row_race_id(row) in verified_ids]
+        from edgelab.cli import _make_training_rows
+        training_rows = _make_training_rows(normal_store, "boat", require_source_arrival=True)
+        complete_ids = sorted({str(row["race_id"]) for row in training_rows})
+        fingerprint = hashlib.sha256(("|".join(complete_ids) + "|" + now.isoformat()).encode()).hexdigest()[:8]
+        model_id = f"boat-win-logistic-{today:%Y%m%d}-{fingerprint}"
+        prefix = f"learning-candidates/{today.isoformat()}/{model_id}/"
+        from edgelab.learning import guarded_candidate
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="edgelab-normal-candidate-") as directory:
+            base = Path(directory) / "candidate"
+            base.mkdir()
+            incumbent_dir = Path(directory) / "incumbents"
+            incumbent_dir.mkdir()
+            state_path = Path(directory) / "learning-state.json"
+            checkpoint = await _load_normal_learning_state(db)
+            state_path.write_text(json.dumps(checkpoint, separators=(",", ":")), encoding="utf-8")
+            result = guarded_candidate(normal_store, training_rows, model_id=model_id,
+                authoritative_model_ids=set(), artifact_dir=base, learning_state_path=state_path,
+                incumbent_artifact_dir=incumbent_dir, estimator_backend="numpy-logistic")
+            next_state = None
+            if result.get("status") == "candidate":
+                _mark_normal_candidate_not_promotable(base, model_id, result)
+                await _persist_normal_candidate(base, model_id, prefix, archive_bucket)
+                next_state = {"version": 1, "trainedRaceIds": complete_ids[-MAX_RACES:]}
+                status = "candidate"
+                artifact_created = True
+                reason = "no_eligible_pre_holdout_incumbent"
+            elif result.get("status") in {"skipped", "untrained", "rejected"}:
+                status = "insufficient_data"
+                artifact_created = False
+                reason = _normal_learning_reason(result)
+            else:
+                raise ValueError("normal_candidate_result_invalid")
+
+            # Race identifiers and local artifact paths stay out of the API/R2 report.
+            normal_summary = {
+                "status": status, "reason": reason,
+                "completeRaces": len(complete_ids),
+                "newRaces": _safe_nonnegative_int(result.get("newRaces")),
+                "holdoutStart": _safe_day(result.get("holdoutStart")),
+                "holdoutEnd": _safe_day(result.get("holdoutEnd")),
+                "candidateMetrics": result.get("candidateMetrics"),
+                "comparison": result.get("comparison"),
+                "promotionEligible": False,
+                "promotionReason": reason,
+            }
+            report = {
+                "id": model_id, "status": status, "reason": reason,
+                "artifactCreated": artifact_created, "candidatePrefix": prefix,
+                "candidateOnly": True, "registered": False, "promoted": False,
+                "promotionEligible": False, "promotionReason": reason,
+                "inputCounts": counts,
+                "inputSelection": "most-recent-bounded-real-cohort",
+                "inputSelectionTruncation": "reported-count-is-a-lower-bound",
+                "runtimePackages": _runtime_package_versions(),
+                "normalLearning": normal_summary,
+            }
+            await archive_bucket.put(prefix + "report.json", json.dumps(report, separators=(",", ":")))
+            if next_state is not None:
+                await db.prepare("""
+                  INSERT INTO settings(key,value) VALUES(?,?)
+                  ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """).bind("native_normal_learning_state",
+                          json.dumps(next_state, separators=(",", ":"))).run()
+                keep_lease = True
+            return report
+    finally:
+        if not keep_lease:
+            await db.prepare("DELETE FROM settings WHERE key=? AND value=?").bind(lease_key, lease_value).run()
+
+
+async def _load_normal_learning_state(db: Any) -> dict[str, Any]:
+    rows = await _query(db, "SELECT value FROM settings WHERE key=?", "native_normal_learning_state")
+    if not rows:
+        return {"version": 1, "trainedRaceIds": []}
+    try:
+        state = json.loads(rows[0].get("value", ""))
+    except (TypeError, ValueError):
+        raise ValueError("normal_learning_state_invalid")
+    ids = state.get("trainedRaceIds") if isinstance(state, dict) else None
+    if (set(state) != {"version", "trainedRaceIds"} or state.get("version") != 1
+            or not isinstance(ids, list) or len(ids) > MAX_RACES
+            or any(not isinstance(race_id, str) or not _NORMAL_RACE_ID.fullmatch(race_id) for race_id in ids)
+            or len(ids) != len(set(ids))):
+        raise ValueError("normal_learning_state_invalid")
+    return state
+
+
+def _normal_learning_reason(result: dict[str, Any]) -> str:
+    reasons = {
+        "no complete real outcome cohorts": "no_complete_real_outcomes",
+        "insufficient temporal dates for untouched holdout": "insufficient_temporal_dates",
+        "insufficient total complete real races": "insufficient_total_races",
+        "not enough new completed real races": "insufficient_new_races",
+        "candidate validation overlaps untouched holdout": "holdout_overlap",
+    }
+    value = result.get("reason")
+    if value in reasons:
+        return reasons[value]
+    return "trainer_unavailable_or_candidate_not_eligible"
+
+
+def _safe_nonnegative_int(value: Any) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _safe_day(value: Any) -> str | None:
+    if isinstance(value, str) and _DAY.fullmatch(value):
+        try:
+            return date.fromisoformat(value).isoformat()
+        except ValueError:
+            return None
+    return None
+
+
+def _mark_normal_candidate_not_promotable(base: Path, model_id: str, result: dict[str, Any]) -> None:
+    metadata_path = base / f"{model_id}.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("id") != model_id or metadata.get("status") != "candidate":
+        raise ValueError("normal_candidate_metadata_invalid")
+    metadata["candidateOnly"] = True
+    metrics = metadata.get("metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+    metrics["promotionEligible"] = False
+    metrics["promotionReason"] = "no eligible authoritative incumbent comparison"
+    metadata["metrics"] = metrics
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+                             encoding="utf-8")
+    result["promotionEligible"] = False
+
+
+async def _persist_normal_candidate(base: Path, model_id: str, prefix: str, bucket: Any) -> None:
+    names = (f"{model_id}.pkl", f"{model_id}.json")
+    records = {}
+    for name in names:
+        path = base / name
+        if not path.is_file():
+            raise ValueError("normal_candidate_artifact_incomplete")
+        content = path.read_bytes()
+        records[name] = {"sha256": hashlib.sha256(content).hexdigest(), "sizeBytes": len(content)}
+    manifest = {"schema": "roi-plus-normal-candidate-v1", "modelId": model_id,
+                "candidateOnly": True, "registered": False, "promoted": False,
+                "promotionEligible": False, "files": records}
+    manifest_name = f"normal-candidate-{model_id}.manifest.json"
+    for name in names:
+        await bucket.put(prefix + name, (base / name).read_bytes())
+    await bucket.put(prefix + manifest_name, json.dumps(manifest, separators=(",", ":")))
+
+
 def _runtime_package_versions() -> dict[str, str]:
     from importlib.metadata import version
     versions = {}
-    for package in ("numpy", "scipy", "scikit-learn"):
+    for package in ("numpy", "scipy", "scikit-learn", "lightgbm"):
         try:
             versions[package] = version(package)
         except Exception:
@@ -250,14 +437,17 @@ try:  # Cloudflare Workers runtime imports are unavailable in ordinary CPython.
     class Default(WorkerEntrypoint):
         async def fetch(self, request):
             path = str(request.url).split("?", 1)[0].rstrip("/")
-            if request.method != "POST" or not path.endswith("/learn"):
+            if request.method != "POST" or not (path.endswith("/learn") or path.endswith("/learn/normal")):
                 return _json_response({"error": "not_found"}, 404)
             try:
                 body = await request.json()
                 converter = getattr(body, "to_py", None)
                 if callable(converter):
                     body = converter()
-                result = await handle_learning(self.env.DB, self.env.TRIFECTA_ARCHIVE, body)
+                if path.endswith("/learn/normal"):
+                    result = await handle_normal_learning(self.env.DB, self.env.TRIFECTA_ARCHIVE, body)
+                else:
+                    result = await handle_learning(self.env.DB, self.env.TRIFECTA_ARCHIVE, body)
                 return _json_response(result)
             except ValueError as exc:
                 reason = str(exc) if str(exc) in {"input_limit_exceeded"} else "training_input_invalid"

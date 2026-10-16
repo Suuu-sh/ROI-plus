@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 
 from edgelab.cli import _make_training_rows
 from edgelab.learning import guarded_candidate, score_feedback
@@ -172,3 +173,40 @@ def test_candidate_registry_versions_are_unique_and_match_both_training_paths(tm
     assert cli.main(["train", "--sport", "boat"]) == 0
     assert plain_call["version"] == candidate_version(plain_call["model_id"])
     assert synced["models"][0]["version"] == plain_call["version"]
+
+
+def test_guarded_candidate_accepts_isolated_artifact_state_and_incumbent_paths(tmp_path, monkeypatch):
+    import edgelab.learning as learning
+
+    artifacts = tmp_path / "candidate-artifacts"
+    state = tmp_path / "state.json"
+    incumbents = tmp_path / "empty-incumbents"
+    incumbents.mkdir()
+    monkeypatch.setattr(learning, "MIN_COMPLETE_RACES", 1)
+    rows = []
+    start = date(2026, 1, 1)
+    for index in range(60):
+        rows.append({"race_id": f"r{index}", "race_date": (start + timedelta(days=index)).isoformat(),
+                     "lane": 1, "winner": bool(index % 2)})
+
+    def fake_train(_rows, *, model_id, version, artifact_dir, **_kwargs):
+        artifact_dir = __import__("pathlib").Path(artifact_dir)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / f"{model_id}.pkl").write_bytes(b"candidate-pickle")
+        return {"id": model_id, "version": version, "status": "candidate",
+                "trainTo": "2026-01-01", "validTo": "2026-01-02"}
+
+    monkeypatch.setattr(learning, "train_model", fake_train)
+    monkeypatch.setattr(learning, "load_artifact", lambda _path: {
+        "metadata": {"trainTo": "2026-01-01", "validTo": "2026-01-02"},
+        "feature_columns": ["lane"], "temperature": 1.0, "model": object()})
+    monkeypatch.setattr(learning, "_score", lambda _model, values, _columns: [0.0] * len(values))
+
+    result = learning.guarded_candidate({}, rows, model_id="boat-win-lgbm-20261016-0123abcd",
+        authoritative_model_ids=set(), min_new_races=0, artifact_dir=artifacts,
+        learning_state_path=state, incumbent_artifact_dir=incumbents)
+    assert result["status"] == "candidate"
+    assert result["promotionEligible"] is False
+    assert result["comparison"]["reason"] == "no eligible pre-holdout clean local incumbent"
+    assert (artifacts / "boat-win-lgbm-20261016-0123abcd.pkl").is_file()
+    assert not state.exists()  # guarded_candidate reports IDs; the caller persists checkpoint only after R2 success.

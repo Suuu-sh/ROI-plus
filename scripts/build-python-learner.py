@@ -61,7 +61,7 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str], label: str) -> st
 
 
 def smoke_test(project: Path, wrangler: Path, env: dict[str, str]) -> None:
-    """Start an isolated local workerd with empty D1/R2 bindings and hit /learn."""
+    """Exercise both routes and a NumPy fit in isolated local workerd processes."""
     config = str(project / "wrangler.toml")
     schema = ("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
               "CREATE TABLE races(id TEXT PRIMARY KEY,sport TEXT,venue_id TEXT,race_no INTEGER,"
@@ -81,10 +81,8 @@ def smoke_test(project: Path, wrangler: Path, env: dict[str, str]) -> None:
         "--port", str(port), "--compatibility-date", "2026-10-13",
         "--persist-to", str(state_dir), "--config", config],
         cwd=project, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    base = f"http://127.0.0.1:{port}/learn"
-
-    def post(payload: dict[str, object]) -> tuple[int, dict[str, object]]:
-        request = Request(base, data=__import__("json").dumps(payload).encode(),
+    def post(route: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+        request = Request(f"http://127.0.0.1:{port}{route}", data=__import__("json").dumps(payload).encode(),
                           headers={"content-type": "application/json"}, method="POST")
         try:
             with urlopen(request, timeout=2) as response:
@@ -92,22 +90,27 @@ def smoke_test(project: Path, wrangler: Path, env: dict[str, str]) -> None:
         except HTTPError as error:
             return error.code, __import__("json").loads(error.read())
 
+    routes_passed = False
     try:
         deadline = time.monotonic() + 45
         today = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 9 * 60 * 60))
-        invalid_status = None
-        good_status = None
         while time.monotonic() < deadline and process.poll() is None:
             try:
-                invalid_status, invalid_body = post({"date": "2000-01-01", "confirmed": True})
-                good_status, good_body = post({"date": today, "confirmed": True})
-                if (invalid_status == 200 and invalid_body.get("reason") == "request_confirmation_invalid"
-                        and good_status == 200 and good_body.get("status") == "insufficient_data"):
-                    return
+                for route in ("/learn", "/learn/normal"):
+                    invalid_status, invalid_body = post(route, {"date": "2000-01-01", "confirmed": True})
+                    good_status, good_body = post(route, {"date": today, "confirmed": True})
+                    if invalid_status != 200 or invalid_body.get("reason") != "request_confirmation_invalid":
+                        raise RuntimeError("local_worker_invalid_rejection_failed")
+                    if good_status != 200 or good_body.get("status") != "insufficient_data":
+                        raise RuntimeError("local_worker_empty_response_failed")
+                routes_passed = True
                 break
             except (URLError, TimeoutError, ConnectionError):
                 time.sleep(0.25)
-        raise RuntimeError("local_worker_smoke_failed")
+        if not routes_passed:
+            if process.poll() is not None:
+                raise RuntimeError("local_worker_process_exited")
+            raise RuntimeError("local_worker_not_ready")
     finally:
         process.terminate()
         try:
@@ -115,6 +118,76 @@ def smoke_test(project: Path, wrangler: Path, env: dict[str, str]) -> None:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+    if not routes_passed:
+        raise RuntimeError("local_worker_smoke_failed")
+
+    # Keep the actual service routes free of test-only endpoints. Swap only the
+    # disposable build directory's entrypoint to prove the Pyodide NumPy solver
+    # can fit and return diagnostics in workerd.
+    fit_smoke = project / "src" / "numpy_fit_smoke.py"
+    fit_smoke.write_text('''import json
+import numpy as np
+from edgelab.models.numpy_logistic import NumpyLogisticRegression
+from workers import WorkerEntrypoint, Response
+
+class Default(WorkerEntrypoint):
+    async def fetch(self, request):
+        x = np.asarray([[-2., 0.], [-1., 1.], [-1., 0.], [0., 1.], [0., -1.],
+                        [1., 0.], [1., -1.], [2., 0.], [2., 1.], [-2., -1.]])
+        y = np.asarray([0, 0, 0, 0, 1, 1, 1, 1, 1, 0])
+        model = NumpyLogisticRegression(C=0.25, fit_intercept=False,
+                                        max_iter=1000, tol=1e-8).fit(x, y)
+        result = {"status": "fit_ok", "converged": bool(model.converged_),
+                  "finite": bool(np.isfinite(model.coef_).all()),
+                  "gradientInfinityNorm": float(model.gradient_norm_)}
+        return Response(json.dumps(result), status=200,
+                        headers={"content-type": "application/json"})
+''', encoding="utf-8")
+    config_path = project / "wrangler.toml"
+    original_config = config_path.read_text(encoding="utf-8")
+    config_path.write_text(original_config.replace('main = "src/worker.py"',
+                                                   'main = "src/numpy_fit_smoke.py"', 1),
+                           encoding="utf-8")
+    try:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            fit_port = sock.getsockname()[1]
+        fit_process = subprocess.Popen([str(wrangler), "dev", "--local", "--ip", "127.0.0.1",
+            "--port", str(fit_port), "--compatibility-date", "2026-10-13",
+            "--persist-to", str(state_dir), "--config", str(config_path)],
+            cwd=project, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and fit_process.poll() is None:
+                try:
+                    status, body = post_fit(fit_port)
+                    if (status != 200 or body.get("status") != "fit_ok"
+                            or body.get("converged") is not True or body.get("finite") is not True):
+                        raise RuntimeError("local_numpy_fit_smoke_failed")
+                    break
+                except (URLError, TimeoutError, ConnectionError):
+                    time.sleep(0.25)
+            else:
+                raise RuntimeError("local_numpy_fit_smoke_failed")
+        finally:
+            fit_process.terminate()
+            try:
+                fit_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                fit_process.kill()
+                fit_process.wait(timeout=5)
+    finally:
+        config_path.write_text(original_config, encoding="utf-8")
+
+
+def post_fit(port: int) -> tuple[int, dict[str, object]]:
+    request = Request(f"http://127.0.0.1:{port}/", data=b"{}",
+                      headers={"content-type": "application/json"}, method="POST")
+    try:
+        with urlopen(request, timeout=5) as response:
+            return response.status, __import__("json").loads(response.read())
+    except HTTPError as error:
+        return error.code, __import__("json").loads(error.read())
 
 
 def main() -> int:
@@ -176,8 +249,13 @@ def main() -> int:
         if args.smoke_test:
             try:
                 smoke_test(project, wrangler, env)
-            except Exception:
-                print("local workerd smoke test failed; details suppressed", file=sys.stderr)
+            except Exception as error:
+                reason = str(error) if str(error) in {
+                    "local_worker_smoke_failed", "local_numpy_fit_smoke_failed",
+                    "local_worker_invalid_rejection_failed", "local_worker_empty_response_failed",
+                    "local_worker_process_exited", "local_worker_not_ready"
+                } else "local_worker_smoke_failed"
+                print(f"local workerd smoke test failed; stage={reason}", file=sys.stderr)
                 return 1
             print("local workerd smoke test passed")
         if args.deploy:

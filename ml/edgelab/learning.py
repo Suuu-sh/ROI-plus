@@ -255,7 +255,11 @@ def _bootstrap_roi_ci(records: Sequence[tuple[float, int]], *, seed: int = 17,
 
 def guarded_candidate(store: dict[str, Any], training_rows: Sequence[Mapping[str, Any]], *,
                       model_id: str, authoritative_model_ids: set[str] | None = None,
-                      min_new_races: int = MIN_NEW_RACES) -> dict[str, Any]:
+                      min_new_races: int = MIN_NEW_RACES,
+                      artifact_dir: str | Path = "ml/artifacts",
+                      learning_state_path: str | Path = LEARNING_STATE,
+                      incumbent_artifact_dir: str | Path = "ml/artifacts",
+                      estimator_backend: str = "lightgbm") -> dict[str, Any]:
     """Train a uniquely named candidate after enough new real outcomes.
 
     Candidate and eligible local incumbent are evaluated on the same latest
@@ -269,7 +273,7 @@ def guarded_candidate(store: dict[str, Any], training_rows: Sequence[Mapping[str
     _, _, holdout = temporal_split(training_rows)
     if not holdout:
         return {"status": "skipped", "reason": "insufficient temporal dates for untouched holdout"}
-    state_path = LEARNING_STATE
+    state_path = Path(learning_state_path)
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
     complete_ids = sorted({str(r["race_id"]) for r in training_rows})
     if len(complete_ids) < MIN_COMPLETE_RACES:
@@ -284,8 +288,11 @@ def guarded_candidate(store: dict[str, Any], training_rows: Sequence[Mapping[str
                 "evaluatedRaceIds": complete_ids,
                 "reason": "refusing to overwrite artifact for a model already present in registry"}
     holdout_start = min(str(r.get("race_date") or r.get("date")) for r in holdout)
-    result = train_model(training_rows, sport="boat", model_id=model_id,
-                         version=candidate_version(model_id))
+    train_kwargs = {"sport": "boat", "model_id": model_id,
+                    "version": candidate_version(model_id), "artifact_dir": artifact_dir}
+    if estimator_backend != "lightgbm":
+        train_kwargs["estimator_backend"] = estimator_backend
+    result = train_model(training_rows, **train_kwargs)
     output: dict[str, Any] = {"status": result.get("status"), "modelId": model_id,
                               "newRaces": len(new_ids), "holdoutStart": holdout_start,
                               "holdoutEnd": max(str(r.get("race_date") or r.get("date")) for r in holdout),
@@ -294,7 +301,7 @@ def guarded_candidate(store: dict[str, Any], training_rows: Sequence[Mapping[str
     if result.get("status") != "candidate":
         output["reason"] = result.get("reason", "candidate training failed closed")
         return output
-    candidate_path = Path("ml/artifacts") / f"{model_id}.pkl"
+    candidate_path = Path(artifact_dir) / f"{model_id}.pkl"
     candidate = load_artifact(candidate_path)
     columns = list(candidate.get("feature_columns") or [])
     if result.get("validTo") and str(result["validTo"]) >= holdout_start:
@@ -313,7 +320,7 @@ def guarded_candidate(store: dict[str, Any], training_rows: Sequence[Mapping[str
                 or row.get("status") != "active"
                 or (authoritative_model_ids is not None and str(row.get("id")) not in authoritative_model_ids)):
             continue
-        path = Path("ml/artifacts") / f"{row.get('id')}.pkl"
+        path = Path(incumbent_artifact_dir) / f"{row.get('id')}.pkl"
         if not path.is_file(): continue
         try: incumbent = load_artifact(path)
         except (OSError, ValueError, EOFError): continue

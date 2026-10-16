@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.worker import (MAX_RACES, _result_proof, handle_learning,
+from src.worker import (MAX_RACES, _result_proof, handle_learning, handle_normal_learning,
                         load_training_store, persist_candidate_artifacts)
 
 
@@ -29,11 +29,16 @@ class _Statement:
                 "result_proof": "{}"} for i in range(MAX_RACES + 1)])
         return SimpleNamespace(results=[])
 
+    async def run(self):
+        self.db.writes.append((self.sql, self.args))
+        return SimpleNamespace(meta=SimpleNamespace(changes=1))
+
 
 class _DB:
     def __init__(self, overflow=False):
         self.overflow = overflow
         self.bind_counts = []
+        self.writes = []
 
     def prepare(self, sql):
         return _Statement(self, sql)
@@ -149,3 +154,75 @@ def test_actual_experimental_trainer_artifacts_are_publishable_without_zip(tmp_p
     assert set(bucket.objects) == {
         f"candidate/{model_id}.pkl", f"candidate/{model_id}.json",
         f"candidate/experimental-trifecta-{model_id}.manifest.json"}
+
+
+def test_normal_learning_keeps_verified_rows_uses_candidate_backend_and_saves_state(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from edgelab.importers import experimental_result_labels
+    from edgelab import cli, learning
+    import src.worker as worker
+
+    today = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=9))).date()
+    race_id = f"boat-{today:%Y%m%d}-01-01"
+    other_id = f"boat-{today:%Y%m%d}-01-02"
+    store = {
+        "races": [{"id": race_id}, {"id": other_id}],
+        "entries": ([{"id": f"{race_id}-{lane}", "race_id": race_id, "number": lane}
+                     for lane in range(1, 7)]
+                    + [{"id": f"{other_id}-{lane}", "race_id": other_id, "number": lane}
+                       for lane in range(1, 7)]),
+        "results": ([{"race_id": race_id, "number": lane} for lane in range(1, 7)]
+                    + [{"race_id": other_id, "number": lane} for lane in range(1, 7)]),
+        "payouts": [{"race_id": race_id}, {"race_id": other_id}],
+        "collection_runs": [{"id": f"boat-result:{race_id}"},
+                             {"id": f"boat-result:{other_id}"}],
+        "models": [{"id": "must-not-compare"}],
+    }
+    monkeypatch.setattr(worker, "load_training_store",
+                        lambda *args, **kwargs: _async_value((store, {"candidateRaces": 1})))
+    monkeypatch.setattr(experimental_result_labels, "verified_experimental_result_race_ids",
+                        lambda ignored: {race_id})
+    seen = {}
+    training_rows = [{"race_id": race_id, "race_date": today.isoformat(), "winner": 1}]
+
+    def make_rows(filtered, sport, *, require_source_arrival=False):
+        seen["store"] = filtered
+        seen["require_source_arrival"] = require_source_arrival
+        return training_rows
+
+    monkeypatch.setattr(cli, "_make_training_rows", make_rows)
+    monkeypatch.setattr(worker, "_load_normal_learning_state",
+                        lambda db: _async_value({"version": 1, "trainedRaceIds": []}))
+
+    def guarded(filtered, rows, **kwargs):
+        seen["backend"] = kwargs.get("estimator_backend")
+        seen["model_id"] = kwargs["model_id"]
+        assert len(filtered["entries"]) == 6
+        assert len(filtered["results"]) == 6
+        assert len(filtered["payouts"]) == 1
+        return {"status": "candidate", "newRaces": 30,
+                "holdoutStart": today.isoformat(), "holdoutEnd": today.isoformat()}
+
+    monkeypatch.setattr(learning, "guarded_candidate", guarded)
+    monkeypatch.setattr(worker, "_mark_normal_candidate_not_promotable", lambda *args: None)
+    monkeypatch.setattr(worker, "_persist_normal_candidate", lambda *args: _async_value(None))
+    db, bucket = _DB(), _Bucket()
+    report = asyncio.run(handle_normal_learning(db, bucket,
+        {"date": today.isoformat(), "confirmed": True}))
+
+    assert report["status"] == "candidate" and report["candidateOnly"] is True
+    assert report["registered"] is False and report["promoted"] is False
+    assert seen["require_source_arrival"] is True
+    assert seen["backend"] == "numpy-logistic"
+    assert seen["model_id"].startswith("boat-win-logistic-")
+    state_writes = [(sql, args) for sql, args in db.writes
+                    if "INSERT INTO settings" in sql and args[0] == "native_normal_learning_state"]
+    assert len(state_writes) == 1
+    assert state_writes[0][1][0] == "native_normal_learning_state"
+    assert json.loads(state_writes[0][1][1]) == {"version": 1, "trainedRaceIds": [race_id]}
+
+
+def _async_value(value):
+    async def resolved(*args, **kwargs):
+        return value
+    return resolved()

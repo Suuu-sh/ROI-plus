@@ -39,6 +39,17 @@ def test_complete_order_requires_six_unique_numbers_and_rank_values():
     assert not _complete_race([{**r, "number": r["number"] + 6} for r in group])
 
 
+def test_pairwise_trifecta_fit_supports_numpy_newton_backend():
+    from edgelab.models.numpy_logistic import NumpyLogisticRegression
+    fitted = _fit(race("numpy-fit", "2026-01-01"), ["lane", "national_win_rate"],
+                  estimator_backend="numpy-newton")
+    estimator = fitted["estimator"]
+    assert isinstance(estimator, NumpyLogisticRegression)
+    assert estimator.converged_ is True
+    assert estimator.gradient_norm_ <= estimator.tol
+    assert fitted["trainRaces"] == 1
+
+
 def test_experimental_weatherless_schema_is_disjoint_from_weather_inputs():
     assert TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA == "boat-prerace-v2-no-weather-experimental-v1"
     assert not {"lane_wind_x", "lane_wind_y", "lane_wave_height"} & set(TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS)
@@ -71,9 +82,13 @@ def test_experimental_trainer_persists_shadow_report_and_full_cohort_remains_unq
     monkeypatch.setattr(experimental_result_labels, "verified_experimental_result_race_ids",
                         lambda store: {race_id})
     result = train_trifecta_experimental(rows, {}, model_id="experimental-shadow-persist",
-                                         artifact_dir=tmp_path)
+                                         artifact_dir=tmp_path, estimator_backend="numpy-newton")
     persisted = json.loads((tmp_path / "experimental-shadow-persist.json").read_text())
     assert result["artifactCreated"] is True
+    assert persisted["estimatorBackend"] == "numpy-newton"
+    assert persisted["estimatorFit"]["primary"]["converged"] is True
+    assert len(persisted["estimatorFit"]["bootstrap"]) == 4
+    assert "not bitwise sklearn LBFGS-equivalent" in persisted["estimatorFit"]["compatibilityNote"]
     assert persisted["temporalShadowEvaluation"]["status"] == "not_evaluated"
     assert persisted["temporalShadowEvaluation"]["reason"] == "fewer_than_two_race_dates"
     assert persisted["trainingEvidence"]["trainingCohortFingerprintSha256"]

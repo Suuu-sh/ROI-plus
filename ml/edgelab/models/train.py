@@ -61,8 +61,10 @@ def _score(model: Any, rows: Sequence[Mapping[str, Any]], columns: Sequence[str]
             raw = model.predict(matrix, raw_score=True)
             return [float(x) for x in raw]
         except (TypeError, ValueError):
-            pred = model.predict_proba(matrix)
-            return [math.log(max(1e-15, float(x[1])) / max(1e-15, float(x[0]))) for x in pred]
+            pass
+    if hasattr(model, "predict_proba"):
+        pred = model.predict_proba(matrix)
+        return [math.log(max(1e-15, float(x[1])) / max(1e-15, float(x[0]))) for x in pred]
     return [0.0] * len(rows)
 
 
@@ -92,13 +94,19 @@ def candidate_version(model_id: str) -> str:
 
 def _untrained(model_id: str, model_path: Path, metadata_path: Path, reason: str,
                version: str = "v1",
-               rows: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
-    meta = {"id": model_id, "version": version, "algorithm": "lightgbm", "status": "untrained", "reason": reason,
+               rows: Sequence[Mapping[str, Any]] = (), *, backend: str = "lightgbm",
+               algorithm: str | None = None) -> dict[str, Any]:
+    meta = {"id": model_id, "version": version,
+            "algorithm": algorithm or ("lightgbm" if backend == "lightgbm"
+                                        else "NumPy binary logistic regression + per-race softmax"),
+            "status": "untrained", "reason": reason,
             "nTrain": 0, "metrics": {"nRaces": 0, "logLossDefinition": "race_multiclass",
                                       "baselineLogLoss": None, "baselineUniformLogLoss": None},
             "trainedAt": datetime.now(timezone.utc).isoformat(),
             "featureColumns": [], "trainFrom": None, "trainTo": None, "validFrom": None,
             "validTo": None, "testFrom": None, "testTo": None}
+    if backend != "lightgbm":
+        meta["backend"] = backend
     model_path.parent.mkdir(parents=True, exist_ok=True)
     with model_path.open("wb") as f:
         pickle.dump({"metadata": meta, "model": None, "bootstrap_models": []}, f)
@@ -155,12 +163,28 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
                 valid_fraction: float = .15, test_fraction: float = .15,
                 boat_venue_schema_version: str | None = None,
                 corrected_training_data_sha256: str | None = None,
-                n_bootstrap: int = 4, seed: int = 17) -> dict[str, Any]:
-    """Train chronological LightGBM classifier and write model.pkl + metadata.json.
+                n_bootstrap: int = 4, seed: int = 17,
+                estimator_backend: str = "lightgbm") -> dict[str, Any]:
+    """Train a time-split classifier and write model.pkl + metadata.json.
 
-    On insufficient/invalid data or an unusable LightGBM runtime, write an
+    On insufficient/invalid data or an unusable selected backend, write an
     explicit untrained artifact rather than silently substituting a model.
+    ``numpy-logistic`` is a distinct, lightweight candidate backend; it never
+    substitutes for the default LightGBM estimator.
     """
+    if estimator_backend not in {"lightgbm", "numpy-logistic"}:
+        raise ValueError(f"unsupported estimator_backend: {estimator_backend}")
+    if estimator_backend == "numpy-logistic" and model_id == "boat-win-lgbm-v1":
+        raise ValueError("numpy-logistic candidates must not use the incumbent LightGBM model id")
+    algorithm = ("LightGBM binary classifier + per-race softmax"
+                 if estimator_backend == "lightgbm"
+                 else "NumPy binary logistic regression + per-race softmax")
+
+    def untrained(reason: str) -> dict[str, Any]:
+        return _untrained(model_id, model_path, metadata_path, reason, version=version,
+                          backend=estimator_backend,
+                          algorithm=algorithm if estimator_backend != "lightgbm" else None)
+
     dest = Path(artifact_dir)
     model_path, metadata_path = dest / f"{model_id}.pkl", dest / f"{model_id}.json"
     columns = _feature_columns(feature_columns, rows, sport=sport)
@@ -178,23 +202,28 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
     train, valid, test = temporal_split(clean, valid_fraction, test_fraction)
     train_races = {str(r["race_id"]) for r in train}
     if len(train_races) < min_train_races or not valid or not test:
-        return _untrained(model_id, model_path, metadata_path,
-                          f"insufficient_temporal_data: train_races={len(train_races)}, valid={len(valid)}, test={len(test)}",
-                          version=version)
+        return untrained(
+            f"insufficient_temporal_data: train_races={len(train_races)}, valid={len(valid)}, test={len(test)}")
     if len({_target(r) for r in train}) < 2:
-        return _untrained(model_id, model_path, metadata_path, "training data contains only one class", version=version)
+        return untrained("training data contains only one class")
     if not columns:
-        return _untrained(model_id, model_path, metadata_path, "no numeric feature columns", version=version)
+        return untrained("no numeric feature columns")
     try:
-        import lightgbm as lgb
-        # LightGBM can be installed but unusable on a host missing its runtime dependency.
-        classifier = lgb.LGBMClassifier(objective="binary", n_estimators=300, learning_rate=.03,
-            num_leaves=15, max_depth=-1, min_child_samples=20, reg_lambda=1.0,
-            random_state=seed, verbosity=-1, n_jobs=1)
+        if estimator_backend == "lightgbm":
+            import lightgbm as lgb
+            # LightGBM can be installed but unusable on a host missing its runtime dependency.
+            classifier = lgb.LGBMClassifier(objective="binary", n_estimators=300, learning_rate=.03,
+                num_leaves=15, max_depth=-1, min_child_samples=20, reg_lambda=1.0,
+                random_state=seed, verbosity=-1, n_jobs=1)
+        else:
+            from .numpy_logistic import NumpyLogisticRegression
+            classifier = NumpyLogisticRegression(C=0.25, fit_intercept=False, max_iter=1000, tol=1e-8)
         classifier.fit(_features(train, columns), [_target(r) for r in train])
     except Exception as exc:
-        return _untrained(model_id, model_path, metadata_path,
-                          f"lightgbm_unavailable_or_fit_failed: {type(exc).__name__}: {exc}", version=version)
+        reason = (f"lightgbm_unavailable_or_fit_failed: {type(exc).__name__}: {exc}"
+                  if estimator_backend == "lightgbm"
+                  else f"numpy_logistic_fit_failed: {type(exc).__name__}: {exc}")
+        return untrained(reason)
 
     valid_scores = _score(classifier, valid, columns)
     temperature = _choose_temperature(valid, valid_scores)
@@ -234,7 +263,7 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
         if m["logLoss"] is not None:
             race_losses.append(float(m["logLoss"]))
     metrics["logLossStd"] = bootstrap_std(race_losses, seed=seed)
-    # Independent race-resampled LightGBM models provide per-runner prediction spread.
+    # Independent race-resampled models provide per-runner prediction spread.
     # If data is too small or a replicate is invalid, keep the primary model only.
     bootstrap_models = []
     race_groups: dict[str, list[dict[str, Any]]] = {}
@@ -250,16 +279,19 @@ def train_model(rows: Sequence[Mapping[str, Any]], *, model_id: str = "boat-win-
         if len({_target(r) for r in sample}) < 2:
             continue
         try:
-            replica = lgb.LGBMClassifier(objective="binary", n_estimators=220, learning_rate=.03,
-                num_leaves=15, min_child_samples=20, reg_lambda=1.0,
-                random_state=seed + i + 1, verbosity=-1, n_jobs=1)
+            if estimator_backend == "lightgbm":
+                replica = lgb.LGBMClassifier(objective="binary", n_estimators=220, learning_rate=.03,
+                    num_leaves=15, min_child_samples=20, reg_lambda=1.0,
+                    random_state=seed + i + 1, verbosity=-1, n_jobs=1)
+            else:
+                replica = NumpyLogisticRegression(C=0.25, fit_intercept=False, max_iter=1000, tol=1e-8)
             replica.fit(_features(sample, columns), [_target(r) for r in sample])
             bootstrap_models.append(replica)
         except Exception:
             continue
     dates = lambda values: sorted(str(r.get("race_date") or r.get("date")) for r in values if r.get("race_date") or r.get("date"))
     meta = {"id": model_id, "sport": sport, "betType": bet_type, "version": version,
-        "algorithm": "LightGBM binary classifier + per-race softmax", "status": "candidate",
+        "backend": estimator_backend, "algorithm": algorithm, "status": "candidate",
         "trainFrom": min(dates(train)) if dates(train) else None, "trainTo": max(dates(train)) if dates(train) else None,
         "validFrom": min(dates(valid)) if dates(valid) else None, "validTo": max(dates(valid)) if dates(valid) else None,
         "testFrom": min(dates(test)) if dates(test) else None, "testTo": max(dates(test)) if dates(test) else None,

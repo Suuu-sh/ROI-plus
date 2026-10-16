@@ -18,6 +18,9 @@ exclude = [
   "**/*.pyc", "**/__pycache__", "**/*.pyi", "**/*.c", "**/*.h", "**/*.pxd", "**/*.pyx",
   "scipy/io/**", "scipy/signal/**", "scipy/odr/**", "scipy/datasets/**", "scipy/**/tests/**",
   "sklearn/datasets/**", "scipy/cluster/**", "scipy/fftpack/**", "scipy/differentiate/**", "scipy/misc/**",
+  "**/tests/**", "**/test/**", "**/docs/**", "**/doc/**", "**/benchmarks/**", "**/benchmark/**",
+  "**/examples/**", "**/example/**", "**/testdata/**", "**/test_data/**",
+  "scipy/signal/**",
 ]
 
 [[d1_databases]]
