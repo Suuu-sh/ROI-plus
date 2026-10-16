@@ -10,6 +10,9 @@ import {
 } from './nativeExperimentalForecast.js';
 
 const RESULT_WORKER_SOURCE = 'boatrace-results-worker-v1';
+const K_FILE_SOURCE = 'boatrace-k-file-worker-v1';
+const K_FILE_SCHEMA = 'boat-k-file-result-proof-v1';
+const PROGRAM_PARSER_VERSION = 'boatrace-bk-ts-v1';
 const TRUSTED_CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1';
 const FEATURE_SCHEMA = 'boat-prerace-v2-no-weather-experimental-v1';
 const TICKET_SCHEMA = 'ticket-selection-v1';
@@ -18,6 +21,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_HISTORY_RACES = 1_000;
 const MAX_CANDIDATES = 180;
 const officialBFileUrl = (date: string) => `https://www1.mbrace.or.jp/od2/B/${date.slice(0, 7).replace('-', '')}/b${date.slice(2, 4)}${date.slice(5, 7)}${date.slice(8, 10)}.lzh`;
+const officialKFileUrl = (date: string) => `https://www1.mbrace.or.jp/od2/K/${date.slice(0, 7).replace('-', '')}/k${date.slice(2, 4)}${date.slice(5, 7)}${date.slice(8, 10)}.lzh`;
 
 export interface NativeExperimentalHistorySnapshot {
   schema: 'native-racer-history-v1';
@@ -136,18 +140,19 @@ function validRegistryMetadata(row: RegistryModel): boolean {
   } catch { return false; }
 }
 
-async function historyRacesAfterSnapshot(db: Db, snapshot: NativeExperimentalHistorySnapshot,
+export async function historyRacesAfterSnapshot(db: Db, snapshot: NativeExperimentalHistorySnapshot,
                                          targetDate: string, predictedAt: number, racerIds: string[]) {
   const races = await all<Record<string, unknown>>(db, `SELECT r.* FROM races r
-    JOIN collection_runs cr ON cr.id='boat-result:'||r.id AND cr.source=? AND cr.sport='boat' AND cr.status='success'
     WHERE r.sport='boat' AND r.data_origin='real' AND r.status='finished'
       AND r.race_date>? AND r.race_date<?
+      AND (EXISTS(SELECT 1 FROM collection_runs cr WHERE cr.id='boat-result:'||r.id AND cr.source=? AND cr.sport='boat' AND cr.status='success')
+        OR EXISTS(SELECT 1 FROM collection_runs kc,json_each(CASE WHEN json_valid(kc.reason) THEN kc.reason ELSE '{}' END,'$.raceProofs') kp WHERE kc.source=? AND kc.sport='boat' AND kc.status='success' AND kc.target_date=r.race_date AND json_valid(kc.reason) AND json_extract(kp.value,'$.raceId')=r.id))
       AND EXISTS(SELECT 1 FROM entries target_entry WHERE target_entry.race_id=r.id AND target_entry.data_origin='real'
         AND json_valid(target_entry.features_json)
         AND json_extract(target_entry.features_json,'$.racer_id') IN (SELECT value FROM json_each(?)))
       AND NOT EXISTS(SELECT 1 FROM data_repair_quarantined_races q WHERE q.race_id=r.id)
-    ORDER BY r.race_date,r.id LIMIT ?`, RESULT_WORKER_SOURCE, snapshot.throughRaceDate,
-  targetDate, JSON.stringify(racerIds), MAX_HISTORY_RACES + 1);
+    ORDER BY r.race_date,r.id LIMIT ?`, snapshot.throughRaceDate, targetDate, RESULT_WORKER_SOURCE, K_FILE_SOURCE,
+  JSON.stringify(racerIds), MAX_HISTORY_RACES + 1);
   if (races.length > MAX_HISTORY_RACES) return null;
   const ids = races.map(row => String(row.id));
   if (!ids.length) return [];
@@ -157,44 +162,70 @@ async function historyRacesAfterSnapshot(db: Db, snapshot: NativeExperimentalHis
       AND race_id IN (SELECT value FROM json_each(?)) ORDER BY race_id,number`, encodedIds),
     all<Record<string, unknown>>(db, `SELECT * FROM results WHERE data_origin='real'
       AND race_id IN (SELECT value FROM json_each(?)) ORDER BY race_id,number`, encodedIds),
-    all<{ id: string; reason: string | null }>(db, `SELECT id,reason FROM collection_runs
-      WHERE source=? AND status='success' AND id IN (SELECT 'boat-result:'||value FROM json_each(?))`,
-    RESULT_WORKER_SOURCE, encodedIds),
+    all<{ id: string; source:string; target_date:string; started_at:string; reason: string | null }>(db, `SELECT id,source,target_date,started_at,reason FROM collection_runs
+      WHERE source=? AND status='success' AND id IN (SELECT 'boat-result:'||value FROM json_each(?))
+      UNION ALL
+      SELECT kc.id,kc.source,kc.target_date,kc.started_at,
+        json_set(kc.reason,'$.raceProofs',json(COALESCE((SELECT json_group_array(json(kp2.value))
+          FROM json_each(CASE WHEN json_valid(kc.reason) THEN kc.reason ELSE '{}' END,'$.raceProofs') kp2
+          WHERE json_extract(kp2.value,'$.raceId') IN (SELECT value FROM json_each(?))), '[]'))) AS reason
+      FROM collection_runs kc
+      WHERE kc.source=? AND kc.sport='boat' AND kc.status='success' AND kc.target_date>? AND kc.target_date<? AND json_valid(kc.reason)
+        AND EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid(kc.reason) THEN kc.reason ELSE '{}' END,'$.raceProofs') kp
+          WHERE json_extract(kp.value,'$.raceId') IN (SELECT value FROM json_each(?)))`,
+    RESULT_WORKER_SOURCE, encodedIds,encodedIds,K_FILE_SOURCE,snapshot.throughRaceDate,targetDate,encodedIds),
   ]);
   const raceById = new Map(races.map(row => [String(row.id), row]));
   const entryByRace = new Map<string, Array<Record<string, unknown>>>();
   const resultByRace = new Map<string, Array<Record<string, unknown>>>();
   for (const row of entries) entryByRace.set(String(row.race_id), [...(entryByRace.get(String(row.race_id)) ?? []), row]);
   for (const row of results) resultByRace.set(String(row.race_id), [...(resultByRace.get(String(row.race_id)) ?? []), row]);
-  const proofByRace = new Map<string, Record<string, unknown>>();
+  const proofByRace = new Map<string, Array<{source:string;startedAt:string;proof:Record<string,unknown>}>>();
   for (const proof of proofs) {
-    const raceId = proof.id.slice('boat-result:'.length);
     try {
       const parsed: unknown = JSON.parse(String(proof.reason ?? ''));
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) proofByRace.set(raceId, parsed as Record<string, unknown>);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+      const body=parsed as Record<string,unknown>;
+      if(proof.source===RESULT_WORKER_SOURCE){const raceId=proof.id.slice('boat-result:'.length);proofByRace.set(raceId,[...(proofByRace.get(raceId)??[]),{source:proof.source,startedAt:proof.started_at,proof:body}]);}
+      else if(proof.source===K_FILE_SOURCE&&Array.isArray(body.raceProofs))for(const item of body.raceProofs){if(item&&typeof item==='object'&&!Array.isArray(item)){const raceId=String((item as Record<string,unknown>).raceId??'');proofByRace.set(raceId,[...(proofByRace.get(raceId)??[]),{source:proof.source,startedAt:proof.started_at,proof:{...body,raceProof:item}}]);}}
     } catch { /* malformed result-worker evidence is excluded */ }
   }
   const history: NativeRaceFeatureInput['historyRaces'] = [];
   for (const raceId of ids) {
     const race = raceById.get(raceId)!;
-    const proof = proofByRace.get(raceId);
-    const fetchedAt = validInstant(proof?.fetchedAt);
+    const candidates=proofByRace.get(raceId)??[];
     const dbResults = resultByRace.get(raceId) ?? [];
-    const proofResults = proof?.results;
-    const expectedResultUrl = `https://www.boatrace.jp/owpc/pc/race/raceresult?rno=${race.race_no}&jcd=${race.venue_id}&hd=${String(race.race_date).replaceAll('-', '')}`;
-    if (proof?.raceId !== raceId || proof.quality !== 'verified-official-outcome-v2'
-        || proof.url !== expectedResultUrl || typeof proof.sha256 !== 'string' || !SHA256.test(proof.sha256)
-        || fetchedAt === null || fetchedAt > predictedAt || !Array.isArray(proofResults)
-        || proofResults.length !== 6 || dbResults.length !== 6) continue;
+    if(dbResults.length!==6)continue;
     const historyEntries = entryByRace.get(raceId) ?? [];
-    if (!sourceBoundEntries(historyEntries, String(race.race_date), fetchedAt)) continue;
     const resultMap = new Map(dbResults.map(row => [Number(row.number), Number(row.finish_order)]));
-    const proofMap = new Map(proofResults.map((row: any) => [Number(row.number), Number(row.finishOrder)]));
-    if (resultMap.size !== 6 || proofMap.size !== 6
-        || [...resultMap.entries()].some(([lane, order]) => proofMap.get(lane) !== order)
-        || [...resultMap.values()].sort((a, b) => a - b).join(',') !== '1,2,3,4,5,6') continue;
-    const provenResults = dbResults.map(row => ({ ...row, available_at: proof.fetchedAt }));
-    history.push({ race, entries: entryByRace.get(raceId) ?? [], results: provenResults });
+    if(resultMap.size!==6||[...resultMap.values()].sort((a,b)=>a-b).join(',')!=='1,2,3,4,5,6')continue;
+    const valid: Array<{source:string;fetchedAt:string}> = [];
+    for(const candidate of candidates){
+      const proof=candidate.proof;let fetchedAt: number|null=null;let proofResults: any[]=[];
+      if(candidate.source===RESULT_WORKER_SOURCE){
+        fetchedAt=validInstant(proof.fetchedAt);proofResults=Array.isArray(proof.results)?proof.results:[];
+        const expected=`https://www.boatrace.jp/owpc/pc/race/raceresult?rno=${race.race_no}&jcd=${race.venue_id}&hd=${String(race.race_date).replaceAll('-','')}`;
+        if(proof.raceId!==raceId||proof.quality!=='verified-official-outcome-v2'||proof.url!==expected||typeof proof.sha256!=='string'||!SHA256.test(proof.sha256))continue;
+      }else{
+        const raceProof=proof.raceProof as Record<string,unknown>|undefined;fetchedAt=validInstant(proof.fetchedAt);proofResults=Array.isArray(raceProof?.results)?raceProof!.results as any[]:[];
+        const date=String(race.race_date);
+        if(proof.schema!==K_FILE_SCHEMA||proof.quality!=='official-k-file-parser-v1'||proof.kind!=='K'||proof.targetDate!==date||proof.url!==officialKFileUrl(date)||proof.parserVersion!==PROGRAM_PARSER_VERSION||typeof proof.sha256!=='string'||!SHA256.test(proof.sha256)||proof.r2Key!==`boat-program-files/${date}/k/${proof.sha256}.lzh`||proof.manifestKey!==`boat-program-manifests/${date}/k/${proof.sha256}-${PROGRAM_PARSER_VERSION}.json`||candidate.startedAt!==proof.fetchedAt||!raceProof||raceProof.raceId!==raceId||!Array.isArray(raceProof.laneIdentities)||raceProof.laneIdentities.length!==6)continue;
+        const ids=new Map((raceProof.laneIdentities as any[]).map(row=>[Number(row.number),String(row.racerId)]));
+        if(ids.size!==6||historyEntries.length!==6||historyEntries.some(entry=>{let parsed:any={};try{parsed=JSON.parse(String(entry.features_json??'{}'));}catch{return true;}return ids.get(Number(entry.number))!==parsed.racer_id;}))continue;
+      }
+      if(fetchedAt===null||fetchedAt>predictedAt||proofResults.length!==6||!sourceBoundEntries(historyEntries,String(race.race_date),fetchedAt))continue;
+      if(candidate.source===K_FILE_SOURCE){
+        const postTime=race.post_time,cutoff=race.betting_cutoff_at;
+        const postAt=postTime==null?null:validInstant(String(postTime)),cutoffAt=cutoff==null?null:validInstant(String(cutoff));
+        if((postTime!=null&&postAt===null)||(cutoff!=null&&cutoffAt===null)||(postAt!==null&&fetchedAt<postAt)||(cutoffAt!==null&&fetchedAt<cutoffAt))continue;
+      }
+      const proofMap=new Map(proofResults.map((row:any)=>[Number(row.number),Number(row.finishOrder)]));
+      if(proofMap.size!==6||[...resultMap.entries()].some(([lane,order])=>proofMap.get(lane)!==order))continue;
+      valid.push({source:candidate.source,fetchedAt:String(proof.fetchedAt)});
+    }
+    const selected=valid.find(item=>item.source===RESULT_WORKER_SOURCE)??valid[0];
+    if(!selected)continue;
+    history.push({race,entries:historyEntries,results:dbResults.map(row=>({...row,available_at:selected.fetchedAt}))});
   }
   return history;
 }

@@ -6,13 +6,42 @@ import { D1SqliteAdapter } from './d1-adapter.js';
 import { beforeinfoUrl } from '../src/services/boatraceBeforeinfo.js';
 import { raceListUrl } from '../src/services/boatraceRaceList.js';
 import { trifectaOddsUrl } from '../src/services/boatraceTrifectaOdds.js';
-import { runNativeExperimentalForecast, type NativeExperimentalHistorySnapshot } from '../src/services/runNativeExperimentalForecast.js';
+import { historyRacesAfterSnapshot, runNativeExperimentalForecast, type NativeExperimentalHistorySnapshot } from '../src/services/runNativeExperimentalForecast.js';
 
 const root = resolve(import.meta.dirname, '../../..');
 const sha = 'a'.repeat(64);
 const zoned = (time: number) => new Date(time).toISOString();
 
 describe('Worker-native experimental forecast orchestration', () => {
+  it('accepts K-file history only after strict source, identity, rank, and point-in-time checks; prefers HTML proof', async()=>{
+    const sqlite=new Sqlite(':memory:');for(const file of readdirSync(resolve(root,'db/migrations')).filter(name=>name.endsWith('.sql')).sort())sqlite.exec(readFileSync(resolve(root,'db/migrations',file),'utf8'));
+    const db=new D1SqliteAdapter(sqlite),date='2026-10-16',target='2026-10-17',predicted=Date.parse('2026-10-17T12:00:00Z'),bUrl='https://www1.mbrace.or.jp/od2/B/202610/b261016.lzh',kUrl='https://www1.mbrace.or.jp/od2/K/202610/k261016.lzh';
+    const raceIds=['k-valid','html-preferred','id-mismatch','future-proof','partial-rank','pre-race-proof','pre-cutoff-proof'];
+    const insertVenue=sqlite.prepare("INSERT INTO venues(id,sport,name) VALUES(?,'boat',?)");for(let venue=1;venue<=raceIds.length;venue++)insertVenue.run(String(venue).padStart(2,'0'),`test${venue}`);
+    const insertRace=sqlite.prepare("INSERT INTO races(id,sport,venue_id,race_date,race_no,post_time,betting_cutoff_at,status,data_origin,updated_at) VALUES(?,'boat',?,?,1,?,?,'finished','real',?)");
+    const insertEntry=sqlite.prepare("INSERT INTO entries(id,race_id,number,name,features_json,available_at,data_origin) VALUES(?,?,?,? ,?,?,'real')");
+    const insertResult=sqlite.prepare("INSERT INTO results(race_id,number,finish_order,data_origin) VALUES(?,?,?,'real')");
+    for(const [index,raceId] of raceIds.entries()){const postTime=raceId==='pre-race-proof'?zoned(predicted-60000):raceId==='pre-cutoff-proof'?zoned(predicted-180000):null;const cutoff=raceId==='pre-cutoff-proof'?zoned(predicted-60000):null;insertRace.run(raceId,String(index+1).padStart(2,'0'),date,postTime,cutoff,zoned(predicted-100000));for(let lane=1;lane<=6;lane++){const racerId=String(1000+lane);insertEntry.run(`${raceId}-${lane}`,raceId,lane,`racer${lane}`,JSON.stringify({racer_id:racerId,source_url:bUrl,source_sha256:sha,source_available_at:zoned(predicted-200000)}),zoned(predicted-200000));insertResult.run(raceId,lane,lane);}}
+    const proofFor=(raceId:string,fetchAt:number,mutate?:'id'|'partial')=>({raceId,laneIdentities:Array.from({length:6},(_,i)=>({number:i+1,racerId:String(1001+i+(mutate==='id'&&i===0?1:0))})),results:Array.from({length:mutate==='partial'?5:6},(_,i)=>({number:i+1,finishOrder:i+1}))});
+    const addK=(fileHash:string,fetchAt:number,rows:Array<[string,'id'|'partial'|undefined]>,unrelated=0)=>{const extras=Array.from({length:unrelated},(_,i)=>({raceId:`unrelated-${i}`,laneIdentities:[],results:[]}));const body={schema:'boat-k-file-result-proof-v1',quality:'official-k-file-parser-v1',kind:'K',targetDate:date,url:kUrl,sha256:fileHash,fetchedAt:zoned(fetchAt),parserVersion:'boatrace-bk-ts-v1',r2Key:`boat-program-files/${date}/k/${fileHash}.lzh`,manifestKey:`boat-program-manifests/${date}/k/${fileHash}-boatrace-bk-ts-v1.json`,raceProofs:[...rows.map(([raceId,mutate])=>proofFor(raceId,fetchAt,mutate)),...extras]};sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,reason) VALUES(?, 'boatrace-k-file-worker-v1','boat',?,?,'success',?)").run(`boat-k-file:${date}:${fileHash}`,date,zoned(fetchAt),JSON.stringify(body));};
+    const kAt=predicted-10000;addK(sha,kAt,[['k-valid',undefined],['html-preferred',undefined],['id-mismatch','id'],['partial-rank','partial']],150);addK('b'.repeat(64),predicted+1,[['future-proof',undefined]]);addK('c'.repeat(64),predicted-120000,[['pre-race-proof',undefined],['pre-cutoff-proof',undefined]]);
+    const htmlAt=kAt-1000,htmlResultUrl=`https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=02&hd=20261016`;
+    const htmlBody={raceId:'html-preferred',quality:'verified-official-outcome-v2',url:htmlResultUrl,sha256:sha,fetchedAt:zoned(htmlAt),results:Array.from({length:6},(_,i)=>({number:i+1,finishOrder:i+1}))};
+    sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,reason) VALUES(?, 'boatrace-results-worker-v1','boat',?,?,'success',?)").run('boat-result:html-preferred',date,zoned(htmlAt),JSON.stringify(htmlBody));
+    sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,reason) VALUES(?, 'boatrace-k-file-worker-v1','boat',?,?,'success',?)").run(`boat-k-file:${date}:malformed`,date,zoned(predicted-300000),'not-json');
+    const snapshot:NativeExperimentalHistorySnapshot={schema:'native-racer-history-v1',asOf:zoned(Date.parse('2026-10-16T00:00:00Z')),throughRaceDate:'2026-10-15',totals:{}};
+    const projectedReasons:string[]=[];
+    const projectedDb:any={prepare(sql:string){const statement=db.prepare(sql);return{bind(...values:unknown[]){const bound=statement.bind(...values);return{all:async()=>{const result=await bound.all();if(sql.includes("json_set(kc.reason,'$.raceProofs'"))projectedReasons.push(...result.results.map((row:any)=>String(row.reason)));return result;},first:()=>bound.first(),run:()=>bound.run()};}};}};
+    const history=await historyRacesAfterSnapshot(projectedDb,snapshot,target,predicted,Array.from({length:6},(_,i)=>String(1001+i)));
+    expect(history?.map(row=>row.race.id).sort()).toEqual(['html-preferred','k-valid']);
+    expect(history?.find(row=>row.race.id==='k-valid')?.results[0]?.available_at).toBe(zoned(kAt));
+    expect(history?.find(row=>row.race.id==='html-preferred')?.results[0]?.available_at).toBe(zoned(htmlAt));
+    expect(projectedReasons.length).toBeGreaterThan(0);
+    const projectedCounts=projectedReasons.map(reason=>JSON.parse(reason).raceProofs?.length).filter((count):count is number=>typeof count==='number');
+    expect(projectedCounts.length).toBeGreaterThan(0);expect(Math.max(...projectedCounts)).toBeLessThanOrEqual(raceIds.length);
+    sqlite.close();
+  });
+
   it('generates a source-bound 120-row forecast and delegates storage once', async () => {
     const sqlite = new Sqlite(':memory:');
     for (const file of readdirSync(resolve(root, 'db/migrations')).filter(name => name.endsWith('.sql')).sort()) {

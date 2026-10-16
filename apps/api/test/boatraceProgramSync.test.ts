@@ -26,6 +26,7 @@ function syntheticBText(date:string) {
   }
   return lines.join('\n');
 }
+function singleB(date:string){const [y,m,d]=date.split('-');const ids=[1234,2345,3456,4567,5678,6789];return `24BBGN\nボートレース大村 ${y}年 ${Number(m)}月 ${Number(d)}日\n 1R 予選 H1800m 12:00\n${ids.map((id,i)=>`${i+1} ${id}架空選手 30長崎55B1 5.00 30.00 4.00 20.00 50 30.00 60 35.00`).join('\n')}`;}
 
 describe('Worker B/K program parser', () => {
   it('parses B fixture rows with stable official identities and missing fields', async () => {
@@ -117,6 +118,22 @@ describe('Worker B/K program parser', () => {
     expect(paced).toMatchObject({status:'skipped',reason:'source-rate-limited',retryable:true});
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect((sqlite.prepare("SELECT value FROM settings WHERE key='boatrace-program-last-request-at'").get() as any).value).toBe(String(now));
+    sqlite.close();
+  });
+
+  it('records bounded parsed K-file race proofs with actual source availability', async()=>{
+    const {sqlite,db}=createDb();
+    const objects=new Map<string,Uint8Array>();
+    const bucket:any={head:async(key:string)=>objects.has(key)?{size:objects.get(key)!.length}:null,get:async(key:string)=>{const body=objects.get(key);return body?{size:body.length,text:async()=>new TextDecoder().decode(body),arrayBuffer:async()=>body.buffer}:null;},put:async(key:string,value:Uint8Array|string)=>objects.set(key,typeof value==='string'?new TextEncoder().encode(value):new Uint8Array(value))};
+    let now=Date.parse('2026-10-16T18:10:00Z');const fetcher=async()=>new Response(new Uint8Array([1,2,3]));
+    const sync=(kind:'B'|'K')=>syncBoatraceProgramFile(db,bucket,new Date(now),kind,{targetDate:'2026-10-17',now:()=>now,fetch:fetcher,minGapMs:0,decodeArchive:async()=>({text:kind==='B'?singleB('2026-10-17'):(await fixture('k260901.utf8.txt')).replace('2026年  9月  1日','2026年 10月 17日')})});
+    expect(await sync('B')).toMatchObject({status:'success'});now+=3_001;
+    const kOutcome=await sync('K');expect(kOutcome.reason).toBe('source-file-stored');
+    const proof=sqlite.prepare("SELECT source,started_at,reason FROM collection_runs WHERE source='boatrace-k-file-worker-v1'").get() as any;
+    expect(proof.source).toBe('boatrace-k-file-worker-v1');
+    expect(proof.started_at).toBe(JSON.parse(proof.reason).fetchedAt);
+    expect(JSON.parse(proof.reason).raceProofs).toHaveLength(2);
+    expect(JSON.parse(proof.reason).raceProofs[0].laneIdentities).toHaveLength(6);
     sqlite.close();
   });
 });

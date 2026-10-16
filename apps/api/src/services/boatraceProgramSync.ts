@@ -4,6 +4,7 @@ import { first, type Db, type Statement } from '../repo/db.js';
 
 export const BOATRACE_PROGRAM_SOURCE = 'boatrace-program-files-worker-v1';
 export const BOATRACE_PROGRAM_PARSER_VERSION = 'boatrace-bk-ts-v1';
+export const BOATRACE_K_FILE_RESULT_SOURCE = 'boatrace-k-file-worker-v1';
 const MAX_ARCHIVE_BYTES = 1024 * 1024;
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_SCHEDULE_SKEW_MS = 20 * 60 * 1000;
@@ -189,10 +190,15 @@ export async function syncBoatraceProgramFile(db: Db, bucket: R2Bucket, schedule
   let previousSha:string|undefined,offset=0,firstStartedAt=startedAt,sourceBytes=0;
   if(cursor&&cursor.schema==='boatrace-program-cursor-v1'&&cursor.kind===kind&&cursor.targetDate===date&&SHA256.test(cursor.sha256)&&Number.isSafeInteger(cursor.offset)&&cursor.offset>=0){
     try{
+      const expectedUrl=sourceUrlFor(kind,date),expectedRawKey=`boat-program-files/${date}/${kind.toLowerCase()}/${cursor.sha256}.lzh`;
+      const expectedManifestKey=`boat-program-manifests/${date}/${kind.toLowerCase()}/${cursor.sha256}-${BOATRACE_PROGRAM_PARSER_VERSION}.json`;
+      if(cursor.url!==expectedUrl||cursor.rawKey!==expectedRawKey||cursor.manifestKey!==expectedManifestKey)throw Error();
       const object=await bucket.get(cursor.manifestKey);
       if(!object||object.size>MAX_TEXT_BYTES)throw Error();
       const manifest=JSON.parse(await object.text()) as ProgramManifest;
-      if(manifest.schema!=='boatrace-normalized-program-v1'||manifest.kind!==kind||manifest.targetDate!==date||manifest.sha256!==cursor.sha256||manifest.fetchedAt!==cursor.fetchedAt)throw Error();
+      if(manifest.schema!=='boatrace-normalized-program-v1'||manifest.kind!==kind||manifest.targetDate!==date||manifest.sha256!==cursor.sha256||manifest.fetchedAt!==cursor.fetchedAt||manifest.url!==expectedUrl||manifest.parserVersion!==BOATRACE_PROGRAM_PARSER_VERSION||!Number.isSafeInteger(manifest.sourceBytes)||manifest.sourceBytes<1||manifest.sourceBytes>MAX_ARCHIVE_BYTES)throw Error();
+      const raw=await bucket.get(cursor.rawKey);if(!raw||raw.size!==manifest.sourceBytes||raw.size>MAX_ARCHIVE_BYTES)throw Error();
+      const rawBytes=new Uint8Array(await raw.arrayBuffer());if(rawBytes.length!==manifest.sourceBytes||await hash(rawBytes)!==cursor.sha256)throw Error();
       parsed=manifest.data;validateParsed(kind,parsed,date);
       fetchedAt=cursor.fetchedAt;sha256=cursor.sha256;url=cursor.url;rawKey=cursor.rawKey;manifestKey=cursor.manifestKey;previousSha=cursor.previousSha;offset=cursor.offset;firstStartedAt=cursor.startedAt;sourceBytes=manifest.sourceBytes;
     }catch{return outcome('failed','database-write-failed',kind,date,0,true);}
@@ -217,8 +223,8 @@ export async function syncBoatraceProgramFile(db: Db, bucket: R2Bucket, schedule
       const oldManifest=await bucket.get(manifestKey);
       if(oldManifest){
         if(oldManifest.size>MAX_TEXT_BYTES)throw Error();const stored=JSON.parse(await oldManifest.text()) as ProgramManifest;
-        if(stored.schema!=='boatrace-normalized-program-v1'||stored.kind!==kind||stored.targetDate!==date||stored.sha256!==sha256||stored.parserVersion!==BOATRACE_PROGRAM_PARSER_VERSION||!Number.isFinite(Date.parse(stored.fetchedAt))||stored.sourceBytes!==sourceBytes)throw Error();
-        fetchedAt=stored.fetchedAt;
+        if(stored.schema!=='boatrace-normalized-program-v1'||stored.kind!==kind||stored.targetDate!==date||stored.sha256!==sha256||stored.url!==url||stored.parserVersion!==BOATRACE_PROGRAM_PARSER_VERSION||!Number.isFinite(Date.parse(stored.fetchedAt))||stored.sourceBytes!==sourceBytes)throw Error();
+        validateParsed(kind,stored.data,date);parsed=stored.data;fetchedAt=stored.fetchedAt;
       }else{
         const normalized=JSON.stringify({schema:'boatrace-normalized-program-v1',kind,targetDate:date,url,sha256,sourceBytes,fetchedAt,parserVersion:BOATRACE_PROGRAM_PARSER_VERSION,data:manifestData(parsed,kind,date,fetchedAt,sha256)} satisfies ProgramManifest);
         if(normalized.length>MAX_TEXT_BYTES)throw Error();
@@ -233,11 +239,12 @@ export async function syncBoatraceProgramFile(db: Db, bucket: R2Bucket, schedule
     try{await db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(cursorKey,JSON.stringify(initial)).run();}catch{return{...outcome('failed','database-write-failed',kind,date,0,true),sourceSha256:sha256,fetchedAt};}
   }
   try{
-    const statements=buildStatements(db,parsed,kind,date,fetchedAt,previousSha,sha256),end=Math.min(offset+MAX_STATEMENTS_PER_TICK,statements.length);
+    const statements=buildStatements(db,parsed,kind,date,fetchedAt,previousSha,sha256),perTickLimit=kind==='K'?MAX_STATEMENTS_PER_TICK-2:MAX_STATEMENTS_PER_TICK,end=Math.min(offset+perTickLimit,statements.length);
     for(let i=offset;i<end;i+=STATEMENTS_PER_BATCH){const batch=statements.slice(i,Math.min(i+STATEMENTS_PER_BATCH,end));if(db.batch)await db.batch(batch);else for(const statement of batch)await statement.run();}
     if(end<statements.length){const next:ProgramCursor={schema:'boatrace-program-cursor-v1',kind,targetDate:date,sha256,url,rawKey,manifestKey,fetchedAt,startedAt:firstStartedAt,previousSha,offset:end};await db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(cursorKey,JSON.stringify(next)).run();return{...outcome('partial','source-sync-in-progress',kind,date,recordCount(parsed),true),sourceSha256:sha256,fetchedAt};}
     const count=recordCount(parsed),reason=JSON.stringify({schema:'boatrace-source-file-v1',kind,targetDate:date,url,sha256,sourceBytes,fetchedAt,parserVersion:BOATRACE_PROGRAM_PARSER_VERSION,r2Key:rawKey,manifestKey}),id=`boat-program-file:${kind}:${date}:${sha256}`;
     await db.prepare(`INSERT INTO collection_runs(id,source,sport,target_date,started_at,finished_at,status,records,error,reason) VALUES(?,?, 'boat', ?, ?, ?, 'success', ?, NULL, ?) ON CONFLICT(id) DO UPDATE SET started_at=excluded.started_at,finished_at=excluded.finished_at,status='success',records=excluded.records,error=NULL,reason=excluded.reason`).bind(id,BOATRACE_PROGRAM_SOURCE,date,firstStartedAt,isoNow(now()),count,reason).run();
+    if(kind==='K')await buildKFileProofStatement(db,parsed,date,fetchedAt,sha256,isoNow(now()),rawKey,manifestKey).run();
     await db.prepare('DELETE FROM settings WHERE key=?').bind(cursorKey).run();
     return{...outcome('success','source-file-stored',kind,date,count,false),sourceSha256:sha256,fetchedAt};
   }catch{return{...outcome('failed','database-write-failed',kind,date,0,true),sourceSha256:sha256,fetchedAt};}
@@ -256,6 +263,22 @@ function validateParsed(kind:ProgramFileKind,data:ParsedProgram,date:string) {
   if (kind==='K' && (!data.results.length || data.results.some(r=>!data.races.some(x=>x.id===r.race_id)))) throw new Error('result-set-invalid');
 }
 function recordCount(data:ParsedProgram){return data.races.length+data.entries.length+data.results.length+data.payouts.length;}
+function buildKFileProofStatement(db:Db,data:ParsedProgram,date:string,fetchedAt:string,sha256:string,finishedAt:string,rawKey:string,manifestKey:string):Statement{
+  const proofs=data.races.flatMap(race=>{
+    const entries=data.entries.filter(row=>row.race_id===race.id),results=data.results.filter(row=>row.race_id===race.id);
+    if(entries.length!==6||results.length!==6)return[];
+    const laneIdentities=entries.map(entry=>{let racerId='';try{racerId=String(JSON.parse(String(entry.features_json??'{}')).racer_id??'');}catch{}return{number:Number(entry.number),racerId};});
+    const ranks=results.map(row=>({number:Number(row.number),finishOrder:Number(row.finish_order)}));
+    if(laneIdentities.some(row=>!/^[0-9]{4,5}$/.test(row.racerId))||new Set(laneIdentities.map(row=>row.number)).size!==6||new Set(ranks.map(row=>row.number)).size!==6||ranks.map(row=>row.finishOrder).sort((a,b)=>a-b).join(',')!=='1,2,3,4,5,6')return[];
+    return[{raceId:String(race.id),laneIdentities,results:ranks}];
+  });
+  const url=sourceUrlFor('K',date),reason=JSON.stringify({schema:'boat-k-file-result-proof-v1',quality:'official-k-file-parser-v1',kind:'K',targetDate:date,url,sha256,fetchedAt,parserVersion:BOATRACE_PROGRAM_PARSER_VERSION,r2Key:rawKey,manifestKey,raceProofs:proofs});
+  const id=`boat-k-file:${date}:${sha256}`;
+  return db.prepare(`INSERT INTO collection_runs(id,source,sport,target_date,started_at,finished_at,status,records,error,reason)
+    SELECT ?,?,'boat',?,?,?,'success',?,NULL,?
+    WHERE EXISTS(SELECT 1 FROM collection_runs c WHERE c.id=? AND c.source=? AND c.status='success' AND c.target_date=? AND json_valid(c.reason) AND json_extract(c.reason,'$.kind')='K' AND json_extract(c.reason,'$.sha256')=?)
+    ON CONFLICT(id) DO NOTHING`).bind(id,BOATRACE_K_FILE_RESULT_SOURCE,date,fetchedAt,finishedAt,proofs.length,reason,`boat-program-file:K:${date}:${sha256}`,BOATRACE_PROGRAM_SOURCE,date,sha256);
+}
 async function readBoundedBody(response:Response,limit:number):Promise<Uint8Array>{
   if(!response.body)throw Error('body-missing');const reader=response.body.getReader(),chunks:Uint8Array[]=[];let total=0;
   try{while(true){const part=await reader.read();if(part.done)break;total+=part.value.byteLength;if(total>limit){void reader.cancel().catch(()=>undefined);throw Error('body-too-large');}chunks.push(part.value);}}
