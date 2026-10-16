@@ -1,0 +1,26 @@
+name = "roi-plus-learner"
+main = "src/worker.py"
+compatibility_date = "2026-10-16"
+compatibility_flags = ["python_workers"]
+workers_dev = false
+
+[limits]
+cpu_ms = 300000
+
+[[r2_buckets]]
+binding = "TRIFECTA_ARCHIVE"
+bucket_name = "roi-plus-trifecta-archive"
+
+
+[python_modules]
+exclude = [
+  ".venv-workers/**",
+  "**/*.pyc", "**/__pycache__", "**/*.pyi", "**/*.c", "**/*.h", "**/*.pxd", "**/*.pyx",
+  "scipy/io/**", "scipy/signal/**", "scipy/odr/**", "scipy/datasets/**", "scipy/**/tests/**",
+  "sklearn/datasets/**", "scipy/cluster/**", "scipy/fftpack/**", "scipy/differentiate/**", "scipy/misc/**",
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "roi-plus"
+database_id = "1341e66e-2e13-4051-8a2d-b89eab26337e"

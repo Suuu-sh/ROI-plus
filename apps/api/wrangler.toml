@@ -12,6 +12,10 @@ migrations_dir = "../../db/migrations"
 binding = "TRIFECTA_ARCHIVE"
 bucket_name = "roi-plus-trifecta-archive"
 
+[[services]]
+binding = "FORECAST_LEARNER"
+service = "roi-plus-learner"
+
 [triggers]
 crons = ["* * * * *", "*/5 * * * *"]
 

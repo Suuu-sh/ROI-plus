@@ -25,13 +25,14 @@ import { boatArchiveEvidenceValid } from './services/boatArchiveEvidence.js';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import { runForecastWatchdog } from './services/forecastWatchdog.js';
 import { readDailyCloudPipelineStatus, runDailyCloudPipeline } from './services/dailyCloudPipeline.js';
+import { runNativeDailyLearner } from './services/runNativeDailyLearner.js';
 import { syncBoatraceProgramFile } from './services/boatraceProgramSync.js';
 import { runNativeExperimentalForecast, type NativeExperimentalHistorySnapshot } from './services/runNativeExperimentalForecast.js';
 import nativeExperimentalModel from './models/experimental-worker-model.json';
 import nativeRacerHistory from './models/native-racer-history.json';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
-interface Env { DB: Db; TRIFECTA_ARCHIVE?: R2Bucket; INGEST_TOKEN?: string; FORECAST_GITHUB_TOKEN?: string; ENABLE_NATIVE_EXPERIMENTAL_FORECAST?: string; ENABLE_NATIVE_DAILY_PIPELINE?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; ENABLE_HISTORICAL_TRIFECTA_ARCHIVE?: string; PROXY_TOKEN?: string; }
+interface Env { DB: Db; TRIFECTA_ARCHIVE?: R2Bucket; FORECAST_LEARNER?: Fetcher; INGEST_TOKEN?: string; FORECAST_GITHUB_TOKEN?: string; ENABLE_NATIVE_EXPERIMENTAL_FORECAST?: string; ENABLE_NATIVE_DAILY_PIPELINE?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; ENABLE_HISTORICAL_TRIFECTA_ARCHIVE?: string; PROXY_TOKEN?: string; }
 type Ctx = { Bindings: Env };
 const SAFE_BOAT_SCHEMA = 'boat-venue-v2';
 const TICKET_MODEL_SCHEMA = 'ticket-selection-v1';
@@ -2021,6 +2022,9 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
       }
       await runDailyCloudPipeline(env.DB,{
         syncProgramFile:(kind,targetDate,scheduledAt)=>syncBoatraceProgramFile(env.DB,env.TRIFECTA_ARCHIVE!,scheduledAt,kind,{targetDate}),
+        runLearning:env.FORECAST_LEARNER
+          ? (targetDate)=>runNativeDailyLearner(env.FORECAST_LEARNER!,targetDate)
+          : undefined,
       });
       return;
     }

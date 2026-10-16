@@ -3,6 +3,10 @@ dist
 .wrangler
 .dev.vars
 ml/.venv
+ml/.venv-workers
+ml/python_modules
+ml/pylock.toml
+ml/src/edgelab
 ml/artifacts/*
 !ml/artifacts/boat-win-lgbm-v1.pkl
 !ml/artifacts/boat-win-lgbm-v1.json
