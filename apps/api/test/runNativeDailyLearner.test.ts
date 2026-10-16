@@ -76,4 +76,14 @@ describe('native daily learner service binding', () => {
     ]);
     expect(JSON.stringify(logs)).not.toMatch(/must-not-be-logged|secret response body|learner\/learn/);
   });
+
+  it('accepts only fixed internal learner diagnostics from a bounded error response', async () => {
+    const body = { status: 'failed', reason: 'learner_internal_error', diagnostic: { stage: 'fit', errorClass: 'ValueError' }, detail: 'must-not-propagate' };
+    const { learner } = learnerWith(new Response(JSON.stringify(body), { status: 503, headers: { 'content-type': 'application/json' } }));
+    expect(await runNativeDailyLearner(learner, day)).toEqual({ status: 'failed', reason: 'learning-service-unavailable', retryable: true,
+      diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
+    const { learner: invalid } = learnerWith(new Response(JSON.stringify({ ...body, diagnostic: { stage: 'fit', errorClass: 'ValueError', path: '/private' } }),
+      { status: 503, headers: { 'content-type': 'application/json' } }));
+    expect(await runNativeDailyLearner(invalid, day)).not.toHaveProperty('diagnostic');
+  });
 });

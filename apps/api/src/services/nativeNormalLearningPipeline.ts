@@ -8,6 +8,8 @@ const LEASE_PREFIX = 'native_normal_learning_lease_v1:';
 const LEASE_MS = 6 * 60_000;
 const MAX_ATTEMPTS = 4;
 const SAFE_REASONS = new Set(['learning-not-ready', 'learning-service-unavailable', 'learning-already-running']);
+const SAFE_STAGES = new Set(['request-json', 'experimental-learn', 'normal-learn', 'lease', 'load-cohort', 'feature-build', 'fit', 'persist-candidate', 'persist-report', 'response']);
+const SAFE_ERRORS = new Set(['AttributeError', 'ImportError', 'IndexError', 'KeyError', 'MemoryError', 'OverflowError', 'RuntimeError', 'TimeoutError', 'TypeError', 'ValueError', 'OtherError']);
 
 export type NativeNormalLearningState = {
   schema: 'native-normal-learning-v1';
@@ -20,6 +22,9 @@ export type NativeNormalLearningState = {
   reason: string | null;
   reportStatus: 'candidate' | 'insufficient_data' | null;
   candidateArtifactCreated: boolean;
+  diagnostic?: { stage: string; errorClass: string } | null;
+  diagnosticRevision?: 1;
+  recoveryRetryUsed?: boolean;
 };
 
 export type NativeNormalLearningOutcome = 'outside-window' | 'busy' | 'waiting-sources' | 'idle' | 'attempted';
@@ -45,7 +50,13 @@ async function readState(db: Db, date: string): Promise<NativeNormalLearningStat
     if (value && typeof value === 'object') {
       const state = value as NativeNormalLearningState;
       if (state.schema === 'native-normal-learning-v1' && state.date === date
-          && ['unconfigured', 'waiting_sources', 'pending', 'success', 'failed'].includes(state.state)) return state;
+          && ['unconfigured', 'waiting_sources', 'pending', 'success', 'failed'].includes(state.state)) {
+        if (state.state === 'failed' && state.reason === 'learning-service-unavailable'
+            && state.diagnosticRevision !== 1 && state.recoveryRetryUsed !== true) {
+          state.state = 'pending'; state.nextAttemptAt = null; state.recoveryRetryUsed = true;
+        }
+        return state;
+      }
     }
   } catch { /* replace malformed state with a safe empty state */ }
   return emptyState(date);
@@ -89,6 +100,9 @@ export async function readNativeNormalLearningStatus(db: Db, now = Date.now()): 
     nextAttemptAt: state.nextAttemptAt && Number.isFinite(Date.parse(state.nextAttemptAt)) ? state.nextAttemptAt : null,
     reason: state.reason && (SAFE_REASONS.has(state.reason) || state.reason === 'source-data-not-ready'
       || state.reason === 'learning-service-not-configured') ? state.reason : null,
+    diagnosticRevision: state.diagnosticRevision === 1 ? 1 : null,
+    diagnostic: state.diagnostic && SAFE_STAGES.has(state.diagnostic.stage) && SAFE_ERRORS.has(state.diagnostic.errorClass)
+      ? { stage: state.diagnostic.stage, errorClass: state.diagnostic.errorClass } : null,
     reportStatus: state.reportStatus === 'candidate' || state.reportStatus === 'insufficient_data' ? state.reportStatus : null,
     candidateArtifactCreated: state.candidateArtifactCreated === true };
 }
@@ -149,10 +163,15 @@ export async function runNativeNormalLearningPipeline(db: Db, options: {
     } catch { result = { status: 'failed', reason: 'learning-service-unavailable', retryable: true }; }
     const attempts = state.attempts + 1;
     const reason = result.reason && SAFE_REASONS.has(result.reason) ? result.reason : 'learning-not-ready';
-    const retry = result.status === 'failed' && result.retryable === true && attempts < MAX_ATTEMPTS;
+    const retry = result.status === 'failed' && result.retryable === true
+      && attempts < (state.recoveryRetryUsed ? MAX_ATTEMPTS + 1 : MAX_ATTEMPTS);
     state = { ...state, state: result.status === 'success' ? 'success' : retry ? 'pending' : 'failed', attempts,
       lastAttemptAt: new Date(timestamp).toISOString(), nextAttemptAt: retry ? retryAt(timestamp, attempts) : null,
       reason: result.status === 'success' ? null : reason,
+      diagnostic: result.diagnostic && SAFE_STAGES.has(result.diagnostic.stage) && SAFE_ERRORS.has(result.diagnostic.errorClass)
+        ? result.diagnostic : null,
+      diagnosticRevision: 1,
+      recoveryRetryUsed: state.recoveryRetryUsed === true,
       reportStatus: result.status === 'success' ? result.reportStatus ?? null : null,
       candidateArtifactCreated: result.status === 'success' && result.candidateArtifactCreated === true };
     await writeState(db, state, timestamp);

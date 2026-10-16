@@ -480,13 +480,24 @@ _ERROR_CLASSES = frozenset({
 })
 
 
-def _log_safe_failure(stage: str, error: BaseException) -> None:
-    """Emit fixed diagnostic labels only; never log exception text or request data."""
+def _safe_failure_diagnostic(stage: str, error: BaseException) -> dict[str, str]:
     safe_stage = stage if stage in _FAILURE_STAGES else "response"
     error_name = type(error).__name__
     safe_error = error_name if error_name in _ERROR_CLASSES else "OtherError"
-    print(json.dumps({"event": "learner_failure", "stage": safe_stage,
-                      "errorClass": safe_error}, separators=(",", ":")))
+    return {"stage": safe_stage, "errorClass": safe_error}
+
+
+def _log_safe_failure(stage: str, error: BaseException) -> None:
+    """Emit fixed diagnostic labels only; never log exception text or request data."""
+    labels = _safe_failure_diagnostic(stage, error)
+    print(json.dumps({"event": "learner_failure", **labels}, separators=(",", ":")))
+
+
+def _internal_error_response(stage: str, error: BaseException):
+    labels = _safe_failure_diagnostic(stage, error)
+    _log_safe_failure(stage, error)
+    return _json_response({"status": "failed", "reason": "learner_internal_error",
+                           "diagnostic": labels}, 503)
 
 
 class _WorkerStageFailure(RuntimeError):
@@ -531,7 +542,6 @@ try:  # Cloudflare Workers runtime imports are unavailable in ordinary CPython.
                 # Never emit SQL, records, object keys from exceptions, or request data.
                 failure_stage = exc.stage if isinstance(exc, _WorkerStageFailure) else stage
                 failure_error = exc.original if isinstance(exc, _WorkerStageFailure) else exc
-                _log_safe_failure(failure_stage, failure_error)
-                return _json_response({"status": "failed", "reason": "learner_internal_error"}, 503)
+                return _internal_error_response(failure_stage, failure_error)
 except ImportError:  # importable for unit tests outside Pyodide
     Default = None

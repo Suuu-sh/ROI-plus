@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from src.worker import (MAX_RACES, _result_proof, _raise_stage_failure, handle_learning, handle_normal_learning,
-                        load_training_store, persist_candidate_artifacts, _log_safe_failure)
+                        load_training_store, persist_candidate_artifacts, _internal_error_response,
+                        _log_safe_failure)
 
 
 class _Statement:
@@ -100,6 +101,13 @@ def test_json_response_uses_workers_sdk_constructor_signature(monkeypatch):
     assert json.loads(body) == {"status": "rejected"}
     assert status == 422 and status_text == ""
     assert headers["content-type"] == "application/json; charset=utf-8"
+    response = worker._internal_error_response("fit", RuntimeError("do not expose this"))
+    body, status, _, _ = calls[-1]
+    assert isinstance(response, Response) and status == 503
+    assert json.loads(body) == {
+        "status": "failed", "reason": "learner_internal_error",
+        "diagnostic": {"stage": "fit", "errorClass": "RuntimeError"}}
+    assert "do not expose" not in body
 
 
 def test_safe_worker_failure_log_contains_only_fixed_stage_and_exception_class(capsys):

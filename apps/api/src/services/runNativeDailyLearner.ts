@@ -13,7 +13,20 @@ export type NativeLearnerResult = {
   retryable?: boolean;
   reportStatus?: NativeLearnerReportStatus;
   candidateArtifactCreated?: boolean;
+  diagnostic?: { stage: string; errorClass: string };
 };
+
+const INTERNAL_STAGES = new Set(['request-json', 'experimental-learn', 'normal-learn', 'lease', 'load-cohort', 'feature-build', 'fit', 'persist-candidate', 'persist-report', 'response']);
+const INTERNAL_ERRORS = new Set(['AttributeError', 'ImportError', 'IndexError', 'KeyError', 'MemoryError', 'OverflowError', 'RuntimeError', 'TimeoutError', 'TypeError', 'ValueError', 'OtherError']);
+
+function internalDiagnostic(report: Record<string, unknown> | null): NativeLearnerResult['diagnostic'] {
+  if (report?.reason !== 'learner_internal_error' || !report.diagnostic || typeof report.diagnostic !== 'object' || Array.isArray(report.diagnostic)) return undefined;
+  const value = report.diagnostic as Record<string, unknown>;
+  return Object.keys(value).sort().join(',') === 'errorClass,stage'
+    && typeof value.stage === 'string' && INTERNAL_STAGES.has(value.stage)
+    && typeof value.errorClass === 'string' && INTERNAL_ERRORS.has(value.errorClass)
+    ? { stage: value.stage, errorClass: value.errorClass } : undefined;
+}
 
 function validCounts(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -100,8 +113,9 @@ async function runLearner(learner: Fetcher, targetDate: string, url: string, mod
   const report = await readBoundedJson(response);
   if (!response.ok) {
     if (response.status === 429 || response.status >= 500) {
-      logCall(log, mode, 'response', 'retryable-failure', 'http-error', response.status);
-      return { status: 'failed', reason: 'learning-service-unavailable', retryable: true };
+      const diagnostic = internalDiagnostic(report);
+      logCall(log, mode, 'response', 'retryable-failure', diagnostic ? 'learner-internal-error' : 'http-error', response.status);
+      return { status: 'failed', reason: 'learning-service-unavailable', retryable: true, ...(diagnostic ? { diagnostic } : {}) };
     }
     if (report?.status === 'skipped' && report.reason === 'daily_lease_active') {
       logCall(log, mode, 'response', 'busy', 'learner-lease-active', response.status);

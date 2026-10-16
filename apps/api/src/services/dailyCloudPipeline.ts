@@ -53,6 +53,9 @@ export type DailyLearningState = {
   reason: string | null;
   reportStatus?: 'candidate' | 'insufficient_data' | null;
   candidateArtifactCreated?: boolean;
+  diagnostic?: { stage: string; errorClass: string } | null;
+  diagnosticRevision?: 1;
+  recoveryRetryUsed?: boolean;
 };
 
 export type DailyCloudPipelineState = {
@@ -66,7 +69,8 @@ export type DailyCloudPipelineState = {
 };
 
 export type DailyLearningResult = { status: 'success' | 'skipped' | 'failed'; reason?: string; retryable?: boolean;
-  reportStatus?: 'candidate' | 'insufficient_data'; candidateArtifactCreated?: boolean };
+  reportStatus?: 'candidate' | 'insufficient_data'; candidateArtifactCreated?: boolean;
+  diagnostic?: { stage: string; errorClass: string } };
 export type DailyCloudPipelineOutcome = 'outside-window' | 'busy' | 'idle' | 'source-attempted' | 'learning-attempted';
 
 export interface DailyCloudPipelineOptions {
@@ -118,7 +122,16 @@ function parseState(raw: string | undefined, date: string): DailyCloudPipelineSt
       const value: unknown = JSON.parse(raw);
       if (value && typeof value === 'object' && (value as DailyCloudPipelineState).schema === 'daily-cloud-pipeline-v1') {
         const state = value as DailyCloudPipelineState;
-        if (state.date === date) return state;
+        if (state.date === date) {
+          // One bounded migration retry for a terminal transient failure written
+          // before durable private-learner diagnostics were available.
+          if (state.learning?.state === 'failed' && state.learning.reason === 'learning-service-unavailable'
+              && state.learning.diagnosticRevision !== 1 && state.learning.recoveryRetryUsed !== true) {
+            state.learning.state = 'pending'; state.learning.nextAttemptAt = null;
+            state.learning.recoveryRetryUsed = true;
+          }
+          return state;
+        }
         return initialState(date, state);
       }
     } catch { /* invalid state is replaced with a new fail-closed date record */ }
@@ -128,6 +141,16 @@ function parseState(raw: string | undefined, date: string): DailyCloudPipelineSt
 
 function safeReason(reason: string | undefined, fallback: string): string {
   return reason && SAFE_REASONS.has(reason) ? reason : fallback;
+}
+
+const SAFE_LEARNER_STAGES = new Set(['request-json', 'experimental-learn', 'normal-learn', 'lease', 'load-cohort', 'feature-build', 'fit', 'persist-candidate', 'persist-report', 'response']);
+const SAFE_LEARNER_ERRORS = new Set(['AttributeError', 'ImportError', 'IndexError', 'KeyError', 'MemoryError', 'OverflowError', 'RuntimeError', 'TimeoutError', 'TypeError', 'ValueError', 'OtherError']);
+function isSafeLearnerDiagnostic(value: unknown): value is { stage: string; errorClass: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const diagnostic = value as Record<string, unknown>;
+  return Object.keys(diagnostic).sort().join(',') === 'errorClass,stage'
+    && typeof diagnostic.stage === 'string' && SAFE_LEARNER_STAGES.has(diagnostic.stage)
+    && typeof diagnostic.errorClass === 'string' && SAFE_LEARNER_ERRORS.has(diagnostic.errorClass);
 }
 
 function retryDelayMs(attempts: number, reason: string): number {
@@ -188,7 +211,9 @@ export async function readDailyCloudPipelineStatus(db: Db): Promise<Record<strin
         updatedAt: typeof value.learning?.updatedAt === 'string' && Number.isFinite(Date.parse(value.learning.updatedAt)) ? value.learning.updatedAt : null,
         reason: value.learning?.reason ? safeReason(value.learning.reason, 'learning-not-ready') : null,
         reportStatus: value.learning?.reportStatus === 'candidate' || value.learning?.reportStatus === 'insufficient_data' ? value.learning.reportStatus : null,
-        candidateArtifactCreated: value.learning?.candidateArtifactCreated === true } };
+        candidateArtifactCreated: value.learning?.candidateArtifactCreated === true,
+        diagnosticRevision: value.learning?.diagnosticRevision === 1 ? 1 : null,
+        diagnostic: isSafeLearnerDiagnostic(value.learning?.diagnostic) ? value.learning?.diagnostic : null } };
   } catch { return null; }
 }
 
@@ -307,13 +332,17 @@ export async function runDailyCloudPipeline(db: Db, options: DailyCloudPipelineO
         const result = await options.runLearning(state.date, new Date(timestamp));
         const reason = safeReason(result.reason, 'learning-not-ready');
         const attempts = state.learning.attempts + 1;
-        const willRetry = result.status === 'failed' && result.retryable === true && attempts < 4;
+        const willRetry = result.status === 'failed' && result.retryable === true
+          && attempts < (state.learning.recoveryRetryUsed ? 5 : 4);
         state.learning = { state: willRetry ? 'pending' : result.status, attempts,
           nextAttemptAt: willRetry ? new Date(timestamp + retryDelayMs(attempts, reason)).toISOString() : null,
           updatedAt: new Date(timestamp).toISOString(),
           reason: result.status === 'success' ? null : reason,
           reportStatus: result.status === 'success' ? result.reportStatus ?? null : null,
-          candidateArtifactCreated: result.status === 'success' && result.candidateArtifactCreated === true };
+          candidateArtifactCreated: result.status === 'success' && result.candidateArtifactCreated === true,
+          diagnostic: isSafeLearnerDiagnostic(result.diagnostic) ? result.diagnostic : null,
+          diagnosticRevision: 1,
+          recoveryRetryUsed: state.learning.recoveryRetryUsed === true };
       } catch {
         const attempts = state.learning.attempts + 1, willRetry = attempts < 4;
         state.learning = { state: willRetry ? 'pending' : 'failed', attempts,
