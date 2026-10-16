@@ -23,9 +23,10 @@ import { buildExperimentalStakeComparison } from './services/experimentalStakeCo
 import { splitRowsForD1 } from './services/d1Batch.js';
 import { boatArchiveEvidenceValid } from './services/boatArchiveEvidence.js';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
+import { runForecastWatchdog } from './services/forecastWatchdog.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
-interface Env { DB: Db; TRIFECTA_ARCHIVE?: R2Bucket; INGEST_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; ENABLE_HISTORICAL_TRIFECTA_ARCHIVE?: string; PROXY_TOKEN?: string; }
+interface Env { DB: Db; TRIFECTA_ARCHIVE?: R2Bucket; INGEST_TOKEN?: string; FORECAST_GITHUB_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; ENABLE_HISTORICAL_TRIFECTA_ARCHIVE?: string; PROXY_TOKEN?: string; }
 type Ctx = { Bindings: Env };
 const SAFE_BOAT_SCHEMA = 'boat-venue-v2';
 const TICKET_MODEL_SCHEMA = 'ticket-selection-v1';
@@ -2001,6 +2002,12 @@ const waitForNextPaperT60Target=async(options:{
   return {status:'ready' as const,targetMs,actualMs};
 };
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env, ctx?: ExecutionContext) => {
+  if (event.cron === '*/5 * * * *') {
+    // Separate scheduled invocation keeps GitHub dispatch I/O out of the
+    // minute-level T-60, odds, settlement, and shared fetch-budget path.
+    await runForecastWatchdog(env.DB, env.FORECAST_GITHUB_TOKEN);
+    return;
+  }
   if (event.cron !== '* * * * *') return;
   const requestBudget={used:0,max:49};
   const oddsContext=purchaseOddsContext(requestBudget);

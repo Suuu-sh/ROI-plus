@@ -38,6 +38,19 @@ test('records CPU and memory exceeded scheduled outcomes without event payload',
   assert.deepEqual(events.map(({ outcome }) => outcome), ['cpuExceeded', 'memoryExceeded']);
 });
 
+test('captures the five-minute watchdog invocation and only its fixed status fields', () => {
+  const payload = { eventTimestamp: 1791986400000, event: { cron: '*/5 * * * *' }, outcome: 'ok',
+    logs: [{ level: 'info', message: [JSON.stringify({ event: 'forecast-github-watchdog',
+      status: 'http-rejected', statusCode: 403, reason: 'secret response body', token: 'never-forward',
+      account_id: 'never-forward' })] }], exceptions: [] };
+  assert.deepEqual(parseTailRecords([JSON.stringify(payload)]), [
+    { event: 'scheduled_invocation', timestamp: new Date(1791986400000).toISOString(),
+      cron: '*/5 * * * *', outcome: 'ok' },
+    { event: 'forecast-github-watchdog', timestamp: new Date(1791986400000).toISOString(),
+      status: 'http-rejected', statusCode: 403, reason: 'other' },
+  ]);
+});
+
 test('allows only safe T-60 target fields from diagnostic log events', () => {
   const payload = { eventTimestamp: '2026-10-14T07:20:00Z', logs: [{ level: 'info', message: [JSON.stringify({
     event: 'paper-t60-target', status: 'skipped', reason: 't60-window-expired', pass: 'upcoming-t60',

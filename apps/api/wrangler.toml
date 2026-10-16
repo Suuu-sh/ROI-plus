@@ -13,7 +13,7 @@ binding = "TRIFECTA_ARCHIVE"
 bucket_name = "roi-plus-trifecta-archive"
 
 [triggers]
-crons = ["* * * * *"]
+crons = ["* * * * *", "*/5 * * * *"]
 
 [vars]
 ENABLE_AUTO_BET = "true"

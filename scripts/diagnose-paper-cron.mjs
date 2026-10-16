@@ -10,7 +10,7 @@ export const CAPTURE_MS = 120_000;
 const MAX_EVENTS = 200;
 const MAX_BUFFER = 2 * 1024 * 1024;
 const TRUSTED_CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1';
-const allowedEvents = new Set(['paper-decision-timing','experimental-paper-decision','historical-trifecta-virtual-experiment','boat-ten-minute-results','boat-ten-minute-results-collection','paper-t60-target']);
+const allowedEvents = new Set(['paper-decision-timing','experimental-paper-decision','historical-trifecta-virtual-experiment','boat-ten-minute-results','boat-ten-minute-results-collection','paper-t60-target','forecast-github-watchdog']);
 const reasonAllowlist = new Set([
   'official_entries_incomplete','experimental_forecast_missing_or_invalid','forecast_predates_model',
   'official_archive_missing_or_stale','official_archive_invalid','official_archive_identity_or_odds_invalid',
@@ -46,7 +46,12 @@ function safeEvent(value, timestamp, output) {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return; } }
   if (!value || typeof value !== 'object' || !allowedEvents.has(value.event) || output.length >= MAX_EVENTS) return;
   const out = { event: value.event, timestamp };
-  if (['success','partial','failed','skipped','ready','none','expired'].includes(value.status)) out.status = value.status;
+  if (['success','partial','failed','skipped','ready','none','expired','unconfigured','outside-window','cooldown',
+    'active-run','dispatched','invalid-response','request-failed','http-rejected','lease-unavailable'].includes(value.status)) out.status = value.status;
+  if (value.event === 'forecast-github-watchdog'
+      && ([401,403,404,422,429,500,502,503,504].includes(value.statusCode) || value.statusCode === 'other')) {
+    out.statusCode = value.statusCode;
+  }
   if (['current','upcoming-t60'].includes(value.pass)) out.pass = value.pass;
   if (['TypeError','RangeError','SyntaxError','D1Error','Error'].includes(value.errorClass)) out.errorClass = value.errorClass;
   if (Number.isFinite(value.elapsedMs) && value.elapsedMs >= 0 && value.elapsedMs <= 600_000) out.elapsedMs = value.elapsedMs;
@@ -90,7 +95,7 @@ export function parseTailRecords(chunks) {
     const timestamp = safeTimestamp(item.eventTimestamp ?? item.timestamp);
     const cron = item.event?.cron;
     if (typeof cron === 'string' && output.length < MAX_EVENTS) {
-      output.push({ event: 'scheduled_invocation', timestamp, cron: cron === '* * * * *' ? cron : 'other',
+      output.push({ event: 'scheduled_invocation', timestamp, cron: ['* * * * *','*/5 * * * *'].includes(cron) ? cron : 'other',
         outcome: ['ok','exception','cpuExceeded','memoryExceeded'].includes(item.outcome) ? item.outcome : 'other' });
     }
     for (const log of Array.isArray(item.logs) ? item.logs : []) {
