@@ -36,7 +36,8 @@ _OBSERVATION_VALUE_FIELDS = ("exhibition_time", "tilt", "weight", "start_exhibit
 def _feature_replay_input(race: Mapping[str, Any], entries: list[Mapping[str, Any]],
                           observations: list[Mapping[str, Any]], predicted_at: str) -> dict[str, Any]:
     """Keep only current-race fields consumed by the no-weather feature builder."""
-    safe_race = {key: race.get(key) for key in ("id", "race_date", "venue_id", "race_no", "data_origin")}
+    safe_race = {key: race.get(key) for key in
+                 ("id", "race_date", "venue_id", "race_no", "sport", "status", "data_origin")}
     safe_entries = []
     for entry in entries:
         try:

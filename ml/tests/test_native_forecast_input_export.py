@@ -36,7 +36,8 @@ def test_history_snapshot_is_pit_filtered_aggregated_and_bounded():
 def test_feature_replay_input_contains_only_current_race_facts():
     replay = _feature_replay_input(
         {"id": "boat-public-race", "race_date": "2026-10-16", "venue_id": "21",
-         "race_no": 5, "data_origin": "real", "secretish_extra": "drop"},
+         "race_no": 5, "sport": "boat", "status": "scheduled", "data_origin": "real",
+         "secretish_extra": "drop"},
         [{"race_id": "boat-public-race", "number": 1, "data_origin": "real",
           "available_at": "2026-10-16T01:00:00Z", "national_win_rate": 6.2,
           "features_json": json.dumps({"racer_id": "1234", "age": 30,
@@ -50,7 +51,8 @@ def test_feature_replay_input_contains_only_current_race_facts():
           "other": "drop"}], "2026-10-16T01:01:00Z")
     assert replay["historyRaces"] == []
     assert replay["race"] == {"id": "boat-public-race", "race_date": "2026-10-16",
-                               "venue_id": "21", "race_no": 5, "data_origin": "real"}
+                               "venue_id": "21", "race_no": 5, "sport": "boat",
+                               "status": "scheduled", "data_origin": "real"}
     assert json.loads(replay["entries"][0]["features_json"]) == {
         "racer_id": "1234", "age": 30, "national_2rate": 44.0}
     assert json.loads(replay["observations"][0]["values_json"]) == {"exhibition_time": 6.8}
