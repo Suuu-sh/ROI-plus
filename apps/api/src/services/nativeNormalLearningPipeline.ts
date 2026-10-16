@@ -76,6 +76,12 @@ async function releaseLease(db: Db, date: string, owner: string): Promise<void> 
 /** Safe status projection; returns no settings JSON, model IDs, artifact keys, or training details. */
 export async function readNativeNormalLearningStatus(db: Db, now = Date.now()): Promise<Record<string, unknown>> {
   const { date } = jstParts(now);
+  const row = await first<{ value: string }>(db, 'SELECT value FROM settings WHERE key=?', `${STATE_PREFIX}${date}`);
+  if (!row?.value) {
+    return { date, state: 'waiting_sources', attempts: 0, updatedAt: null,
+      lastAttemptAt: null, nextAttemptAt: null, reason: 'not-run-yet', reportStatus: null,
+      candidateArtifactCreated: false };
+  }
   const state = await readState(db, date);
   return { date, state: state.state, attempts: Number.isSafeInteger(state.attempts) && state.attempts >= 0 ? state.attempts : 0,
     updatedAt: Number.isFinite(Date.parse(state.updatedAt)) ? state.updatedAt : null,
@@ -96,28 +102,33 @@ export async function runNativeNormalLearningPipeline(db: Db, options: {
   learner?: Fetcher;
   now?: () => number;
   runLearning?: (targetDate: string) => Promise<NativeLearnerResult>;
+  log?: (line: string) => void;
 } = {}): Promise<{ outcome: NativeNormalLearningOutcome; state: NativeNormalLearningState }> {
+  const log = options.log ?? ((line: string) => console.info(line));
+  const emit = (status: string, reason?: string) => log(JSON.stringify({ event: 'native-normal-learning', status, ...(reason ? { reason } : {}) }));
   const timestamp = (options.now ?? Date.now)();
-  if (!Number.isFinite(timestamp)) return { outcome: 'outside-window', state: emptyState('1970-01-01') };
+  if (!Number.isFinite(timestamp)) { emit('failed', 'invalid-clock'); return { outcome: 'outside-window', state: emptyState('1970-01-01') }; }
   const { date, minute } = jstParts(timestamp);
   let state = await readState(db, date);
-  if (minute < 180 || minute >= 23 * 60 + 30) return { outcome: 'outside-window', state };
+  if (minute < 180 || minute >= 23 * 60 + 30) { emit('outside-window'); return { outcome: 'outside-window', state }; }
   if (state.state === 'success' || state.state === 'failed') {
+    emit(state.state);
     return { outcome: 'idle', state };
   }
   if (!options.learner && !options.runLearning) {
     state = { ...state, state: 'unconfigured', reason: 'learning-service-not-configured', nextAttemptAt: null };
     await writeState(db, state, timestamp);
+    emit('unconfigured', 'learning-service-not-configured');
     return { outcome: 'idle', state };
   }
 
   let owner: string | null = null;
-  try { owner = await claimLease(db, date, timestamp); } catch { return { outcome: 'busy', state }; }
-  if (!owner) return { outcome: 'busy', state };
+  try { owner = await claimLease(db, date, timestamp); } catch { emit('lease-unavailable'); return { outcome: 'busy', state }; }
+  if (!owner) { emit('busy'); return { outcome: 'busy', state }; }
   try {
     state = await readState(db, date);
-    if (state.state === 'success' || state.state === 'failed') return { outcome: 'idle', state };
-    if (state.nextAttemptAt && Date.parse(state.nextAttemptAt) > timestamp) return { outcome: 'idle', state };
+    if (state.state === 'success' || state.state === 'failed') { emit(state.state); return { outcome: 'idle', state }; }
+    if (state.nextAttemptAt && Date.parse(state.nextAttemptAt) > timestamp) { emit('backoff'); return { outcome: 'idle', state }; }
 
     const daily = await readDailyCloudPipelineStatus(db);
     if (!daily || daily.date !== date || (daily.bToday as { state?: string; targetDate?: string } | null)?.state !== 'success'
@@ -126,6 +137,7 @@ export async function runNativeNormalLearningPipeline(db: Db, options: {
       state = { ...state, state: 'waiting_sources', reason: 'source-data-not-ready', nextAttemptAt: null,
         reportStatus: null, candidateArtifactCreated: false };
       await writeState(db, state, timestamp);
+      emit('waiting-sources', 'source-data-not-ready');
       return { outcome: 'waiting-sources', state };
     }
 
@@ -144,6 +156,7 @@ export async function runNativeNormalLearningPipeline(db: Db, options: {
       reportStatus: result.status === 'success' ? result.reportStatus ?? null : null,
       candidateArtifactCreated: result.status === 'success' && result.candidateArtifactCreated === true };
     await writeState(db, state, timestamp);
+    emit(state.state === 'success' ? 'completed' : state.state, state.reason ?? state.reportStatus ?? undefined);
     return { outcome: 'attempted', state };
   } finally { await releaseLease(db, date, owner).catch(() => undefined); }
 }

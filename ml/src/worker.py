@@ -193,29 +193,41 @@ async def handle_learning(db: Any, archive_bucket: Any, request_body: Any) -> di
     lease_key = f"native_experimental_learning:{today.isoformat()}"
     lease_until = (now + timedelta(minutes=45)).isoformat()
     lease_value = json.dumps({"until": lease_until, "owner": uuid.uuid4().hex}, separators=(",", ":"))
-    claimed = await db.prepare("""
-      INSERT INTO settings(key,value) VALUES(?,?)
-      ON CONFLICT(key) DO UPDATE SET value=excluded.value
-      WHERE julianday(json_extract(settings.value,'$.until'))<=julianday(?)
-    """).bind(lease_key, lease_value, now.isoformat()).run()
+    try:
+        claimed = await db.prepare("""
+          INSERT INTO settings(key,value) VALUES(?,?)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value
+          WHERE julianday(json_extract(settings.value,'$.until'))<=julianday(?)
+        """).bind(lease_key, lease_value, now.isoformat()).run()
+    except Exception as exc:
+        _raise_stage_failure("lease", exc)
     if not bool(getattr(getattr(claimed, "meta", None), "changes", 0)):
         return {"status": "skipped", "reason": "daily_lease_active", "candidateOnly": True}
     keep_lease = False
     try:
-        store, counts = await load_training_store(db, today=today)
-        from edgelab.cli import _make_training_rows
-        from edgelab.features.boat import TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA
-        rows = _make_training_rows(store, "boat", feature_schema=TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
-                                   require_source_arrival=True)
+        try:
+            store, counts = await load_training_store(db, today=today)
+        except Exception as exc:
+            _raise_stage_failure("load-cohort", exc)
+        try:
+            from edgelab.cli import _make_training_rows
+            from edgelab.features.boat import TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA
+            rows = _make_training_rows(store, "boat", feature_schema=TRIFECTA_NO_WEATHER_EXPERIMENTAL_SCHEMA,
+                                       require_source_arrival=True)
+        except Exception as exc:
+            _raise_stage_failure("feature-build", exc)
         model_id = "worker-experimental-" + now.strftime("%Y%m%dT%H%M%SZ")
         # Isolate local temporary files; candidate bytes are copied to R2 only after
         # the existing learner succeeds and remain outside every registry path.
         import tempfile
         from edgelab.models.trifecta import train_trifecta_experimental
         with tempfile.TemporaryDirectory(prefix="edgelab-candidate-") as directory:
-            report = train_trifecta_experimental(rows, store, model_id=model_id,
-                artifact_dir=Path(directory) / "candidate",
-                estimator_backend="numpy-newton")
+            try:
+                report = train_trifecta_experimental(rows, store, model_id=model_id,
+                    artifact_dir=Path(directory) / "candidate",
+                    estimator_backend="numpy-newton")
+            except Exception as exc:
+                _raise_stage_failure("fit", exc)
             report.pop("artifactManifest", None)
             report.pop("artifactManifestData", None)
             report = {**report, "inputCounts": counts,
@@ -226,8 +238,14 @@ async def handle_learning(db: Any, archive_bucket: Any, request_body: Any) -> di
             prefix = f"learning-candidates/{today.isoformat()}/{model_id}/"
             if report.get("artifactCreated"):
                 base = Path(directory) / "candidate"
-                await persist_candidate_artifacts(base, model_id, prefix, archive_bucket)
-            await archive_bucket.put(prefix + "report.json", json.dumps(report, separators=(",", ":")))
+                try:
+                    await persist_candidate_artifacts(base, model_id, prefix, archive_bucket)
+                except Exception as exc:
+                    _raise_stage_failure("persist-candidate", exc)
+            try:
+                await archive_bucket.put(prefix + "report.json", json.dumps(report, separators=(",", ":")))
+            except Exception as exc:
+                _raise_stage_failure("persist-report", exc)
             report["candidatePrefix"] = prefix
             keep_lease = report.get("status") != "insufficient_data"
         return report
@@ -246,18 +264,27 @@ async def handle_normal_learning(db: Any, archive_bucket: Any, request_body: Any
     lease_key = f"native_normal_learning:{today.isoformat()}"
     lease_until = (now + timedelta(minutes=45)).isoformat()
     lease_value = json.dumps({"until": lease_until, "owner": uuid.uuid4().hex}, separators=(",", ":"))
-    claimed = await db.prepare("""
-      INSERT INTO settings(key,value) VALUES(?,?)
-      ON CONFLICT(key) DO UPDATE SET value=excluded.value
-      WHERE julianday(json_extract(settings.value,'$.until'))<=julianday(?)
-    """).bind(lease_key, lease_value, now.isoformat()).run()
+    try:
+        claimed = await db.prepare("""
+          INSERT INTO settings(key,value) VALUES(?,?)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value
+          WHERE julianday(json_extract(settings.value,'$.until'))<=julianday(?)
+        """).bind(lease_key, lease_value, now.isoformat()).run()
+    except Exception as exc:
+        _raise_stage_failure("lease", exc)
     if not bool(getattr(getattr(claimed, "meta", None), "changes", 0)):
         return {"status": "skipped", "reason": "daily_lease_active", "candidateOnly": True}
     keep_lease = False
     try:
-        store, counts = await load_training_store(db, today=today)
-        from edgelab.importers.experimental_result_labels import verified_experimental_result_race_ids
-        verified_ids = verified_experimental_result_race_ids(store)
+        try:
+            store, counts = await load_training_store(db, today=today)
+        except Exception as exc:
+            _raise_stage_failure("load-cohort", exc)
+        try:
+            from edgelab.importers.experimental_result_labels import verified_experimental_result_race_ids
+            verified_ids = verified_experimental_result_race_ids(store)
+        except Exception as exc:
+            _raise_stage_failure("feature-build", exc)
         normal_store = dict(store)
         normal_store["models"] = []  # This private learner has no authoritative registry snapshot.
         for key in ("races", "entries", "results", "payouts", "collection_runs"):
@@ -271,7 +298,10 @@ async def handle_normal_learning(db: Any, archive_bucket: Any, request_body: Any
                 return str(value or "")
             normal_store[key] = [row for row in store.get(key, []) if row_race_id(row) in verified_ids]
         from edgelab.cli import _make_training_rows
-        training_rows = _make_training_rows(normal_store, "boat", require_source_arrival=True)
+        try:
+            training_rows = _make_training_rows(normal_store, "boat", require_source_arrival=True)
+        except Exception as exc:
+            _raise_stage_failure("feature-build", exc)
         complete_ids = sorted({str(row["race_id"]) for row in training_rows})
         fingerprint = hashlib.sha256(("|".join(complete_ids) + "|" + now.isoformat()).encode()).hexdigest()[:8]
         model_id = f"boat-win-logistic-{today:%Y%m%d}-{fingerprint}"
@@ -286,13 +316,19 @@ async def handle_normal_learning(db: Any, archive_bucket: Any, request_body: Any
             state_path = Path(directory) / "learning-state.json"
             checkpoint = await _load_normal_learning_state(db)
             state_path.write_text(json.dumps(checkpoint, separators=(",", ":")), encoding="utf-8")
-            result = guarded_candidate(normal_store, training_rows, model_id=model_id,
-                authoritative_model_ids=set(), artifact_dir=base, learning_state_path=state_path,
-                incumbent_artifact_dir=incumbent_dir, estimator_backend="numpy-logistic")
+            try:
+                result = guarded_candidate(normal_store, training_rows, model_id=model_id,
+                    authoritative_model_ids=set(), artifact_dir=base, learning_state_path=state_path,
+                    incumbent_artifact_dir=incumbent_dir, estimator_backend="numpy-logistic")
+            except Exception as exc:
+                _raise_stage_failure("fit", exc)
             next_state = None
             if result.get("status") == "candidate":
                 _mark_normal_candidate_not_promotable(base, model_id, result)
-                await _persist_normal_candidate(base, model_id, prefix, archive_bucket)
+                try:
+                    await _persist_normal_candidate(base, model_id, prefix, archive_bucket)
+                except Exception as exc:
+                    _raise_stage_failure("persist-candidate", exc)
                 next_state = {"version": 1, "trainedRaceIds": complete_ids[-MAX_RACES:]}
                 status = "candidate"
                 artifact_created = True
@@ -327,7 +363,10 @@ async def handle_normal_learning(db: Any, archive_bucket: Any, request_body: Any
                 "runtimePackages": _runtime_package_versions(),
                 "normalLearning": normal_summary,
             }
-            await archive_bucket.put(prefix + "report.json", json.dumps(report, separators=(",", ":")))
+            try:
+                await archive_bucket.put(prefix + "report.json", json.dumps(report, separators=(",", ":")))
+            except Exception as exc:
+                _raise_stage_failure("persist-report", exc)
             if next_state is not None:
                 await db.prepare("""
                   INSERT INTO settings(key,value) VALUES(?,?)
@@ -431,6 +470,35 @@ def _runtime_package_versions() -> dict[str, str]:
     return versions
 
 
+_FAILURE_STAGES = frozenset({
+    "request-json", "experimental-learn", "normal-learn", "lease", "load-cohort",
+    "feature-build", "fit", "persist-candidate", "persist-report", "response",
+})
+_ERROR_CLASSES = frozenset({
+    "AttributeError", "ImportError", "IndexError", "KeyError", "MemoryError",
+    "OverflowError", "RuntimeError", "TimeoutError", "TypeError", "ValueError",
+})
+
+
+def _log_safe_failure(stage: str, error: BaseException) -> None:
+    """Emit fixed diagnostic labels only; never log exception text or request data."""
+    safe_stage = stage if stage in _FAILURE_STAGES else "response"
+    error_name = type(error).__name__
+    safe_error = error_name if error_name in _ERROR_CLASSES else "OtherError"
+    print(json.dumps({"event": "learner_failure", "stage": safe_stage,
+                      "errorClass": safe_error}, separators=(",", ":")))
+
+
+class _WorkerStageFailure(RuntimeError):
+    def __init__(self, stage: str, original: BaseException):
+        self.stage = stage if stage in _FAILURE_STAGES else "response"
+        self.original = original
+
+
+def _raise_stage_failure(stage: str, error: BaseException) -> None:
+    raise _WorkerStageFailure(stage, error) from None
+
+
 try:  # Cloudflare Workers runtime imports are unavailable in ordinary CPython.
     from workers import WorkerEntrypoint
 
@@ -439,21 +507,31 @@ try:  # Cloudflare Workers runtime imports are unavailable in ordinary CPython.
             path = str(request.url).split("?", 1)[0].rstrip("/")
             if request.method != "POST" or not (path.endswith("/learn") or path.endswith("/learn/normal")):
                 return _json_response({"error": "not_found"}, 404)
+            stage = "request-json"
             try:
                 body = await request.json()
                 converter = getattr(body, "to_py", None)
                 if callable(converter):
                     body = converter()
                 if path.endswith("/learn/normal"):
+                    stage = "normal-learn"
                     result = await handle_normal_learning(self.env.DB, self.env.TRIFECTA_ARCHIVE, body)
                 else:
+                    stage = "experimental-learn"
                     result = await handle_learning(self.env.DB, self.env.TRIFECTA_ARCHIVE, body)
+                stage = "response"
                 return _json_response(result)
             except ValueError as exc:
+                failure_stage = exc.stage if isinstance(exc, _WorkerStageFailure) else stage
+                failure_error = exc.original if isinstance(exc, _WorkerStageFailure) else exc
+                _log_safe_failure(failure_stage, failure_error)
                 reason = str(exc) if str(exc) in {"input_limit_exceeded"} else "training_input_invalid"
                 return _json_response({"status": "rejected", "reason": reason}, 422)
-            except Exception:
+            except Exception as exc:
                 # Never emit SQL, records, object keys from exceptions, or request data.
+                failure_stage = exc.stage if isinstance(exc, _WorkerStageFailure) else stage
+                failure_error = exc.original if isinstance(exc, _WorkerStageFailure) else exc
+                _log_safe_failure(failure_stage, failure_error)
                 return _json_response({"status": "failed", "reason": "learner_internal_error"}, 503)
 except ImportError:  # importable for unit tests outside Pyodide
     Default = None

@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.worker import (MAX_RACES, _result_proof, handle_learning, handle_normal_learning,
-                        load_training_store, persist_candidate_artifacts)
+from src.worker import (MAX_RACES, _result_proof, _raise_stage_failure, handle_learning, handle_normal_learning,
+                        load_training_store, persist_candidate_artifacts, _log_safe_failure)
 
 
 class _Statement:
@@ -100,6 +100,22 @@ def test_json_response_uses_workers_sdk_constructor_signature(monkeypatch):
     assert json.loads(body) == {"status": "rejected"}
     assert status == 422 and status_text == ""
     assert headers["content-type"] == "application/json; charset=utf-8"
+
+
+def test_safe_worker_failure_log_contains_only_fixed_stage_and_exception_class(capsys):
+    _log_safe_failure("experimental-learn", RuntimeError("private SQL and object key"))
+    line = capsys.readouterr().out.strip()
+    assert json.loads(line) == {"event": "learner_failure", "stage": "experimental-learn",
+                                "errorClass": "RuntimeError"}
+    assert "private" not in line and "object key" not in line
+    _log_safe_failure("unknown-request-path", type("OddFailure", (Exception,), {})())
+    assert json.loads(capsys.readouterr().out.strip()) == {
+        "event": "learner_failure", "stage": "response", "errorClass": "OtherError"}
+    with pytest.raises(RuntimeError) as caught:
+        _raise_stage_failure("load-cohort", RuntimeError("sensitive detail"))
+    _log_safe_failure(caught.value.stage, caught.value.original)
+    assert json.loads(capsys.readouterr().out.strip()) == {
+        "event": "learner_failure", "stage": "load-cohort", "errorClass": "RuntimeError"}
 
 
 def test_candidate_publisher_checks_exact_trainer_manifest_and_files(tmp_path):

@@ -2017,7 +2017,8 @@ const waitForNextPaperT60Target=async(options:{
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env, ctx?: ExecutionContext) => {
   if (event.cron === '2-57/5 * * * *') {
     if (env.ENABLE_NATIVE_DAILY_PIPELINE === 'true') {
-      await runNativeNormalLearningPipeline(env.DB, { learner: env.FORECAST_LEARNER });
+      try { await runNativeNormalLearningPipeline(env.DB, { learner: env.FORECAST_LEARNER }); }
+      catch { console.info(JSON.stringify({ event: 'native-normal-learning', status: 'failed', reason: 'orchestration-error' })); }
     }
     return;
   }

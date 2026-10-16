@@ -31,12 +31,17 @@ function markSourcesReady(sqlite: Sqlite.Database, date: string) {
 describe('native normal daily learner', () => {
   it('waits for B today and K yesterday without consuming an attempt', async () => {
     const { sqlite, db } = createDb();
-    const result = await runNativeNormalLearningPipeline(db, { now: () => Date.parse('2026-10-16T18:00:00Z'),
+    const now = Date.parse('2026-10-16T18:00:00Z');
+    expect(await readNativeNormalLearningStatus(db, now)).toMatchObject({
+      date: '2026-10-17', state: 'waiting_sources', attempts: 0, updatedAt: null, reason: 'not-run-yet',
+    });
+    const result = await runNativeNormalLearningPipeline(db, { now: () => now,
       runLearning: async () => { throw new Error('must not call while source gate is closed'); } });
     expect(result.outcome).toBe('waiting-sources');
     expect(result.state).toMatchObject({ state: 'waiting_sources', attempts: 0, reason: 'source-data-not-ready' });
     expect(await readNativeNormalLearningStatus(db, Date.parse('2026-10-16T18:00:00Z')))
-      .toMatchObject({ date: '2026-10-17', state: 'waiting_sources', attempts: 0 });
+      .toMatchObject({ date: '2026-10-17', state: 'waiting_sources', attempts: 0,
+        updatedAt: new Date(now).toISOString(), reason: 'source-data-not-ready' });
     sqlite.close();
   });
 
