@@ -63,4 +63,17 @@ describe('native daily learner service binding', () => {
       status: 'failed', reason: 'learning-service-unavailable', retryable: true,
     });
   });
+
+  it('distinguishes fetch exceptions from HTTP failures using only safe stage and status fields', async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const throwing = { fetch: vi.fn(async () => { throw new Error('must-not-be-logged'); }) } as unknown as Fetcher;
+    await runNativeDailyLearner(throwing, day, line => logs.push(JSON.parse(line)));
+    const { learner: unavailable } = learnerWith(new Response('secret response body', { status: 503 }));
+    await runNativeDailyLearner(unavailable, day, line => logs.push(JSON.parse(line)));
+    expect(logs).toEqual([
+      { event: 'private-learner-call', mode: 'experimental', stage: 'fetch', status: 'failed', reason: 'fetch-exception' },
+      { event: 'private-learner-call', mode: 'experimental', stage: 'response', status: 'retryable-failure', reason: 'http-error', httpStatus: 503 },
+    ]);
+    expect(JSON.stringify(logs)).not.toMatch(/must-not-be-logged|secret response body|learner\/learn/);
+  });
 });

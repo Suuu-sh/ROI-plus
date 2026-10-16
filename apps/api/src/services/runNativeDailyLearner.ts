@@ -68,8 +68,18 @@ function reportResult(report: Record<string, unknown>, date: string): NativeLear
 }
 
 /** Calls the private candidate-only learner binding and stores no report text or model identifiers. */
-async function runLearner(learner: Fetcher, targetDate: string, url: string): Promise<NativeLearnerResult> {
+type LearnerMode = 'experimental' | 'normal';
+type LearnerLog = (line: string) => void;
+
+function logCall(log: LearnerLog, mode: LearnerMode, stage: string, status: string, reason?: string, httpStatus?: number) {
+  log(JSON.stringify({ event: 'private-learner-call', mode, stage, status,
+    ...(reason ? { reason } : {}), ...(Number.isSafeInteger(httpStatus) && httpStatus! >= 100 && httpStatus! <= 599
+      ? { httpStatus } : {}) }));
+}
+
+async function runLearner(learner: Fetcher, targetDate: string, url: string, mode: LearnerMode, log: LearnerLog): Promise<NativeLearnerResult> {
   if (!validDate(targetDate)) {
+    logCall(log, mode, 'preflight', 'failed', 'invalid-target-date');
     return { status: 'failed', reason: 'learning-not-ready', retryable: false };
   }
   let response: Response;
@@ -78,33 +88,43 @@ async function runLearner(learner: Fetcher, targetDate: string, url: string): Pr
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify({ date: targetDate, confirmed: true }), redirect: 'manual',
     });
-  } catch { return { status: 'failed', reason: 'learning-service-unavailable', retryable: true }; }
+  } catch {
+    logCall(log, mode, 'fetch', 'failed', 'fetch-exception');
+    return { status: 'failed', reason: 'learning-service-unavailable', retryable: true };
+  }
 
   if (response.redirected || response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+    logCall(log, mode, 'response', 'rejected', 'redirect-rejected', response.status);
     return { status: 'failed', reason: 'learning-service-unavailable', retryable: true };
   }
   const report = await readBoundedJson(response);
   if (!response.ok) {
     if (response.status === 429 || response.status >= 500) {
+      logCall(log, mode, 'response', 'retryable-failure', 'http-error', response.status);
       return { status: 'failed', reason: 'learning-service-unavailable', retryable: true };
     }
     if (report?.status === 'skipped' && report.reason === 'daily_lease_active') {
+      logCall(log, mode, 'response', 'busy', 'learner-lease-active', response.status);
       return { status: 'failed', reason: 'learning-already-running', retryable: true };
     }
+    logCall(log, mode, 'response', 'rejected', 'http-error', response.status);
     return { status: 'failed', reason: 'learning-not-ready', retryable: false };
   }
   if (report?.status === 'skipped' && report.reason === 'daily_lease_active'
       && report.candidateOnly === true) {
+    logCall(log, mode, 'response', 'busy', 'learner-lease-active', response.status);
     return { status: 'failed', reason: 'learning-already-running', retryable: true };
   }
   const result = report ? reportResult(report, targetDate) : null;
+  logCall(log, mode, result ? 'complete' : 'parse', result ? 'accepted' : 'rejected',
+    result ? result.reportStatus : 'invalid-report', response.status);
   return result ?? { status: 'failed', reason: 'learning-not-ready', retryable: false };
 }
 
-export function runNativeDailyLearner(learner: Fetcher, targetDate: string): Promise<NativeLearnerResult> {
-  return runLearner(learner, targetDate, LEARNER_URL);
+export function runNativeDailyLearner(learner: Fetcher, targetDate: string, log: LearnerLog = line => console.info(line)): Promise<NativeLearnerResult> {
+  return runLearner(learner, targetDate, LEARNER_URL, 'experimental', log);
 }
 
-export function runNativeNormalDailyLearner(learner: Fetcher, targetDate: string): Promise<NativeLearnerResult> {
-  return runLearner(learner, targetDate, NORMAL_LEARNER_URL);
+export function runNativeNormalDailyLearner(learner: Fetcher, targetDate: string, log: LearnerLog = line => console.info(line)): Promise<NativeLearnerResult> {
+  return runLearner(learner, targetDate, NORMAL_LEARNER_URL, 'normal', log);
 }
