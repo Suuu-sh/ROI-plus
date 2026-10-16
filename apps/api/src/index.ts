@@ -26,7 +26,7 @@ import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, re
 import { runForecastWatchdog } from './services/forecastWatchdog.js';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
-interface Env { DB: Db; TRIFECTA_ARCHIVE?: R2Bucket; INGEST_TOKEN?: string; FORECAST_GITHUB_TOKEN?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; ENABLE_HISTORICAL_TRIFECTA_ARCHIVE?: string; PROXY_TOKEN?: string; }
+interface Env { DB: Db; TRIFECTA_ARCHIVE?: R2Bucket; INGEST_TOKEN?: string; FORECAST_GITHUB_TOKEN?: string; ENABLE_NATIVE_EXPERIMENTAL_FORECAST?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; ENABLE_HISTORICAL_TRIFECTA_ARCHIVE?: string; PROXY_TOKEN?: string; }
 type Ctx = { Bindings: Env };
 const SAFE_BOAT_SCHEMA = 'boat-venue-v2';
 const TICKET_MODEL_SCHEMA = 'ticket-selection-v1';
@@ -1501,43 +1501,41 @@ app.get('/ingest/experimental-trifecta/forecast-model',async c=>{
  const model=await first<any>(c.env.DB,"SELECT id,status,artifact_sha256 FROM experimental_models WHERE status IN ('candidate','experimental') ORDER BY registered_at DESC,id DESC LIMIT 1");
  return c.json({model:model?{modelId:model.id,artifactSha256:model.artifact_sha256}:null},200,{'Cache-Control':'private, no-store'});
 });
-app.post('/ingest/experimental-trifecta/forecast',async c=>{
- if(!auth(c))return jsonError(c,'unauthorized',401);
- if(Number(c.req.header('Content-Length')??0)>512_000)return jsonError(c,'experimental forecast exceeds the request size limit',413);
- const body=await c.req.json().catch(()=>null);
+function experimentalForecastStorageError(error:string,status=400){return {status,payload:{error}};}
+async function persistExperimentalForecast(db:Db,body:any,decisionAt=Date.now()):Promise<{status:number;payload:any}>{
  if(!isRecord(body)||body.schema!=='edgelab-experimental-trifecta-forecast-v1'||body.trainingMode!=='experimental'||body.experimentalOnly!==true
     ||body.ticketModelSchemaVersion!=='ticket-selection-v1'||body.ticketPredictionSemantics!=='exact-selection-probability-v1'
     ||body.boatFeatureSchemaVersion!=='boat-prerace-v2-no-weather-experimental-v1'||!isSha256(body.artifactSha256)
-    ||!Array.isArray(body.races)||body.races.length!==1) return jsonError(c,'experimental forecast envelope must contain exactly one race');
- const db=c.env.DB,model=await first<any>(db,'SELECT * FROM experimental_models WHERE id=?',body.modelId);
- if(!model||model.artifact_sha256!==body.artifactSha256)return jsonError(c,'experimental model or artifact SHA is not registered',409);
- const decisionAt=Date.now(),accepted:any[]=[];
+    ||!Array.isArray(body.races)||body.races.length!==1) return experimentalForecastStorageError('experimental forecast envelope must contain exactly one race');
+ const model=await first<any>(db,'SELECT * FROM experimental_models WHERE id=?',body.modelId);
+ if(!model||model.artifact_sha256!==body.artifactSha256)return experimentalForecastStorageError('experimental model or artifact SHA is not registered',409);
+ const accepted:any[]=[];
  for(const forecast of body.races){
    if(!isRecord(forecast)||typeof forecast.raceId!=='string'||typeof forecast.predictedAt!=='string'||!Number.isFinite(Date.parse(forecast.predictedAt))
-      ||Date.parse(forecast.predictedAt)>decisionAt||!Array.isArray(forecast.predictions)||forecast.predictions.length!==120) return jsonError(c,'experimental forecast timestamp or row count is invalid');
-   if(Date.parse(model.trained_at)>=Date.parse(forecast.predictedAt))return jsonError(c,'experimental forecast predates model training');
+      ||Date.parse(forecast.predictedAt)>decisionAt||!Array.isArray(forecast.predictions)||forecast.predictions.length!==120) return experimentalForecastStorageError('experimental forecast timestamp or row count is invalid');
+   if(Date.parse(model.trained_at)>=Date.parse(forecast.predictedAt))return experimentalForecastStorageError('experimental forecast predates model training');
    const race=await first<any>(db,'SELECT * FROM races WHERE id=?',forecast.raceId);
-   if(!race||race.sport!=='boat'||race.status!=='scheduled'||race.data_origin!=='real'||race.race_date!==jstRaceDate(new Date(decisionAt)))return jsonError(c,'experimental forecast race is not an eligible real race');
+   if(!race||race.sport!=='boat'||race.status!=='scheduled'||race.data_origin!=='real'||race.race_date!==jstRaceDate(new Date(decisionAt)))return experimentalForecastStorageError('experimental forecast race is not an eligible real race');
    const cutoffMs=Date.parse(race.betting_cutoff_at),observedMs=Date.parse(race.betting_cutoff_observed_at),forecastMs=Date.parse(forecast.predictedAt),targetMs=cutoffMs-PRIMARY_PAPER_OFFSET_MS;
    if(race.betting_cutoff_source!==TRUSTED_CUTOFF_SOURCE||!Number.isFinite(cutoffMs)||!Number.isFinite(observedMs)||observedMs>decisionAt+5_000
       ||decisionAt-observedMs>BOATRACE_CUTOFF_MAX_AGE_MS||decisionAt>targetMs+PRIMARY_PAPER_TOLERANCE_MS
       ||forecastMs>targetMs||forecastMs<targetMs-5*60_000)
-      return jsonError(c,'experimental forecast is outside a verified pre-cutoff prediction window');
+      return experimentalForecastStorageError('experimental forecast is outside a verified pre-cutoff prediction window');
    // Resolve the latest archive available at the model's actual prediction
    // time. A newer capture must not invalidate a valid point-in-time snapshot.
    const archiveRow=await first<any>(db,'SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin=\'real\' AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1',race.id,forecast.predictedAt);
-   if(!archiveRow||Date.parse(archiveRow.captured_at)>forecastMs||forecastMs-Date.parse(archiveRow.captured_at)>5*60_000)return jsonError(c,'official prerace archive is not fresh as of prediction time');
-   let archive:any;try{archive=JSON.parse(archiveRow.archive_json)}catch{return jsonError(c,'official prerace archive is invalid');}
+   if(!archiveRow||Date.parse(archiveRow.captured_at)>forecastMs||forecastMs-Date.parse(archiveRow.captured_at)>5*60_000)return experimentalForecastStorageError('official prerace archive is not fresh as of prediction time');
+   let archive:any;try{archive=JSON.parse(archiveRow.archive_json)}catch{return experimentalForecastStorageError('official prerace archive is invalid');}
    const lanes=await all<any>(db,'SELECT number,features_json FROM entries WHERE race_id=? AND data_origin=\'real\' ORDER BY number',race.id),numbers=lanes.map(x=>Number(x.number));
    if(numbers.length!==6||numbers.some((x,i)=>x!==i+1)||!experimentalArchiveEvidenceValid(archive,race,lanes)
       ||archive.trifectaOdds.capturedAt!==archiveRow.captured_at||Date.parse(archive.beforeinfo.capturedAt)>forecastMs
-      ||Date.parse(archive.raceList.capturedAt)>forecastMs||Date.parse(archive.trifectaOdds.capturedAt)>forecastMs)return jsonError(c,'official archive identity, six-lane, or complete odds provenance is invalid');
+      ||Date.parse(archive.raceList.capturedAt)>forecastMs||Date.parse(archive.trifectaOdds.capturedAt)>forecastMs)return experimentalForecastStorageError('official archive identity, six-lane, or complete odds provenance is invalid');
    const predictions=forecast.predictions;
    if(predictions.some((row:any)=>!isRecord(row)||!Number.isFinite(row.probability)||row.probability<0||row.probability>1||!Number.isFinite(row.prob_std)||row.prob_std<0)
-      ||!isCompleteTicketDistribution('trifecta',numbers,predictions.map((row:any)=>row.selection),predictions.map((row:any)=>Number(row.probability))))return jsonError(c,'experimental forecast is not a complete normalized exact-order distribution');
+      ||!isCompleteTicketDistribution('trifecta',numbers,predictions.map((row:any)=>row.selection),predictions.map((row:any)=>Number(row.probability))))return experimentalForecastStorageError('experimental forecast is not a complete normalized exact-order distribution');
    accepted.push({race,forecast,predictions});
  }
- if(!db.batch)return jsonError(c,'atomic experimental forecast storage is unavailable',503);
+ if(!db.batch)return experimentalForecastStorageError('atomic experimental forecast storage is unavailable',503);
  const statements:Statement[]=[];
  for(const item of accepted){
    const {race,forecast,predictions}=item;
@@ -1548,9 +1546,17 @@ app.post('/ingest/experimental-trifecta/forecast',async c=>{
        VALUES ${chunk.map(()=>"(?,?,?,?,?,?,?,?,?,'real')").join(',')} ON CONFLICT(race_id,model_id,selection,predicted_at) DO NOTHING`).bind(...values));
    }
  }
- if(!await reserveWorkerWrites(db,accepted.length*120)){const budget=await readWriteBudget(db);return c.json({error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget},429);}
+ if(!await reserveWorkerWrites(db,accepted.length*120)){const budget=await readWriteBudget(db);return {status:429,payload:{error:'daily D1 write budget unavailable or exhausted',code:budget.state==='missing'||budget.state==='invalid'?'d1_write_budget_unavailable':'d1_write_budget_exhausted',budget}};}
  await db.batch(statements);
- return c.json({experimentKey:'boat-trifecta-small-sample-v1',stored:accepted.map(x=>({raceId:x.race.id,modelId:model.id,predictedAt:x.forecast.predictedAt,predictionCount:120})),decision:'worker T-60 timing gate'});
+ return {status:200,payload:{experimentKey:'boat-trifecta-small-sample-v1',stored:accepted.map(x=>({raceId:x.race.id,modelId:model.id,predictedAt:x.forecast.predictedAt,predictionCount:120})),decision:'worker T-60 timing gate'}};
+}
+app.post('/ingest/experimental-trifecta/forecast',async c=>{
+ if(!auth(c))return jsonError(c,'unauthorized',401);
+ if(c.env.ENABLE_NATIVE_EXPERIMENTAL_FORECAST==='true')return jsonError(c,'worker native forecast generation is enabled',409);
+ if(Number(c.req.header('Content-Length')??0)>512_000)return jsonError(c,'experimental forecast exceeds the request size limit',413);
+ const body=await c.req.json().catch(()=>null);
+ const result=await persistExperimentalForecast(c.env.DB,body);
+ return c.json(result.payload,result.status as any);
 });
 app.get('/performance/experimental',async c=>{
  const db=c.env.DB,experimentKey='boat-trifecta-small-sample-v1';

@@ -1,0 +1,51 @@
+name: one-time native forecast input export
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: boat-native-forecast-input-export
+  cancel-in-progress: false
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: ml/requirements.txt
+      - name: Install pinned ML dependencies
+        run: python -m pip install -r ml/requirements.txt
+      - name: Set cache date
+        id: cache-date
+        run: echo "date=$(TZ=Asia/Tokyo date +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore shared forecast cache (read only)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/raw/boatrace
+            ml/data
+            ml/artifacts
+          key: daily-${{ runner.os }}-${{ steps.cache-date.outputs.date }}-${{ github.run_id }}
+          restore-keys: |
+            daily-${{ runner.os }}-
+      - name: Export pinned model and point-in-time native inputs
+        env:
+          PYTHONPATH: ml
+          EDGELAB_API_URL: https://roi-plus-api.suuu-sh.workers.dev
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+          EXPERIMENTAL_ARTIFACT_DIR: ml/artifacts
+          EXPERIMENTAL_STORE_PATH: ml/data/rows.json
+          NATIVE_EXPORT_DIR: native-forecast-input-export
+        run: python -u -m edgelab.native_forecast_input_export
+      - name: Upload one-time read-only export
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-forecast-input-export
+          path: native-forecast-input-export/
+          if-no-files-found: ignore
+          retention-days: 7
