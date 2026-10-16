@@ -45,8 +45,15 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str], label: str) -> st
             category = "other"
         codes = sorted(set(re.findall(r"\b(?:100\d{2}|101\d{2})\b", output)))
         statuses = sorted(set(re.findall(r"\bHTTP(?: status)?[ :]+([45]\d\d)\b", output)))
+        # Error 10027 includes a numeric account-side limit in some Wrangler
+        # responses. Extract only a number + unit, never the surrounding text.
+        size_limits = sorted(set(re.findall(
+            r"(?:size limit of|exceeded (?:the )?(?:worker )?size limit of|"
+            r"(?:worker )?exceeded the limit of|up to)\s*([0-9]+(?:\.[0-9]+)?\s*(?:MiB|MB|KiB|KB))",
+            output, flags=re.IGNORECASE)))
         suffix = (f"; cloudflare_code={','.join(codes)}" if codes else "")
         suffix += (f"; http_status={','.join(statuses)}" if statuses else "")
+        suffix += (f"; reported_size_limit={','.join(size_limits)}" if size_limits else "")
         print(f"{label}: failed (exit {result.returncode}; category={category}{suffix}); details suppressed",
               file=sys.stderr)
         raise SystemExit(1)
