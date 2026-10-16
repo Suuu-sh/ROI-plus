@@ -123,7 +123,8 @@ describe('daily Cloudflare source pipeline orchestration', () => {
       syncProgramFile: async (kind, targetDate) => { enterFirst(); await firstContinue;
         return { status: 'success', retryable: false, kind, targetDate, records: 1 }; }, log: () => undefined });
     await firstEntered;
-    const newInvocation = runDailyCloudPipeline(db, { now: () => firstAt + 100_000,
+    const secondAt = firstAt + 7 * 60_000;
+    const newInvocation = runDailyCloudPipeline(db, { now: () => secondAt,
       syncProgramFile: async (kind, targetDate) => { enterSecond(); await secondContinue;
         return { status: 'success', retryable: false, kind, targetDate, records: 2 }; }, log: () => undefined });
     await secondEntered;
@@ -131,9 +132,37 @@ describe('daily Cloudflare source pipeline orchestration', () => {
     await oldInvocation;
     const leaseRow = sqlite.prepare("SELECT value FROM settings WHERE key='daily_cloud_pipeline_lease_v1'").get() as { value: string };
     const lease = JSON.parse(leaseRow.value);
-    expect(lease.leaseUntil).toBe(firstAt + 100_000 + 90_000);
+    expect(lease.leaseUntil).toBe(secondAt + 6 * 60_000);
     continueSecond();
     await newInvocation;
+    sqlite.close();
+  });
+
+  it('publishes pending learner status during the call and keeps report outcome explicit', async () => {
+    const { sqlite, db } = createDb();
+    const now = Date.parse('2026-10-16T19:00:00Z'); // 04:00 JST
+    const state = {
+      schema: 'daily-cloud-pipeline-v1', date: '2026-10-17', updatedAt: new Date(now).toISOString(),
+      bToday: { kind: 'B', targetDate: '2026-10-17', state: 'success', attempts: 1,
+        lastAttemptAt: null, nextAttemptAt: null, reason: null, records: 20 },
+      kYesterday: { kind: 'K', targetDate: '2026-10-16', state: 'success', attempts: 1,
+        lastAttemptAt: null, nextAttemptAt: null, reason: null, records: 20 },
+      kToday: { kind: 'K', targetDate: '2026-10-17', state: 'pending', attempts: 0,
+        lastAttemptAt: null, nextAttemptAt: null, reason: null, records: 0 },
+      learning: { state: 'pending', attempts: 0, nextAttemptAt: null, updatedAt: null, reason: null },
+    };
+    sqlite.prepare('INSERT INTO settings(key,value) VALUES(?,?)').run('daily_cloud_pipeline_state_v1', JSON.stringify(state));
+    const result = await runDailyCloudPipeline(db, { now: () => now,
+      syncProgramFile: async (kind, targetDate) => ({ status: 'success', retryable: false, kind, targetDate, records: 1 }),
+      runLearning: async () => {
+        expect(await readDailyCloudPipelineStatus(db)).toMatchObject({ learning: { state: 'pending' } });
+        return { status: 'success', reportStatus: 'insufficient_data', candidateArtifactCreated: false };
+      }, log: () => undefined });
+    expect(result.outcome).toBe('learning-attempted');
+    expect(result.state.learning).toMatchObject({ state: 'success', reportStatus: 'insufficient_data', candidateArtifactCreated: false });
+    expect(await readDailyCloudPipelineStatus(db)).toMatchObject({ learning: {
+      state: 'success', reportStatus: 'insufficient_data', candidateArtifactCreated: false,
+    } });
     sqlite.close();
   });
 
