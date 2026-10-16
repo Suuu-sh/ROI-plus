@@ -250,3 +250,7 @@ resetはsnapshot全行と初期資金を同じatomic D1 batchの先頭で照合�
 R2は固定モデルID `boat-trifecta-historical-base-20261014` / version `2026-10-14.1` / source SHA-256 `b7688efcec865ce2bc9e770ec9e39631742481db5bc8a5f9b5a8b7ee2cbe0b3a` のBASE 13列・6艇・順序付き120確率を記録する。学習readerはWorker同梱モデルmetadataとの完全一致、`trainedAt <= predictedAt`、公式BファイルURL・本文SHA・実到着時刻、6艇rosterの公式archive証跡、T-60締切証跡、公式120組オッズ時刻を再検証する。特徴入力は`availableAt <= predictedAt`、確率は実際の`predictedAt`がT-60 targetの±10秒、購入判断用オッズは`requestedAt <= capturedAt <= observedAt`かつtargetの±10秒を満たす場合だけ受け入れる。オッズはBASE特徴量に混ぜず、推論後に取得されることもある。すべての時刻を後付けしない。結果・正確な三連単払戻は別の認証済み公式label exportから取得し、確定時刻が予測より後で全着順・勝者・払戻が一致するラベルだけを使用する。未保存・不完全・取得失敗は欠損のままcoverage reportに残し、全件収集を主張しない。
 
 週次処理はfingerprint付きの新規candidate artifactとActions reportだけを作る。通常registry、推論同期、予測、購入判断、live係数の変更はしない。同じsnapshotの候補artifactはartifact SHAを検証して再利用し、別snapshotは別IDにする。最低300のtraining raceと時間分離calibration/testがない場合は`insufficient_data` / `unqualified`とし、少ないデータから昇格資格・利益を主張しない。再学習candidateのtest結果と、元のR2保存確率の同じtest raceに対するproper scoreを別々に評価する。profitabilityは実際の時刻付きオッズと完全一致払戻が揃う場合以外は算出しない。Actionsには候補と監査manifestだけを保存し、R2 raw archive本体はartifact化しない。自動昇格・R2削除・TTL変更は行わない。
+
+### Python learner rollout status (2026-10-16)
+
+Private learner のローカル bundle 検査と空 D1 の workerd smoke test は成功したが、本番 upload は Cloudflare error 10027（reported limit 64 MiB）で拒否された。原因のサイズ算定差は未確定。稼働 API のデプロイを妨げないよう、自動 deploy と FORECAST_LEARNER binding は未接続に戻す。日次 B/K Cron は継続し、学習状態は unconfigured と表示する。既存 Actions の学習 schedule は停止していない。Containers は使わない。

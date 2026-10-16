@@ -62,12 +62,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      # The API Worker uses this service binding, so deploy its target first.
-      - name: Deploy Python learner Worker
-        run: UV=uv python3 scripts/build-python-learner.py --deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Private learner deployment remains pending remote size validation.
       - name: Deploy API Worker
         run: npm -w apps/api run deploy
         env:
