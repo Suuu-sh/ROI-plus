@@ -22,6 +22,48 @@ from edgelab.storage import DEFAULT_STORE, load_rows
 
 HISTORY_SCHEMA = "native-racer-history-v1"
 PARITY_SCHEMA = "native-forecast-python-parity-v1"
+_ENTRY_INPUT_FIELDS = ("race_id", "number", "data_origin", "available_at",
+                       "national_win_rate", "local_win_rate", "motor_2rate",
+                       "boat_2rate", "weight_carried", "racer_class")
+_ENTRY_FEATURE_JSON_FIELDS = ("racer_id", "age", "national_2rate", "local_2rate")
+_OBSERVATION_INPUT_FIELDS = ("race_id", "kind", "entry_number", "data_origin",
+                             "fetched_at", "available_at", "source_observed_at",
+                             "source_sha256", "source_url")
+_OBSERVATION_VALUE_FIELDS = ("exhibition_time", "tilt", "weight", "start_exhibition",
+                             "start_exhibition_course", "start_exhibition_false_start")
+
+
+def _feature_replay_input(race: Mapping[str, Any], entries: list[Mapping[str, Any]],
+                          observations: list[Mapping[str, Any]], predicted_at: str) -> dict[str, Any]:
+    """Keep only current-race fields consumed by the no-weather feature builder."""
+    safe_race = {key: race.get(key) for key in ("id", "race_date", "venue_id", "race_no", "data_origin")}
+    safe_entries = []
+    for entry in entries:
+        try:
+            extra = json.loads(entry.get("features_json") or "{}")
+        except (TypeError, ValueError):
+            extra = {}
+        if not isinstance(extra, dict):
+            extra = {}
+        safe_entries.append({**{key: entry.get(key) for key in _ENTRY_INPUT_FIELDS},
+                             "features_json": json.dumps(
+                                 {key: extra.get(key) for key in _ENTRY_FEATURE_JSON_FIELDS
+                                  if key in extra}, ensure_ascii=False, separators=(",", ":"))})
+    safe_observations = []
+    for observation in observations:
+        try:
+            values = json.loads(observation.get("values_json") or "{}")
+        except (TypeError, ValueError):
+            values = {}
+        if not isinstance(values, dict):
+            values = {}
+        safe_observations.append({**{key: observation.get(key) for key in _OBSERVATION_INPUT_FIELDS},
+                                  "values_json": json.dumps(
+                                      {key: values.get(key) for key in _OBSERVATION_VALUE_FIELDS
+                                       if key in values}, ensure_ascii=False, separators=(",", ":"))})
+    return {"race": safe_race, "entries": safe_entries,
+            "observations": safe_observations, "historyRaces": [],
+            "predictedAt": predicted_at}
 
 
 def _iso_utc(value: dt.datetime) -> str:
@@ -92,10 +134,13 @@ def _actual_parity_fixture(store: Mapping[str, Any], artifact: Mapping[str, Any]
             selected[lane] = (key, observation)
     captured = {str(lane): observation.get("fetched_at") or observation.get("available_at")
                 for lane, (_key, observation) in selected.items()}
+    replay_observations = [row for _key, row in selected.values()]
     return {
         "schema": PARITY_SCHEMA, "raceId": race_id,
         "raceDate": today, "predictedAt": predicted["predictedAt"],
         "captureTimesByLane": captured, "columns": columns,
+        "input": _feature_replay_input(race, entries, replay_observations,
+                                       predicted["predictedAt"]),
         "numbers": [int(row["number"]) for row in entries],
         "features": [[row.get(column) for column in columns] for row in features],
         "meanProbabilities": mean, "populationStdProbabilities": std,
