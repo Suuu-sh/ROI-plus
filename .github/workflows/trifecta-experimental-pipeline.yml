@@ -1,9 +1,6 @@
 name: trifecta experimental model pipeline
 on:
-  schedule:
-    - cron: '50 0 * * *' # 09:50 JST, learning only
-    - cron: '20 4 * * *' # 13:20 JST, learning only
-    - cron: '50 14 * * *' # 23:50 JST, learning only
+  # Daily candidate learning runs on Cloudflare Cron; manual research remains available.
   workflow_dispatch:
     inputs:
       mode:

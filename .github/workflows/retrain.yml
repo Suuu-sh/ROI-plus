@@ -1,7 +1,6 @@
 name: retrain models
 on:
-  schedule:
-    - cron: '41 2 * * 1'
+  # Daily candidate learning runs on Cloudflare Cron; manual research remains available.
   workflow_dispatch:
 permissions:
   contents: read

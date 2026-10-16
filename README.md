@@ -42,7 +42,7 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab feedback
 | `data/fixtures` | テスト用の合成ボートレースデータ（実データを含まない） |
 | `data/private_fixtures` | ローカル専用の公式データ置き場（Git 管理外） |
 
-実験三連単の予測は、登録済みモデルを照合して Worker 内で生成します（実レースfixtureでPython入力・確率を比較）。通常モデルの推論・稼働モデル学習は既存の Python 処理を引き続き使います。`ENABLE_NATIVE_DAILY_PIPELINE=true` の場合、別の5分 Worker Cron が公式 B/K を1ファイルずつ D1/R2 に同期し、大きな同期はR2 cursorから継続します。08:00 JST の B readiness deadline 後も当日内は bounded retry します。同期状況は `/api/collection/status` の `nativeDailyStatus` で確認できます。デプロイ済みの private Worker learner (`FORECAST_LEARNER`) は、実験候補 (`/learn`) と通常モデル候補 (`/learn/normal`) を別 invocation で生成します。通常候補はB当日・K前日の同期成功後だけ開始し、結果を `/api/collection/status` の `nativeNormalLearning` に報告します。両者とも隔離 candidate の生成だけで、registry登録・昇格・稼働モデル更新は行いません。通常候補は NumPy logistic であり、既存 LightGBM incumbent の置換・同等性を意味しません。既存の Actions 日次・学習 workflow も停止していません。
+実験三連単の予測は、登録済みモデルを照合して Worker 内で生成します（実レースfixtureでPython入力・確率を比較）。通常モデルの推論・稼働モデル学習は既存の Python 処理を引き続き使います。`ENABLE_NATIVE_DAILY_PIPELINE=true` の場合、別の5分 Worker Cron が公式 B/K を1ファイルずつ D1/R2 に同期し、大きな同期はR2 cursorから継続します。08:00 JST の B readiness deadline 後も当日内は bounded retry します。同期状況は `/api/collection/status` の `nativeDailyStatus` で確認できます。デプロイ済みの private Worker learner (`FORECAST_LEARNER`) は、実験候補 (`/learn`) と通常モデル候補 (`/learn/normal`) を別 invocation で生成します。通常候補はB当日・K前日の同期成功後だけ開始し、結果を `/api/collection/status` の `nativeNormalLearning` に報告します。両者とも隔離 candidate の生成だけで、registry登録・昇格・稼働モデル更新は行いません。通常候補は NumPy logistic であり、既存 LightGBM incumbent の置換・同等性を意味しません。旧 `retrain`・実験学習 workflow は手動実行のみです。通常予測を含む既存Actions日次処理と、別仕様の研究用候補workflowは残していますが、このB/K同期・日次候補学習の起動には依存しません。
 
 ## セットアップ
 
