@@ -173,16 +173,16 @@ describe('daily Cloudflare source pipeline orchestration', () => {
       bToday: { kind: 'B', targetDate: '2026-10-17', state: 'success', attempts: 1, records: 1 },
       kYesterday: { kind: 'K', targetDate: '2026-10-16', state: 'success', attempts: 1, records: 1 },
       kToday: { kind: 'K', targetDate: '2026-10-17', state: 'pending', attempts: 0, records: 0 },
-      learning: { state: 'failed', attempts: 4, reason: 'learning-service-unavailable', nextAttemptAt: null,
-        diagnosticRevision: 1, diagnostic: { stage: 'fit', errorClass: 'OtherError' } } };
+      learning: { state: 'failed', attempts: 5, reason: 'learning-service-unavailable', nextAttemptAt: null,
+        diagnosticRevision: 1, diagnostic: { stage: 'fit', errorClass: 'OtherError' }, recoveryRetryUsed: true } };
     sqlite.prepare('INSERT INTO settings(key,value) VALUES(?,?)').run('daily_cloud_pipeline_state_v1', JSON.stringify(legacy));
     let calls = 0;
     const options = { now: () => now, syncProgramFile: async (kind: 'B' | 'K', targetDate: string) => ({ status: 'success' as const, retryable: false, kind, targetDate, records: 1 }),
       runLearning: async () => { calls++; return { status: 'failed' as const, reason: 'learning-service-unavailable', retryable: true,
         diagnostic: { stage: 'fit', errorClass: 'ValueError' } }; }, log: () => undefined };
     const retried = await runDailyCloudPipeline(db, options);
-    expect(retried.state.learning).toMatchObject({ state: 'failed', attempts: 5, recoveryRetryUsed: true,
-      diagnosticRevision: 2, diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
+    expect(retried.state.learning).toMatchObject({ state: 'failed', attempts: 6, recoveryRetryUsed: true,
+      revision2RecoveryRetryUsed: true, diagnosticRevision: 2, diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
     expect(await readDailyCloudPipelineStatus(db)).toMatchObject({ learning: { diagnostic: { stage: 'fit', errorClass: 'ValueError' } } });
     const again = await runDailyCloudPipeline(db, { ...options, now: () => now + 5 * 60_000 });
     expect(again.outcome).toBe('idle');

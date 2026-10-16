@@ -25,6 +25,7 @@ export type NativeNormalLearningState = {
   diagnostic?: { stage: string; errorClass: string } | null;
   diagnosticRevision?: 1 | 2;
   recoveryRetryUsed?: boolean;
+  revision2RecoveryRetryUsed?: boolean;
 };
 
 export type NativeNormalLearningOutcome = 'outside-window' | 'busy' | 'waiting-sources' | 'idle' | 'attempted';
@@ -53,8 +54,8 @@ async function readState(db: Db, date: string): Promise<NativeNormalLearningStat
           && ['unconfigured', 'waiting_sources', 'pending', 'success', 'failed'].includes(state.state)) {
         if (state.state === 'failed' && state.reason === 'learning-service-unavailable'
             && state.diagnosticRevision === 1 && state.diagnostic?.stage === 'fit'
-            && state.diagnostic?.errorClass === 'OtherError' && state.recoveryRetryUsed !== true) {
-          state.state = 'pending'; state.nextAttemptAt = null; state.recoveryRetryUsed = true;
+            && state.diagnostic?.errorClass === 'OtherError' && state.revision2RecoveryRetryUsed !== true) {
+          state.state = 'pending'; state.nextAttemptAt = null; state.revision2RecoveryRetryUsed = true;
         } else if (state.state === 'failed' && state.reason === 'learning-service-unavailable'
             && state.diagnosticRevision == null && state.recoveryRetryUsed !== true) {
           state.state = 'pending'; state.nextAttemptAt = null; state.recoveryRetryUsed = true;
@@ -168,7 +169,8 @@ export async function runNativeNormalLearningPipeline(db: Db, options: {
     const attempts = state.attempts + 1;
     const reason = result.reason && SAFE_REASONS.has(result.reason) ? result.reason : 'learning-not-ready';
     const retry = result.status === 'failed' && result.retryable === true
-      && attempts < (state.recoveryRetryUsed ? MAX_ATTEMPTS + 1 : MAX_ATTEMPTS);
+      && attempts < (state.revision2RecoveryRetryUsed ? MAX_ATTEMPTS + 2
+        : state.recoveryRetryUsed ? MAX_ATTEMPTS + 1 : MAX_ATTEMPTS);
     state = { ...state, state: result.status === 'success' ? 'success' : retry ? 'pending' : 'failed', attempts,
       lastAttemptAt: new Date(timestamp).toISOString(), nextAttemptAt: retry ? retryAt(timestamp, attempts) : null,
       reason: result.status === 'success' ? null : reason,
@@ -176,6 +178,7 @@ export async function runNativeNormalLearningPipeline(db: Db, options: {
         ? result.diagnostic : null,
       diagnosticRevision: 2,
       recoveryRetryUsed: state.recoveryRetryUsed === true,
+      revision2RecoveryRetryUsed: state.revision2RecoveryRetryUsed === true,
       reportStatus: result.status === 'success' ? result.reportStatus ?? null : null,
       candidateArtifactCreated: result.status === 'success' && result.candidateArtifactCreated === true };
     await writeState(db, state, timestamp);

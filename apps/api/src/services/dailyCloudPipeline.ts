@@ -56,6 +56,7 @@ export type DailyLearningState = {
   diagnostic?: { stage: string; errorClass: string } | null;
   diagnosticRevision?: 1 | 2;
   recoveryRetryUsed?: boolean;
+  revision2RecoveryRetryUsed?: boolean;
 };
 
 export type DailyCloudPipelineState = {
@@ -127,9 +128,9 @@ function parseState(raw: string | undefined, date: string): DailyCloudPipelineSt
           // before durable private-learner diagnostics were available.
           if (state.learning?.state === 'failed' && state.learning.reason === 'learning-service-unavailable'
               && state.learning.diagnosticRevision === 1 && state.learning.diagnostic?.stage === 'fit'
-              && state.learning.diagnostic?.errorClass === 'OtherError' && state.learning.recoveryRetryUsed !== true) {
+              && state.learning.diagnostic?.errorClass === 'OtherError' && state.learning.revision2RecoveryRetryUsed !== true) {
             state.learning.state = 'pending'; state.learning.nextAttemptAt = null;
-            state.learning.recoveryRetryUsed = true;
+            state.learning.revision2RecoveryRetryUsed = true;
           } else if (state.learning?.state === 'failed' && state.learning.reason === 'learning-service-unavailable'
               && state.learning.diagnosticRevision == null && state.learning.recoveryRetryUsed !== true) {
             state.learning.state = 'pending'; state.learning.nextAttemptAt = null;
@@ -338,7 +339,7 @@ export async function runDailyCloudPipeline(db: Db, options: DailyCloudPipelineO
         const reason = safeReason(result.reason, 'learning-not-ready');
         const attempts = state.learning.attempts + 1;
         const willRetry = result.status === 'failed' && result.retryable === true
-          && attempts < (state.learning.recoveryRetryUsed ? 5 : 4);
+          && attempts < (state.learning.revision2RecoveryRetryUsed ? 6 : state.learning.recoveryRetryUsed ? 5 : 4);
         state.learning = { state: willRetry ? 'pending' : result.status, attempts,
           nextAttemptAt: willRetry ? new Date(timestamp + retryDelayMs(attempts, reason)).toISOString() : null,
           updatedAt: new Date(timestamp).toISOString(),
@@ -347,7 +348,8 @@ export async function runDailyCloudPipeline(db: Db, options: DailyCloudPipelineO
           candidateArtifactCreated: result.status === 'success' && result.candidateArtifactCreated === true,
           diagnostic: isSafeLearnerDiagnostic(result.diagnostic) ? result.diagnostic : null,
           diagnosticRevision: 2,
-          recoveryRetryUsed: state.learning.recoveryRetryUsed === true };
+          recoveryRetryUsed: state.learning.recoveryRetryUsed === true,
+          revision2RecoveryRetryUsed: state.learning.revision2RecoveryRetryUsed === true };
       } catch {
         const attempts = state.learning.attempts + 1, willRetry = attempts < 4;
         state.learning = { state: willRetry ? 'pending' : 'failed', attempts,
