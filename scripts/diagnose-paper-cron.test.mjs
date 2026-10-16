@@ -51,6 +51,24 @@ test('captures the five-minute watchdog invocation and only its fixed status fie
   ]);
 });
 
+test('captures only allowlisted native forecast storage proof fields', () => {
+  const payload = { eventTimestamp: '2026-10-16T04:35:00Z', logs: [{ level: 'info', message: [JSON.stringify({
+    event: 'experimental-forecast-native', source: 'worker-native', status: 'stored',
+    predictionCount: 120, raceId: 'boat-20261016-21-04', predictedAt: '2026-10-16T04:34:00Z',
+    token: 'never-forward', account_id: 'never-forward', rawError: 'never-forward',
+  })] }] };
+  assert.deepEqual(parseTailRecords([JSON.stringify(payload)]), [{
+    event: 'experimental-forecast-native', timestamp: '2026-10-16T04:35:00.000Z',
+    status: 'stored', source: 'worker-native', predictionCount: 120,
+    raceId: 'boat-20261016-21-04', predictedAt: '2026-10-16T04:34:00.000Z',
+  }]);
+  const invalid = parseTailRecords([JSON.stringify({ logs: [{ level: 'info', message: [JSON.stringify({
+    event: 'experimental-forecast-native', source: 'other', status: 'stored',
+    predictionCount: 121, raceId: 'private-id', predictedAt: 'bad-time',
+  })] }] })]);
+  assert.deepEqual(invalid, [{ event: 'experimental-forecast-native', timestamp: null, status: 'stored' }]);
+});
+
 test('allows only safe T-60 target fields from diagnostic log events', () => {
   const payload = { eventTimestamp: '2026-10-14T07:20:00Z', logs: [{ level: 'info', message: [JSON.stringify({
     event: 'paper-t60-target', status: 'skipped', reason: 't60-window-expired', pass: 'upcoming-t60',

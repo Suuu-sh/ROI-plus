@@ -42,7 +42,7 @@ PYTHONPATH=ml ml/.venv/bin/python -m edgelab feedback
 | `data/fixtures` | テスト用の合成ボートレースデータ（実データを含まない） |
 | `data/private_fixtures` | ローカル専用の公式データ置き場（Git 管理外） |
 
-推論は Workers 上では行わず、Python で予測した結果を `/api/ingest/*` 経由で D1 に反映します。
+実験三連単の予測は、登録済みモデルを照合して Worker 内で生成します（Python版との実データ一致を検証）。通常モデルの推論・学習・日次データ同期には既存の Python 処理を使います。
 
 ## セットアップ
 

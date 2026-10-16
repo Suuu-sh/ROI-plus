@@ -305,12 +305,10 @@ def test_experimental_workflow_schedules_learning_only_and_gates_registry_foreca
     assert "secrets.EDGELAB_API_URL" not in workflow
 
 
-def test_separate_minute_experimental_forecast_workflow_is_read_only_to_learning_state():
+def test_experimental_forecast_workflow_is_manual_or_called_not_scheduled():
     workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/trifecta-experimental-forecast.yml").read_text()
     schedule = (Path(__file__).resolve().parents[2] / ".github/workflows/daily.yml").read_text()
-    forecast_cron = "7,37 23,0-13 * * *"
-    assert f"cron: '{forecast_cron}'" in workflow
-    assert "08:07–22:37 JST" in workflow
+    assert "on:\n  schedule:" not in workflow
     assert "workflow_call:" in workflow
     assert "workflow_dispatch:" in workflow
     assert "7,37 23,0-13 * * *" not in schedule
@@ -319,10 +317,6 @@ def test_separate_minute_experimental_forecast_workflow_is_read_only_to_learning
     assert "boat-experimental-forecast-trigger" not in schedule
     assert "group: boat-experimental-forecast" in workflow
     assert "cancel-in-progress: false" in workflow
-    assert "Skip scheduled runs outside the JST market window" in workflow
-    assert "10#$hour < 8 || 10#$hour >= 23" in workflow
-    assert "Bound scheduled loop to the JST market window" in workflow
-    assert "remaining=$(( (23 - 10#$hour) * 60 - 10#$minute ))" in workflow
     assert "if: steps.window.outputs.active == 'true'" in workflow
     assert "if: steps.duration.outputs.active == 'true'" in workflow
     assert "actions/cache/restore@v4" in workflow
@@ -334,7 +328,7 @@ def test_separate_minute_experimental_forecast_workflow_is_read_only_to_learning
     assert "Register only" not in workflow
 
 
-def test_forecast_schedule_duration_respects_jst_market_window_boundaries():
+def test_manual_watchdog_dispatch_duration_respects_jst_market_window_boundaries():
     workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/trifecta-experimental-forecast.yml").read_text()
     step = workflow.split("      - name: Bound scheduled loop to the JST market window", 1)[1].split("      - name:", 1)[0]
     match = re.search(r"\n        run: \|\n((?:          .*\n)+)", step)
@@ -346,7 +340,8 @@ def test_forecast_schedule_duration_respects_jst_market_window_boundaries():
                                    ("00", "01", ("false", "0"))):
         with TemporaryDirectory() as directory:
             output = Path(directory) / "github-output"
-            env = {**os.environ, "GITHUB_EVENT_NAME": "schedule", "GITHUB_OUTPUT": str(output),
+            env = {**os.environ, "GITHUB_EVENT_NAME": "workflow_dispatch",
+                   "MARKET_WINDOW_ONLY": "true", "GITHUB_OUTPUT": str(output),
                    "TEST_HOUR": hour, "TEST_MINUTE": minute}
             clock = 'date(){ if [[ "$*" == *"+%H"* ]]; then printf "%s\\n" "$TEST_HOUR"; else printf "%s\\n" "$TEST_MINUTE"; fi; }\n'
             subprocess.run(["bash", "-c", clock + script], check=True, env=env, capture_output=True, text=True)

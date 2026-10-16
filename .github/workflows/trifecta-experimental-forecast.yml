@@ -1,8 +1,5 @@
 name: trifecta experimental forecast only
 on:
-  schedule:
-    # Independent daytime forecast runner (08:07–22:37 JST); GitHub schedules are best effort.
-    - cron: '7,37 23,0-13 * * *'
   workflow_call:
   workflow_dispatch:
     inputs:

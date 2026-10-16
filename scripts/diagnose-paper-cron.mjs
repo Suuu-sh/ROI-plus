@@ -10,7 +10,7 @@ export const CAPTURE_MS = 120_000;
 const MAX_EVENTS = 200;
 const MAX_BUFFER = 2 * 1024 * 1024;
 const TRUSTED_CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1';
-const allowedEvents = new Set(['paper-decision-timing','experimental-paper-decision','historical-trifecta-virtual-experiment','boat-ten-minute-results','boat-ten-minute-results-collection','paper-t60-target','forecast-github-watchdog']);
+const allowedEvents = new Set(['paper-decision-timing','experimental-paper-decision','historical-trifecta-virtual-experiment','boat-ten-minute-results','boat-ten-minute-results-collection','paper-t60-target','forecast-github-watchdog','experimental-forecast-native']);
 const reasonAllowlist = new Set([
   'official_entries_incomplete','experimental_forecast_missing_or_invalid','forecast_predates_model',
   'official_archive_missing_or_stale','official_archive_invalid','official_archive_identity_or_odds_invalid',
@@ -47,7 +47,17 @@ function safeEvent(value, timestamp, output) {
   if (!value || typeof value !== 'object' || !allowedEvents.has(value.event) || output.length >= MAX_EVENTS) return;
   const out = { event: value.event, timestamp };
   if (['success','partial','failed','skipped','ready','none','expired','unconfigured','outside-window','cooldown',
-    'active-run','dispatched','invalid-response','request-failed','http-rejected','lease-unavailable'].includes(value.status)) out.status = value.status;
+    'active-run','dispatched','invalid-response','request-failed','http-rejected','lease-unavailable',
+    'stored','storage-rejected','model-mismatch','generation-failed'].includes(value.status)) out.status = value.status;
+  if (value.event === 'experimental-forecast-native') {
+    if (value.source === 'worker-native') out.source = value.source;
+    if (Number.isInteger(value.predictionCount) && value.predictionCount >= 0 && value.predictionCount <= 120) {
+      out.predictionCount = value.predictionCount;
+    }
+    if (typeof value.raceId === 'string' && /^boat-\d{8}-\d{2}-\d{2}$/.test(value.raceId)) out.raceId = value.raceId;
+    const predictedAt = safeTimestamp(value.predictedAt);
+    if (predictedAt) out.predictedAt = predictedAt;
+  }
   if (value.event === 'forecast-github-watchdog'
       && ([401,403,404,422,429,500,502,503,504].includes(value.statusCode) || value.statusCode === 'other')) {
     out.statusCode = value.statusCode;

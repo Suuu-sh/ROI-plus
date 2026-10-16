@@ -24,6 +24,9 @@ import { splitRowsForD1 } from './services/d1Batch.js';
 import { boatArchiveEvidenceValid } from './services/boatArchiveEvidence.js';
 import { estimateIngestWriteUnits, estimateWorkerWriteUnits, readWriteBudget, reserveWriteBudget, reserveWriteBudgets, utcDate, type IngestTable, type WriteCategory } from './services/writeBudget.js';
 import { runForecastWatchdog } from './services/forecastWatchdog.js';
+import { runNativeExperimentalForecast, type NativeExperimentalHistorySnapshot } from './services/runNativeExperimentalForecast.js';
+import nativeExperimentalModel from './models/experimental-worker-model.json';
+import nativeRacerHistory from './models/native-racer-history.json';
 import type { Sport, DataOrigin, BetType, TicketCandidate } from '@edgelab/shared';
 
 interface Env { DB: Db; TRIFECTA_ARCHIVE?: R2Bucket; INGEST_TOKEN?: string; FORECAST_GITHUB_TOKEN?: string; ENABLE_NATIVE_EXPERIMENTAL_FORECAST?: string; ENABLE_AUTO_BET?: string; ENABLE_BOATRACE_ODDS_SCRAPE?: string; ENABLE_BOATRACE_TRIFECTA_ODDS_SCRAPE?: string; ENABLE_BOATRACE_RESULTS_SCRAPE?: string; ENABLE_HISTORICAL_TRIFECTA_ARCHIVE?: string; PROXY_TOKEN?: string; }
@@ -2009,6 +2012,7 @@ const waitForNextPaperT60Target=async(options:{
 };
 export default { fetch: app.fetch, scheduled: async (event: ScheduledController, env: Env, ctx?: ExecutionContext) => {
   if (event.cron === '*/5 * * * *') {
+    if(env.ENABLE_NATIVE_EXPERIMENTAL_FORECAST==='true')return;
     // Separate scheduled invocation keeps GitHub dispatch I/O out of the
     // minute-level T-60, odds, settlement, and shared fetch-budget path.
     await runForecastWatchdog(env.DB, env.FORECAST_GITHUB_TOKEN);
@@ -2024,7 +2028,17 @@ export default { fetch: app.fetch, scheduled: async (event: ScheduledController,
       const enabled=env.ENABLE_AUTO_BET==='true'||(await setting(env.DB,'auto_bet_enabled','false'))==='true';
       return enabled?autoBetWithReport(env.DB,true,Date.now(),oddsContext):null;
     },
-    experimental:()=>experimentalPaperDecision(env.DB,Date.now(),oddsContext),
+    experimental:async()=>{
+      if(env.ENABLE_NATIVE_EXPERIMENTAL_FORECAST==='true'){
+        try{
+          const generated=await runNativeExperimentalForecast(env.DB,nativeExperimentalModel,nativeRacerHistory as NativeExperimentalHistorySnapshot,{
+            storeForecast:body=>persistExperimentalForecast(env.DB,body),
+          });
+          if(generated.status==='model-mismatch')console.info(JSON.stringify({event:'experimental-forecast-native',source:'worker-native',status:'model-mismatch'}));
+        }catch{console.info(JSON.stringify({event:'experimental-forecast-native',source:'worker-native',status:'generation-failed'}));}
+      }
+      return experimentalPaperDecision(env.DB,Date.now(),oddsContext);
+    },
     historical:()=>historicalTrifectaExperimentDecision(env.DB,Date.now(),oddsContext),
   };
   const decisions=await runScheduledDecisionPasses(decisionWork,()=>waitForNextPaperT60Target({

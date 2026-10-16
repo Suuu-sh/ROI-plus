@@ -1265,6 +1265,16 @@ it('exports only bounded previous-day open real boat race IDs without writes',as
  expect(sqlite.prepare("SELECT value FROM settings WHERE key='roi_d1_write_budget_utc'").get()).toEqual(budgetBefore);
 });
 
+it('rejects external forecast submission after native inference is enabled without writing predictions',async()=>{
+ const before=sqlite.prepare('SELECT COUNT(*) n FROM experimental_ticket_predictions').get();
+ const response=await app.request('/api/ingest/experimental-trifecta/forecast',{
+  method:'POST',headers:{Authorization:'Bearer test-token','Content-Type':'application/json'},body:'{}',
+ },{...env(),ENABLE_NATIVE_EXPERIMENTAL_FORECAST:'true'});
+ expect(response.status).toBe(409);
+ expect(await response.json()).toEqual({error:'worker native forecast generation is enabled'});
+ expect(sqlite.prepare('SELECT COUNT(*) n FROM experimental_ticket_predictions').get()).toEqual(before);
+});
+
 it('keeps the experimental trifecta model and performance ledger separate from normal models',async()=>{
  const normalBefore=Number((await (await app.request('/api/performance/overview',{},env())).json() as any).betCount);
  const modelId='boat-trifecta-exp-fixture',artifactSha='d'.repeat(64),trainedAt=jstIso(Date.now()-60_000);
