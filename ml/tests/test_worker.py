@@ -11,6 +11,7 @@ import pytest
 
 from src.worker import (MAX_RACES, _result_proof, _raise_stage_failure, handle_learning, handle_normal_learning,
                         load_training_store, persist_candidate_artifacts, _internal_error_response,
+                        _safe_failure_diagnostic,
                         _log_safe_failure)
 
 
@@ -119,6 +120,8 @@ def test_safe_worker_failure_log_contains_only_fixed_stage_and_exception_class(c
     _log_safe_failure("unknown-request-path", type("OddFailure", (Exception,), {})())
     assert json.loads(capsys.readouterr().out.strip()) == {
         "event": "learner_failure", "stage": "response", "errorClass": "OtherError"}
+    assert _safe_failure_diagnostic("fit", ModuleNotFoundError("sensitive module path")) == {
+        "stage": "fit", "errorClass": "ModuleNotFoundError"}
     with pytest.raises(RuntimeError) as caught:
         _raise_stage_failure("load-cohort", RuntimeError("sensitive detail"))
     _log_safe_failure(caught.value.stage, caught.value.original)

@@ -475,8 +475,12 @@ _FAILURE_STAGES = frozenset({
     "feature-build", "fit", "persist-candidate", "persist-report", "response",
 })
 _ERROR_CLASSES = frozenset({
-    "AttributeError", "ImportError", "IndexError", "KeyError", "MemoryError",
-    "OverflowError", "RuntimeError", "TimeoutError", "TypeError", "ValueError",
+    "AssertionError", "AttributeError", "FileNotFoundError", "ImportError",
+    "FloatingPointError", "IndexError", "IsADirectoryError", "KeyError", "LinAlgError", "MemoryError",
+    "ModuleNotFoundError", "NotADirectoryError", "NotImplementedError",
+    "OSError", "OverflowError", "PermissionError", "RuntimeError",
+    "StopIteration", "TimeoutError", "TypeError", "ValueError", "ZeroDivisionError",
+    "ZoneInfoNotFoundError",
 })
 
 

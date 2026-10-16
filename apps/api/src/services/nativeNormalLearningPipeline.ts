@@ -9,7 +9,7 @@ const LEASE_MS = 6 * 60_000;
 const MAX_ATTEMPTS = 4;
 const SAFE_REASONS = new Set(['learning-not-ready', 'learning-service-unavailable', 'learning-already-running']);
 const SAFE_STAGES = new Set(['request-json', 'experimental-learn', 'normal-learn', 'lease', 'load-cohort', 'feature-build', 'fit', 'persist-candidate', 'persist-report', 'response']);
-const SAFE_ERRORS = new Set(['AttributeError', 'ImportError', 'IndexError', 'KeyError', 'MemoryError', 'OverflowError', 'RuntimeError', 'TimeoutError', 'TypeError', 'ValueError', 'OtherError']);
+const SAFE_ERRORS = new Set(['AssertionError', 'AttributeError', 'FileNotFoundError', 'FloatingPointError', 'ImportError', 'IndexError', 'IsADirectoryError', 'KeyError', 'LinAlgError', 'MemoryError', 'ModuleNotFoundError', 'NotADirectoryError', 'NotImplementedError', 'OSError', 'OverflowError', 'PermissionError', 'RuntimeError', 'StopIteration', 'TimeoutError', 'TypeError', 'ValueError', 'ZoneInfoNotFoundError', 'ZeroDivisionError', 'OtherError']);
 
 export type NativeNormalLearningState = {
   schema: 'native-normal-learning-v1';
@@ -23,7 +23,7 @@ export type NativeNormalLearningState = {
   reportStatus: 'candidate' | 'insufficient_data' | null;
   candidateArtifactCreated: boolean;
   diagnostic?: { stage: string; errorClass: string } | null;
-  diagnosticRevision?: 1;
+  diagnosticRevision?: 1 | 2;
   recoveryRetryUsed?: boolean;
 };
 
@@ -52,7 +52,11 @@ async function readState(db: Db, date: string): Promise<NativeNormalLearningStat
       if (state.schema === 'native-normal-learning-v1' && state.date === date
           && ['unconfigured', 'waiting_sources', 'pending', 'success', 'failed'].includes(state.state)) {
         if (state.state === 'failed' && state.reason === 'learning-service-unavailable'
-            && state.diagnosticRevision !== 1 && state.recoveryRetryUsed !== true) {
+            && state.diagnosticRevision === 1 && state.diagnostic?.stage === 'fit'
+            && state.diagnostic?.errorClass === 'OtherError' && state.recoveryRetryUsed !== true) {
+          state.state = 'pending'; state.nextAttemptAt = null; state.recoveryRetryUsed = true;
+        } else if (state.state === 'failed' && state.reason === 'learning-service-unavailable'
+            && state.diagnosticRevision == null && state.recoveryRetryUsed !== true) {
           state.state = 'pending'; state.nextAttemptAt = null; state.recoveryRetryUsed = true;
         }
         return state;
@@ -100,7 +104,7 @@ export async function readNativeNormalLearningStatus(db: Db, now = Date.now()): 
     nextAttemptAt: state.nextAttemptAt && Number.isFinite(Date.parse(state.nextAttemptAt)) ? state.nextAttemptAt : null,
     reason: state.reason && (SAFE_REASONS.has(state.reason) || state.reason === 'source-data-not-ready'
       || state.reason === 'learning-service-not-configured') ? state.reason : null,
-    diagnosticRevision: state.diagnosticRevision === 1 ? 1 : null,
+    diagnosticRevision: state.diagnosticRevision === 1 || state.diagnosticRevision === 2 ? state.diagnosticRevision : null,
     diagnostic: state.diagnostic && SAFE_STAGES.has(state.diagnostic.stage) && SAFE_ERRORS.has(state.diagnostic.errorClass)
       ? { stage: state.diagnostic.stage, errorClass: state.diagnostic.errorClass } : null,
     reportStatus: state.reportStatus === 'candidate' || state.reportStatus === 'insufficient_data' ? state.reportStatus : null,
@@ -170,7 +174,7 @@ export async function runNativeNormalLearningPipeline(db: Db, options: {
       reason: result.status === 'success' ? null : reason,
       diagnostic: result.diagnostic && SAFE_STAGES.has(result.diagnostic.stage) && SAFE_ERRORS.has(result.diagnostic.errorClass)
         ? result.diagnostic : null,
-      diagnosticRevision: 1,
+      diagnosticRevision: 2,
       recoveryRetryUsed: state.recoveryRetryUsed === true,
       reportStatus: result.status === 'success' ? result.reportStatus ?? null : null,
       candidateArtifactCreated: result.status === 'success' && result.candidateArtifactCreated === true };

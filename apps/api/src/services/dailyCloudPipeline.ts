@@ -54,7 +54,7 @@ export type DailyLearningState = {
   reportStatus?: 'candidate' | 'insufficient_data' | null;
   candidateArtifactCreated?: boolean;
   diagnostic?: { stage: string; errorClass: string } | null;
-  diagnosticRevision?: 1;
+  diagnosticRevision?: 1 | 2;
   recoveryRetryUsed?: boolean;
 };
 
@@ -126,7 +126,12 @@ function parseState(raw: string | undefined, date: string): DailyCloudPipelineSt
           // One bounded migration retry for a terminal transient failure written
           // before durable private-learner diagnostics were available.
           if (state.learning?.state === 'failed' && state.learning.reason === 'learning-service-unavailable'
-              && state.learning.diagnosticRevision !== 1 && state.learning.recoveryRetryUsed !== true) {
+              && state.learning.diagnosticRevision === 1 && state.learning.diagnostic?.stage === 'fit'
+              && state.learning.diagnostic?.errorClass === 'OtherError' && state.learning.recoveryRetryUsed !== true) {
+            state.learning.state = 'pending'; state.learning.nextAttemptAt = null;
+            state.learning.recoveryRetryUsed = true;
+          } else if (state.learning?.state === 'failed' && state.learning.reason === 'learning-service-unavailable'
+              && state.learning.diagnosticRevision == null && state.learning.recoveryRetryUsed !== true) {
             state.learning.state = 'pending'; state.learning.nextAttemptAt = null;
             state.learning.recoveryRetryUsed = true;
           }
@@ -144,7 +149,7 @@ function safeReason(reason: string | undefined, fallback: string): string {
 }
 
 const SAFE_LEARNER_STAGES = new Set(['request-json', 'experimental-learn', 'normal-learn', 'lease', 'load-cohort', 'feature-build', 'fit', 'persist-candidate', 'persist-report', 'response']);
-const SAFE_LEARNER_ERRORS = new Set(['AttributeError', 'ImportError', 'IndexError', 'KeyError', 'MemoryError', 'OverflowError', 'RuntimeError', 'TimeoutError', 'TypeError', 'ValueError', 'OtherError']);
+const SAFE_LEARNER_ERRORS = new Set(['AssertionError', 'AttributeError', 'FileNotFoundError', 'FloatingPointError', 'ImportError', 'IndexError', 'IsADirectoryError', 'KeyError', 'LinAlgError', 'MemoryError', 'ModuleNotFoundError', 'NotADirectoryError', 'NotImplementedError', 'OSError', 'OverflowError', 'PermissionError', 'RuntimeError', 'StopIteration', 'TimeoutError', 'TypeError', 'ValueError', 'ZoneInfoNotFoundError', 'ZeroDivisionError', 'OtherError']);
 function isSafeLearnerDiagnostic(value: unknown): value is { stage: string; errorClass: string } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const diagnostic = value as Record<string, unknown>;
@@ -212,7 +217,7 @@ export async function readDailyCloudPipelineStatus(db: Db): Promise<Record<strin
         reason: value.learning?.reason ? safeReason(value.learning.reason, 'learning-not-ready') : null,
         reportStatus: value.learning?.reportStatus === 'candidate' || value.learning?.reportStatus === 'insufficient_data' ? value.learning.reportStatus : null,
         candidateArtifactCreated: value.learning?.candidateArtifactCreated === true,
-        diagnosticRevision: value.learning?.diagnosticRevision === 1 ? 1 : null,
+        diagnosticRevision: value.learning?.diagnosticRevision === 1 || value.learning?.diagnosticRevision === 2 ? value.learning.diagnosticRevision : null,
         diagnostic: isSafeLearnerDiagnostic(value.learning?.diagnostic) ? value.learning?.diagnostic : null } };
   } catch { return null; }
 }
@@ -341,7 +346,7 @@ export async function runDailyCloudPipeline(db: Db, options: DailyCloudPipelineO
           reportStatus: result.status === 'success' ? result.reportStatus ?? null : null,
           candidateArtifactCreated: result.status === 'success' && result.candidateArtifactCreated === true,
           diagnostic: isSafeLearnerDiagnostic(result.diagnostic) ? result.diagnostic : null,
-          diagnosticRevision: 1,
+          diagnosticRevision: 2,
           recoveryRetryUsed: state.learning.recoveryRetryUsed === true };
       } catch {
         const attempts = state.learning.attempts + 1, willRetry = attempts < 4;

@@ -94,7 +94,7 @@ describe('native normal daily learner', () => {
         diagnostic: { stage: 'fit', errorClass: 'ValueError' } };
     } });
     expect(recovered.state).toMatchObject({ state: 'failed', attempts: 5, recoveryRetryUsed: true,
-      diagnosticRevision: 1, diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
+      diagnosticRevision: 2, diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
     expect(await readNativeNormalLearningStatus(db, now)).toMatchObject({ diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
     await runNativeNormalLearningPipeline(db, { now: () => now + 5 * 60_000, runLearning: async () => { calls++; return { status: 'success' }; } });
     expect(calls).toBe(1);

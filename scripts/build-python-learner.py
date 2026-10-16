@@ -100,9 +100,9 @@ def smoke_test(project: Path, wrangler: Path, env: dict[str, str]) -> None:
                     invalid_status, invalid_body = post(route, {"date": "2000-01-01", "confirmed": True})
                     good_status, good_body = post(route, {"date": today, "confirmed": True})
                     if invalid_status != 200 or invalid_body.get("reason") != "request_confirmation_invalid":
-                        raise RuntimeError("local_worker_invalid_rejection_failed")
+                        raise RuntimeError(f"local_worker_invalid_rejection_failed:{invalid_status}")
                     if good_status != 200 or good_body.get("status") != "insufficient_data":
-                        raise RuntimeError("local_worker_empty_response_failed")
+                        raise RuntimeError(f"local_worker_empty_response_failed:{good_status}")
                 routes_passed = True
                 break
             except (URLError, TimeoutError, ConnectionError):
@@ -126,20 +126,57 @@ def smoke_test(project: Path, wrangler: Path, env: dict[str, str]) -> None:
     # can fit and return diagnostics in workerd.
     fit_smoke = project / "src" / "numpy_fit_smoke.py"
     fit_smoke.write_text('''import json
+import tempfile
+from pathlib import Path
 import numpy as np
-from edgelab.models.numpy_logistic import NumpyLogisticRegression
+from edgelab.features.boat import TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS
+from edgelab.models import trifecta
+from edgelab.models.trifecta_coverage import _t60_cutoff
+from edgelab.importers import experimental_result_labels
 from workers import WorkerEntrypoint, Response
 
 class Default(WorkerEntrypoint):
     async def fetch(self, request):
-        x = np.asarray([[-2., 0.], [-1., 1.], [-1., 0.], [0., 1.], [0., -1.],
-                        [1., 0.], [1., -1.], [2., 0.], [2., 1.], [-2., -1.]])
-        y = np.asarray([0, 0, 0, 0, 1, 1, 1, 1, 1, 0])
-        model = NumpyLogisticRegression(C=0.25, fit_intercept=False,
-                                        max_iter=1000, tol=1e-8).fit(x, y)
-        result = {"status": "fit_ok", "converged": bool(model.converged_),
-                  "finite": bool(np.isfinite(model.coef_).all()),
-                  "gradientInfinityNorm": float(model.gradient_norm_)}
+        race_id = "boat-20261015-01-01"
+        day = "2026-10-15"
+        rows = []
+        for lane in range(1, 7):
+            row = {column: float(lane) / 10.0 for column in TRIFECTA_NO_WEATHER_EXPERIMENTAL_FEATURE_COLUMNS}
+            row.update({"lane": lane, "race_id": race_id, "race_date": day, "number": lane,
+                        "finish_order": lane, "data_origin": "real",
+                        "available_at": day + "T10:00:00+09:00",
+                        "predicted_at": day + "T10:01:00+09:00"})
+            rows.append(row)
+        evidence = {"raceId": race_id, "completeResult": True, "verifiedT60Cutoff": True,
+                    "sixEntryAvailability": True, "sourceArrivalVerified": True,
+                    "freshExhibitionLanes": [1, 2, 3, 4, 5, 6],
+                    "completeT60Odds": True, "consistentPayout": True, "freshWeather": False}
+        trifecta.audit_trifecta_coverage = lambda *args, **kwargs: {"races": [evidence],
+                                                                   "finishedRealBoatRaces": 1}
+        experimental_result_labels.verified_experimental_result_race_ids = lambda store: {race_id}
+        try:
+            verified_cutoff, _ = _t60_cutoff({"id": race_id, "race_date": day, "venue_id": "01", "race_no": 1,
+                "status": "finished", "data_origin": "real", "post_time": day + "T11:20:00+09:00",
+                "betting_cutoff_at": day + "T11:00:00+09:00",
+                "betting_cutoff_source": "boatrace-racelist-cutoff-v1",
+                "betting_cutoff_observed_at": day + "T10:55:00+09:00"})
+            if verified_cutoff is None:
+                raise ValueError("synthetic_cutoff_smoke_failed")
+            with tempfile.TemporaryDirectory() as directory:
+                report = trifecta.train_trifecta_experimental(rows, {}, model_id="workerd-fit-smoke",
+                    artifact_dir=Path(directory), estimator_backend="numpy-newton")
+                result = {"status": "fit_ok" if report.get("artifactCreated") is True else "fit_failed",
+                          "converged": bool(report.get("estimatorFit", {}).get("primary", {}).get("converged")),
+                          "finite": bool(np.isfinite(report.get("estimatorFit", {}).get("primary", {}).get("objectiveValue", float("nan")))),
+                          "artifactFiles": len(list(Path(directory).iterdir()))}
+        except Exception as error:
+            known = {"AssertionError", "AttributeError", "FileNotFoundError", "FloatingPointError",
+                     "ImportError", "IndexError", "IsADirectoryError", "KeyError", "LinAlgError", "MemoryError", "ModuleNotFoundError",
+                     "NotADirectoryError", "NotImplementedError", "OSError", "OverflowError",
+                     "PermissionError", "RuntimeError", "TimeoutError", "TypeError", "ValueError",
+                     "ZeroDivisionError", "ZoneInfoNotFoundError"}
+            error_name = type(error).__name__
+            result = {"status": "fit_failed", "errorClass": error_name if error_name in known else "OtherError"}
         return Response(json.dumps(result), status=200,
                         headers={"content-type": "application/json"})
 ''', encoding="utf-8")
@@ -161,9 +198,20 @@ class Default(WorkerEntrypoint):
             while time.monotonic() < deadline and fit_process.poll() is None:
                 try:
                     status, body = post_fit(fit_port)
-                    if (status != 200 or body.get("status") != "fit_ok"
-                            or body.get("converged") is not True or body.get("finite") is not True):
-                        raise RuntimeError("local_numpy_fit_smoke_failed")
+                    if status != 200:
+                        raise RuntimeError(f"local_trainer_http_error:{status}")
+                    if body.get("status") != "fit_ok":
+                        error_name = body.get("errorClass")
+                        known = {"AssertionError", "AttributeError", "FileNotFoundError", "FloatingPointError",
+                                 "ImportError", "IndexError", "IsADirectoryError", "KeyError", "LinAlgError", "MemoryError", "ModuleNotFoundError",
+                                 "NotADirectoryError", "NotImplementedError", "OSError", "OverflowError",
+                                 "PermissionError", "RuntimeError", "TimeoutError", "TypeError", "ValueError",
+                    "StopIteration", "ZeroDivisionError", "ZoneInfoNotFoundError", "OtherError"}
+                        error_name = error_name if error_name in known else "OtherError"
+                        raise RuntimeError(f"local_trainer_fit_smoke_failed:{error_name}")
+                    if (status != 200 or body.get("converged") is not True
+                            or body.get("finite") is not True or body.get("artifactFiles") != 3):
+                        raise RuntimeError("local_trainer_fit_smoke_invalid")
                     break
                 except (URLError, TimeoutError, ConnectionError):
                     time.sleep(0.25)
@@ -187,7 +235,11 @@ def post_fit(port: int) -> tuple[int, dict[str, object]]:
         with urlopen(request, timeout=5) as response:
             return response.status, __import__("json").loads(response.read())
     except HTTPError as error:
-        return error.code, __import__("json").loads(error.read())
+        try:
+            body = __import__("json").loads(error.read())
+        except Exception:
+            body = {"status": "non_json"}
+        return error.code, body
 
 
 def main() -> int:
@@ -250,12 +302,48 @@ def main() -> int:
             try:
                 smoke_test(project, wrangler, env)
             except Exception as error:
-                reason = str(error) if str(error) in {
+                safe_error = str(error)
+                trainer_error = (safe_error.split(":", 1)[1] if safe_error.startswith("local_trainer_fit_smoke_failed:") else None)
+                if trainer_error not in {"AssertionError", "AttributeError", "FileNotFoundError", "ImportError",
+                    "IndexError", "IsADirectoryError", "KeyError", "MemoryError", "ModuleNotFoundError",
+                    "NotADirectoryError", "NotImplementedError", "OSError", "OverflowError", "PermissionError",
+                    "RuntimeError", "StopIteration", "TimeoutError", "TypeError", "ValueError", "ZeroDivisionError",
+                    "ZoneInfoNotFoundError", "OtherError"}:
+                    trainer_error = None
+                reason = safe_error if safe_error in {
                     "local_worker_smoke_failed", "local_numpy_fit_smoke_failed",
                     "local_worker_invalid_rejection_failed", "local_worker_empty_response_failed",
                     "local_worker_process_exited", "local_worker_not_ready"
                 } else "local_worker_smoke_failed"
-                print(f"local workerd smoke test failed; stage={reason}", file=sys.stderr)
+                if safe_error.startswith("local_worker_invalid_rejection_failed:"):
+                    http_status = safe_error.rsplit(":", 1)[1]
+                    if not http_status.isdigit(): http_status = "unknown"
+                    print(f"local workerd smoke test failed; stage=learner-invalid-request httpStatus={http_status}", file=sys.stderr)
+                    return 1
+                if safe_error.startswith("local_worker_empty_response_failed:"):
+                    http_status = safe_error.rsplit(":", 1)[1]
+                    if not http_status.isdigit(): http_status = "unknown"
+                    print(f"local workerd smoke test failed; stage=learner-current-date httpStatus={http_status}", file=sys.stderr)
+                    return 1
+                if safe_error.startswith("local_trainer_http_error:"):
+                    http_status = safe_error.rsplit(":", 1)[1]
+                    if not http_status.isdigit(): http_status = "unknown"
+                    print(f"local workerd smoke test failed; stage=trainer-endpoint httpStatus={http_status}", file=sys.stderr)
+                    return 1
+                if safe_error == "local_trainer_fit_smoke_invalid":
+                    print("local workerd smoke test failed; stage=trainer-fit invalid-result", file=sys.stderr)
+                elif trainer_error:
+                    print(f"local workerd smoke test failed; stage=trainer-fit errorClass={trainer_error}", file=sys.stderr)
+                else:
+                    error_name = type(error).__name__
+                    safe_class = error_name if error_name in {
+                        "AssertionError", "AttributeError", "FileNotFoundError", "FloatingPointError",
+                        "ImportError", "IndexError", "IsADirectoryError", "KeyError", "LinAlgError",
+                        "MemoryError", "ModuleNotFoundError", "NotADirectoryError", "NotImplementedError",
+                        "OSError", "OverflowError", "PermissionError", "RuntimeError", "StopIteration",
+                        "TimeoutError", "TypeError", "ValueError", "ZeroDivisionError", "ZoneInfoNotFoundError",
+                    } else "OtherError"
+                    print(f"local workerd smoke test failed; stage={reason} errorClass={safe_class}", file=sys.stderr)
                 return 1
             print("local workerd smoke test passed")
         if args.deploy:

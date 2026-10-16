@@ -17,7 +17,7 @@ export type NativeLearnerResult = {
 };
 
 const INTERNAL_STAGES = new Set(['request-json', 'experimental-learn', 'normal-learn', 'lease', 'load-cohort', 'feature-build', 'fit', 'persist-candidate', 'persist-report', 'response']);
-const INTERNAL_ERRORS = new Set(['AttributeError', 'ImportError', 'IndexError', 'KeyError', 'MemoryError', 'OverflowError', 'RuntimeError', 'TimeoutError', 'TypeError', 'ValueError', 'OtherError']);
+const INTERNAL_ERRORS = new Set(['AssertionError', 'AttributeError', 'FileNotFoundError', 'FloatingPointError', 'ImportError', 'IndexError', 'IsADirectoryError', 'KeyError', 'LinAlgError', 'MemoryError', 'ModuleNotFoundError', 'NotADirectoryError', 'NotImplementedError', 'OSError', 'OverflowError', 'PermissionError', 'RuntimeError', 'StopIteration', 'TimeoutError', 'TypeError', 'ValueError', 'ZoneInfoNotFoundError', 'ZeroDivisionError', 'OtherError']);
 
 function internalDiagnostic(report: Record<string, unknown> | null): NativeLearnerResult['diagnostic'] {
   if (report?.reason !== 'learner_internal_error' || !report.diagnostic || typeof report.diagnostic !== 'object' || Array.isArray(report.diagnostic)) return undefined;

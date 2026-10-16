@@ -166,14 +166,15 @@ describe('daily Cloudflare source pipeline orchestration', () => {
     sqlite.close();
   });
 
-  it('allows exactly one bounded recovery attempt for a pre-diagnostic terminal learner failure', async () => {
+  it('allows exactly one bounded revision-2 recovery attempt for the known fit diagnostic', async () => {
     const { sqlite, db } = createDb();
     const now = Date.parse('2026-10-16T19:00:00Z');
     const legacy = { schema: 'daily-cloud-pipeline-v1', date: '2026-10-17', updatedAt: new Date(now).toISOString(),
       bToday: { kind: 'B', targetDate: '2026-10-17', state: 'success', attempts: 1, records: 1 },
       kYesterday: { kind: 'K', targetDate: '2026-10-16', state: 'success', attempts: 1, records: 1 },
       kToday: { kind: 'K', targetDate: '2026-10-17', state: 'pending', attempts: 0, records: 0 },
-      learning: { state: 'failed', attempts: 4, reason: 'learning-service-unavailable', nextAttemptAt: null } };
+      learning: { state: 'failed', attempts: 4, reason: 'learning-service-unavailable', nextAttemptAt: null,
+        diagnosticRevision: 1, diagnostic: { stage: 'fit', errorClass: 'OtherError' } } };
     sqlite.prepare('INSERT INTO settings(key,value) VALUES(?,?)').run('daily_cloud_pipeline_state_v1', JSON.stringify(legacy));
     let calls = 0;
     const options = { now: () => now, syncProgramFile: async (kind: 'B' | 'K', targetDate: string) => ({ status: 'success' as const, retryable: false, kind, targetDate, records: 1 }),
@@ -181,7 +182,7 @@ describe('daily Cloudflare source pipeline orchestration', () => {
         diagnostic: { stage: 'fit', errorClass: 'ValueError' } }; }, log: () => undefined };
     const retried = await runDailyCloudPipeline(db, options);
     expect(retried.state.learning).toMatchObject({ state: 'failed', attempts: 5, recoveryRetryUsed: true,
-      diagnosticRevision: 1, diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
+      diagnosticRevision: 2, diagnostic: { stage: 'fit', errorClass: 'ValueError' } });
     expect(await readDailyCloudPipelineStatus(db)).toMatchObject({ learning: { diagnostic: { stage: 'fit', errorClass: 'ValueError' } } });
     const again = await runDailyCloudPipeline(db, { ...options, now: () => now + 5 * 60_000 });
     expect(again.outcome).toBe('idle');
