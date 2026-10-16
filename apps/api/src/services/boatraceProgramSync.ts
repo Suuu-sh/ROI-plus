@@ -201,8 +201,9 @@ export async function syncBoatraceProgramFile(db: Db, bucket: R2Bucket, schedule
     const reservation=await db.prepare(`INSERT INTO settings(key,value) VALUES('boatrace-program-last-request-at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(settings.value AS INTEGER)<=CAST(excluded.value AS INTEGER)-?`).bind(String(requestAt),gap).run();
     if(reservation.meta?.changes!==1)return outcome('skipped','source-rate-limited',kind,date,0,true);
     const day=date.replaceAll('-',''),yyMMdd=day.slice(2);url=`https://www1.mbrace.or.jp/od2/${kind}/${day.slice(0,6)}/${kind.toLowerCase()}${yyMMdd}.lzh`;
-    let response:Response;try{response=await fetcher(url,{headers:{'User-Agent':'EdgeLab/0.1 (official Boatrace downloadable data collector)','Accept':'application/octet-stream'},redirect:'error'});}catch{return outcome('failed','source-fetch-failed',kind,date,0,true);}
+    let response:Response;try{response=await fetcher(url,{headers:{'User-Agent':'EdgeLab/0.1 (official Boatrace downloadable data collector)','Accept':'application/octet-stream'},redirect:'manual'});}catch{return outcome('failed','source-fetch-failed',kind,date,0,true);}
     fetchedAt=isoNow(now());
+    if((response.status>=300&&response.status<400)||response.redirected||response.type==='opaqueredirect'){await response.body?.cancel().catch(()=>undefined);return{...outcome('failed','source-redirect-rejected',kind,date,0,false),fetchedAt};}
     if(response.status===404){await response.body?.cancel().catch(()=>undefined);return{...outcome('skipped','source-not-published',kind,date,0,true),fetchedAt};}
     if(!response.ok){await response.body?.cancel().catch(()=>undefined);return{...outcome('failed',response.status===403?'source-forbidden':response.status>=500?'source-server-error':'source-http-error',kind,date,0,response.status===403||response.status===408||response.status===429||response.status>=500),fetchedAt};}
     const declared=Number(response.headers.get('content-length')??0);if(declared>MAX_ARCHIVE_BYTES){await response.body?.cancel().catch(()=>undefined);return{...outcome('failed','archive-size-invalid',kind,date,0,false),fetchedAt};}

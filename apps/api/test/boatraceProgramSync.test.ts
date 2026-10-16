@@ -103,4 +103,20 @@ describe('Worker B/K program parser', () => {
     expect((sqlite.prepare("SELECT COUNT(*) AS count FROM races WHERE race_date='2026-10-17'").get() as any).count).toBe(60);
     sqlite.close();
   });
+
+  it('uses manual redirects, rejects redirect responses without retry, and retains global pacing', async () => {
+    const {sqlite,db}=createDb();
+    const now=Date.parse('2026-10-16T01:00:00Z'); // 10:00 JST
+    const fetcher=vi.fn(async(_input:RequestInfo|URL,_init?:RequestInit)=>new Response(null,{status:302,headers:{Location:'https://www1.mbrace.or.jp/'} }));
+    const options={now:()=>now,fetch:fetcher as typeof fetch};
+    const bucket={} as R2Bucket;
+    const first=await syncBoatraceProgramFile(db,bucket,new Date(now),'B',options);
+    expect(first).toMatchObject({status:'failed',reason:'source-redirect-rejected',retryable:false});
+    expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe('manual');
+    const paced=await syncBoatraceProgramFile(db,bucket,new Date(now),'B',options);
+    expect(paced).toMatchObject({status:'skipped',reason:'source-rate-limited',retryable:true});
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect((sqlite.prepare("SELECT value FROM settings WHERE key='boatrace-program-last-request-at'").get() as any).value).toBe(String(now));
+    sqlite.close();
+  });
 });

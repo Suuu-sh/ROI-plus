@@ -2,20 +2,22 @@ import { first, run, type Db } from '../repo/db.js';
 
 const STATE_KEY = 'daily_cloud_pipeline_state_v1';
 const LEASE_KEY = 'daily_cloud_pipeline_lease_v1';
-const LEASE_MS = 90_000;
+// Native learner CPU is bounded at five minutes; hold the daily lease beyond
+// that to prevent the next five-minute Cron from starting a duplicate call.
+const LEASE_MS = 6 * 60_000;
 const B_START_MINUTE = 3 * 60;
 const B_DEADLINE_MINUTE = 8 * 60;
 const K_TODAY_START_MINUTE = 23 * 60 + 30;
 const K_DAY_DEADLINE_MINUTE = 23 * 60 + 30;
 const SAFE_REASONS = new Set([
   'source-not-published', 'source-forbidden', 'source-fetch-failed', 'source-server-error',
-  'source-http-error', 'source-invalid', 'source-already-current', 'source-rate-limited',
+  'source-http-error', 'source-invalid', 'source-already-current', 'source-rate-limited', 'source-redirect-rejected',
   'invalid-schedule', 'archive-size-invalid', 'archive-parse-rejected',
   'source-archive-write-failed', 'database-write-failed',
   'source-sync-in-progress',
   'd1-write-failed', 'd1-write-budget-exhausted',
   'identity-rejected', 'parse-rejected', 'source-sync-failed', 'deadline-missed',
-  'learning-service-not-configured', 'learning-not-ready', 'learning-failed', 'learning-service-unavailable',
+  'learning-service-not-configured', 'learning-not-ready', 'learning-failed', 'learning-service-unavailable', 'learning-already-running',
 ]);
 
 export type ProgramFileSyncResult = {
@@ -49,6 +51,8 @@ export type DailyLearningState = {
   nextAttemptAt: string | null;
   updatedAt: string | null;
   reason: string | null;
+  reportStatus?: 'candidate' | 'insufficient_data' | null;
+  candidateArtifactCreated?: boolean;
 };
 
 export type DailyCloudPipelineState = {
@@ -61,7 +65,8 @@ export type DailyCloudPipelineState = {
   learning: DailyLearningState;
 };
 
-export type DailyLearningResult = { status: 'success' | 'skipped' | 'failed'; reason?: string; retryable?: boolean };
+export type DailyLearningResult = { status: 'success' | 'skipped' | 'failed'; reason?: string; retryable?: boolean;
+  reportStatus?: 'candidate' | 'insufficient_data'; candidateArtifactCreated?: boolean };
 export type DailyCloudPipelineOutcome = 'outside-window' | 'busy' | 'idle' | 'source-attempted' | 'learning-attempted';
 
 export interface DailyCloudPipelineOptions {
@@ -103,7 +108,7 @@ function initialState(date: string, prior?: DailyCloudPipelineState): DailyCloud
     bToday: newStep('B', date), kYesterday: carriedK ?? newStep('K', yesterday),
     kToday: newStep('K', date),
     learning: { state: 'unconfigured', attempts: 0, nextAttemptAt: null,
-      updatedAt: null, reason: 'learning-service-not-configured' },
+      updatedAt: null, reason: 'learning-service-not-configured', reportStatus: null, candidateArtifactCreated: false },
   };
 }
 
@@ -127,6 +132,7 @@ function safeReason(reason: string | undefined, fallback: string): string {
 
 function retryDelayMs(attempts: number, reason: string): number {
   if (reason === 'source-sync-in-progress') return 60_000;
+  if (reason === 'learning-already-running') return 15 * 60_000;
   // A missing daily source is polled less aggressively than a transient error.
   if (reason === 'source-not-published') return 15 * 60_000;
   if (reason === 'source-forbidden') return Math.min(60, 15 * 2 ** Math.min(attempts - 1, 2)) * 60_000;
@@ -180,7 +186,9 @@ export async function readDailyCloudPipelineStatus(db: Db): Promise<Record<strin
       bToday: step(value.bToday), kYesterday: step(value.kYesterday), kToday: step(value.kToday),
       learning: { state: learningState, attempts: Number.isSafeInteger(value.learning?.attempts) && value.learning.attempts >= 0 ? value.learning.attempts : 0,
         updatedAt: typeof value.learning?.updatedAt === 'string' && Number.isFinite(Date.parse(value.learning.updatedAt)) ? value.learning.updatedAt : null,
-        reason: value.learning?.reason ? safeReason(value.learning.reason, 'learning-not-ready') : null } };
+        reason: value.learning?.reason ? safeReason(value.learning.reason, 'learning-not-ready') : null,
+        reportStatus: value.learning?.reportStatus === 'candidate' || value.learning?.reportStatus === 'insufficient_data' ? value.learning.reportStatus : null,
+        candidateArtifactCreated: value.learning?.candidateArtifactCreated === true } };
   } catch { return null; }
 }
 
@@ -193,9 +201,14 @@ async function writeState(db: Db, state: DailyCloudPipelineState, timestamp: num
 function markDeadline(step: DailyStepState, deadline: number, timestamp: number) {
   if (step.kind === 'B' && step.state === 'pending' && timestamp >= deadline) {
     step.deadlineMissed = true;
-    if (!step.nextAttemptAt) {
-      step.reason = 'deadline-missed';
-      step.nextAttemptAt = new Date(timestamp + 60 * 60_000).toISOString();
+    if (step.attempts === 0) {
+      // Recover states written by the old deadline handler: no source attempt
+      // has happened, so do not make commissioning wait for its stale 1h timer.
+      if (!step.reason) step.reason = 'deadline-missed';
+      step.nextAttemptAt = new Date(timestamp).toISOString();
+    } else if (!step.nextAttemptAt) {
+      if (!step.reason) step.reason = 'deadline-missed';
+      step.nextAttemptAt = new Date(step.attempts === 0 ? timestamp : timestamp + 60 * 60_000).toISOString();
     }
   } else if (step.state === 'pending' && timestamp >= deadline) {
     step.state = 'missing'; step.reason = 'deadline-missed'; step.nextAttemptAt = null;
@@ -214,7 +227,7 @@ function updateStep(step: DailyStepState, outcome: ProgramFileSyncResult, timest
   const reason = safeReason(outcome.reason, outcome.status === 'success' ? 'source-already-current' : 'source-sync-failed');
   if (outcome.sourceSha256 && /^[a-f0-9]{64}$/.test(outcome.sourceSha256)) step.sourceSha256 = outcome.sourceSha256;
   if (outcome.fetchedAt && Number.isFinite(Date.parse(outcome.fetchedAt))) step.fetchedAt = outcome.fetchedAt;
-  step.reason = outcome.status === 'success' ? null : (step.deadlineMissed ? 'deadline-missed' : reason);
+  step.reason = outcome.status === 'success' ? null : reason;
   if (outcome.status === 'success') {
     step.state = 'success'; step.nextAttemptAt = null;
     return;
@@ -286,6 +299,10 @@ export async function runDailyCloudPipeline(db: Db, options: DailyCloudPipelineO
     } else if (options.runLearning && state.kYesterday.state === 'success'
         && state.learning.state === 'pending'
         && (!state.learning.nextAttemptAt || Date.parse(state.learning.nextAttemptAt) <= timestamp)) {
+      // Publish pending status before a potentially five-minute service call.
+      state.learning.updatedAt = new Date(timestamp).toISOString();
+      state.learning.reason = null;
+      await writeState(db, state, timestamp);
       try {
         const result = await options.runLearning(state.date, new Date(timestamp));
         const reason = safeReason(result.reason, 'learning-not-ready');
@@ -294,18 +311,20 @@ export async function runDailyCloudPipeline(db: Db, options: DailyCloudPipelineO
         state.learning = { state: willRetry ? 'pending' : result.status, attempts,
           nextAttemptAt: willRetry ? new Date(timestamp + retryDelayMs(attempts, reason)).toISOString() : null,
           updatedAt: new Date(timestamp).toISOString(),
-          reason: result.status === 'success' ? null : reason };
+          reason: result.status === 'success' ? null : reason,
+          reportStatus: result.status === 'success' ? result.reportStatus ?? null : null,
+          candidateArtifactCreated: result.status === 'success' && result.candidateArtifactCreated === true };
       } catch {
         const attempts = state.learning.attempts + 1, willRetry = attempts < 4;
         state.learning = { state: willRetry ? 'pending' : 'failed', attempts,
           nextAttemptAt: willRetry ? new Date(timestamp + retryDelayMs(attempts, 'learning-failed')).toISOString() : null,
-          updatedAt: new Date(timestamp).toISOString(), reason: 'learning-failed' };
+          updatedAt: new Date(timestamp).toISOString(), reason: 'learning-failed', reportStatus: null, candidateArtifactCreated: false };
       }
       outcome = 'learning-attempted';
     } else {
       state.learning = options.runLearning ? state.learning
         : { state: 'unconfigured', attempts: 0, nextAttemptAt: null,
-          updatedAt: null, reason: 'learning-service-not-configured' };
+          updatedAt: null, reason: 'learning-service-not-configured', reportStatus: null, candidateArtifactCreated: false };
     }
     await writeState(db, state, timestamp);
     log(JSON.stringify({ event: 'daily-cloud-pipeline', status: outcome,

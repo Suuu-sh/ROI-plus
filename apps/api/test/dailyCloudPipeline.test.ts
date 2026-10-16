@@ -70,16 +70,41 @@ describe('daily Cloudflare source pipeline orchestration', () => {
     const missed = await runDailyCloudPipeline(db, { now: () => now,
       syncProgramFile: async (kind, targetDate) => ({ status: 'failed', reason: 'source-not-published',
         retryable: true, kind, targetDate, records: 0 }), log: () => undefined });
-    expect(missed.state.bToday).toMatchObject({ state: 'pending', deadlineMissed: true, reason: 'deadline-missed' });
-    expect(missed.state.bToday.nextAttemptAt).toBe('2026-10-16T00:00:00.000Z');
+    expect(missed.state.bToday).toMatchObject({ state: 'pending', deadlineMissed: true, reason: 'source-not-published', attempts: 1 });
+    expect(missed.state.bToday.nextAttemptAt).toBe('2026-10-15T23:15:00.000Z');
     now = Date.parse('2026-10-16T00:00:00Z'); // 09:00 JST: commissioning/recovery remains possible
     const recovered = await runDailyCloudPipeline(db, { now: () => now,
       syncProgramFile: async (kind, targetDate) => ({ status: 'success', retryable: false,
         kind, targetDate, records: 48 }), log: () => undefined });
-    expect(recovered.state.bToday).toMatchObject({ state: 'success', deadlineMissed: true, attempts: 1, records: 48 });
+    expect(recovered.state.bToday).toMatchObject({ state: 'success', deadlineMissed: true, attempts: 2, records: 48 });
     const status = await readDailyCloudPipelineStatus(db);
     expect(status).toMatchObject({ bToday: { state: 'success', deadlineMissed: true } });
     expect(JSON.stringify(status)).not.toContain('sourceSha256');
+    sqlite.close();
+  });
+
+  it('immediately retries legacy B readiness-only state instead of honoring its stale one-hour timer', async () => {
+    const { sqlite, db } = createDb();
+    const now = Date.parse('2026-10-16T06:25:00Z'); // 15:25 JST
+    const staleState = {
+      schema: 'daily-cloud-pipeline-v1', date: '2026-10-16', updatedAt: '2026-10-16T06:20:00Z',
+      bToday: { kind: 'B', targetDate: '2026-10-16', state: 'pending', attempts: 0,
+        lastAttemptAt: null, nextAttemptAt: '2026-10-16T07:25:00.000Z', reason: 'deadline-missed', deadlineMissed: true, records: 0 },
+      kYesterday: { kind: 'K', targetDate: '2026-10-15', state: 'pending', attempts: 0,
+        lastAttemptAt: null, nextAttemptAt: null, reason: null, records: 0 },
+      kToday: { kind: 'K', targetDate: '2026-10-16', state: 'pending', attempts: 0,
+        lastAttemptAt: null, nextAttemptAt: null, reason: null, records: 0 },
+      learning: { state: 'unconfigured', attempts: 0, nextAttemptAt: null, updatedAt: null, reason: 'learning-service-not-configured' },
+    };
+    sqlite.prepare('INSERT INTO settings(key,value) VALUES(?,?)').run('daily_cloud_pipeline_state_v1', JSON.stringify(staleState));
+    const calls: string[] = [];
+    const result = await runDailyCloudPipeline(db, { now: () => now,
+      syncProgramFile: async (kind, targetDate) => { calls.push(kind + targetDate);
+        return { status: 'failed', reason: 'source-fetch-failed', retryable: true, kind, targetDate, records: 0 }; },
+      log: () => undefined });
+    expect(calls).toEqual(['B2026-10-16']);
+    expect(result.state.bToday).toMatchObject({ state: 'pending', attempts: 1, deadlineMissed: true, reason: 'source-fetch-failed' });
+    expect(result.state.bToday.nextAttemptAt).toBe('2026-10-16T06:30:00.000Z');
     sqlite.close();
   });
 
