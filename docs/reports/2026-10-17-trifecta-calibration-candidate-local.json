@@ -1,0 +1,49 @@
+{
+  "schema": "trifecta-ensemble-calibration-candidate-v1",
+  "candidateOnly": true,
+  "promotionEligible": false,
+  "evaluationQualified": false,
+  "profitabilityProven": false,
+  "artifactCreated": false,
+  "temperatureGrid": [
+    0.4,
+    0.55,
+    0.7,
+    0.85,
+    1.0,
+    1.2,
+    1.5,
+    2.0,
+    3.0
+  ],
+  "uncertaintyInterpretation": "between-fit spread only; excludes structural bias and calibration error",
+  "splitUnit": "whole_race_date",
+  "partitions": {
+    "train": {
+      "nRaces": 0,
+      "dates": []
+    },
+    "calibration": {
+      "nRaces": 0,
+      "dates": []
+    },
+    "test": {
+      "nRaces": 0,
+      "dates": []
+    }
+  },
+  "status": "insufficient_data",
+  "reason": "requires_300_train_100_calibration_100_test_and_two_dates_each",
+  "inputEvidence": {
+    "source": "local_ml_store_only; not production D1",
+    "sourceRelativePath": "ml/data/rows.json",
+    "sourceSha256": "93512738f423d71e60f1425712e5bf700010b92a86d028064c3840c33304da4b",
+    "realRaceRows": 15588,
+    "verifiedResultRaceUpperBound": 0,
+    "eligibilityProof": "mandatory_verified_result_ids_empty; admissible_training_cohort_empty",
+    "fullCoverageAuditPerformed": false,
+    "evaluationProjection": "empty admissible cohort, not zero actual source coverage",
+    "fullFeatureExtractionCompleted": false,
+    "remoteAccessPerformed": false
+  }
+}

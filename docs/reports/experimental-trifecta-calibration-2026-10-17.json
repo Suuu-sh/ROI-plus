@@ -1,0 +1,207 @@
+{
+  "counts": {
+    "open": 5,
+    "records": 146,
+    "settled_valid": 137,
+    "void_or_reconciled": 4
+  },
+  "limitations": [
+    "placed-ticket selection bias",
+    "tickets within a race are dependent",
+    "no full 120-selection forecast distribution in this endpoint",
+    "odds implied probabilities include market overround and are not calibrated labels"
+  ],
+  "maxSettledRaceSelectedProbabilitySum": 0.728873578888794,
+  "metrics": {
+    "brier": 0.016909382147953653,
+    "expectedHits": 11.088560880424557,
+    "hitRate": 0.0072992700729927005,
+    "hits": 1.0,
+    "logLoss": 0.09996173752590683,
+    "meanBreakEvenProbability": 0.012772522721020021,
+    "meanOdds": 217.34963503649635,
+    "meanPredictedProbability": 0.08093840058704056,
+    "observedMinusPredicted": -0.07363913051404786
+  },
+  "models": {
+    "boat-trifecta-exp-noweather-20261013-10559e2c79ce": {
+      "expectedHits": 11.088560880424557,
+      "hitRate": 0.0072992700729927005,
+      "hits": 1.0,
+      "meanPredictedProbability": 0.08093840058704056,
+      "races": 81,
+      "tickets": 137
+    }
+  },
+  "n": 137,
+  "oddsReliability": [
+    {
+      "bin": "03x",
+      "meanImpliedProbability": 0.08641536273115219,
+      "meanOdds": 12.15,
+      "meanPredicted": 0.22029090759204978,
+      "n": 2,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "04x",
+      "meanImpliedProbability": 0.035927968582077856,
+      "meanOdds": 28.115384615384617,
+      "meanPredicted": 0.2039797687047646,
+      "n": 13,
+      "observedHitRate": 0.07692307692307693
+    },
+    {
+      "bin": "05x",
+      "meanImpliedProbability": 0.019820582233961652,
+      "meanOdds": 52.3,
+      "meanPredicted": 0.0914851416156939,
+      "n": 26,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "06x",
+      "meanImpliedProbability": 0.011479013774017355,
+      "meanOdds": 90.93928571428572,
+      "meanPredicted": 0.07161209994228195,
+      "n": 28,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "07x",
+      "meanImpliedProbability": 0.005685050577599787,
+      "meanOdds": 182.5205882352941,
+      "meanPredicted": 0.05525544575432263,
+      "n": 34,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "08x",
+      "meanImpliedProbability": 0.0028281638413898158,
+      "meanOdds": 364.95599999999996,
+      "meanPredicted": 0.06261384075609332,
+      "n": 25,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "09x",
+      "meanImpliedProbability": 0.0013748243503837673,
+      "meanOdds": 759.1,
+      "meanPredicted": 0.025270277323709643,
+      "n": 4,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "10x",
+      "meanImpliedProbability": 0.0008027135105538964,
+      "meanOdds": 1266.25,
+      "meanPredicted": 0.014377022192672104,
+      "n": 4,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "11x",
+      "meanImpliedProbability": 0.0004878048780487805,
+      "meanOdds": 2050.0,
+      "meanPredicted": 0.0098692190717533,
+      "n": 1,
+      "observedHitRate": 0.0
+    }
+  ],
+  "performanceComparison": {
+    "actual": {
+      "payout": 2250,
+      "profit": -33850,
+      "roi": 0.062326869806094184,
+      "stake": 36100,
+      "tickets": 137
+    },
+    "excludedRaceCount": 2,
+    "fixed100": {
+      "payout": 2250,
+      "profit": -11450,
+      "roi": 0.16423357664233576,
+      "stake": 13700,
+      "tickets": 137
+    },
+    "pendingRaceCount": 2,
+    "settledRaceCount": 81
+  },
+  "performanceMetrics": {
+    "bets": 146,
+    "payout": 2250,
+    "profit": -33850,
+    "races": 85,
+    "roi": 0.062326869806094184,
+    "stake": 38900
+  },
+  "probabilityReliabilityDeciles": [
+    {
+      "bin": "0",
+      "meanImpliedProbability": 0.008450054395574327,
+      "meanOdds": 271.4084210526316,
+      "meanPredicted": 0.04013918122665177,
+      "n": 95,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "1",
+      "meanImpliedProbability": 0.020726058205429436,
+      "meanOdds": 94.84666666666666,
+      "meanPredicted": 0.1416740580891666,
+      "n": 30,
+      "observedHitRate": 0.03333333333333333
+    },
+    {
+      "bin": "2",
+      "meanImpliedProbability": 0.029011430719825405,
+      "meanOdds": 70.01,
+      "meanPredicted": 0.22620360952069726,
+      "n": 10,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "3",
+      "meanImpliedProbability": 0.002397506593143131,
+      "meanOdds": 417.1,
+      "meanPredicted": 0.3038037651237375,
+      "n": 1,
+      "observedHitRate": 0.0
+    },
+    {
+      "bin": "4",
+      "meanImpliedProbability": 0.03278688524590164,
+      "meanOdds": 30.5,
+      "meanPredicted": 0.45927706088693177,
+      "n": 1,
+      "observedHitRate": 0.0
+    }
+  ],
+  "probabilitySemantics": "exact-selection probability for one ordered trifecta",
+  "provenance": {
+    "betsEndpoint": "/api/bets/experimental",
+    "betsSha256": "7f738513566a59420e9d3472e97c7b8380ae7cd2b8bdec98302bc8278a4dd702",
+    "observedAt": "2026-10-17T10:14:15+09:00",
+    "performanceEndpoint": "/api/performance/experimental",
+    "performanceSha256": "db1544269a95c1f04dcf5607a70d9e96037fb83559e3ad20084168a309319cce"
+  },
+  "raceClusterUncertainty": {
+    "brier95Percentile": [
+      0.008613915456761156,
+      0.028742060205394288
+    ],
+    "method": "percentile bootstrap resampling race clusters with replacement",
+    "observedMinusPredicted95Percentile": [
+      -0.09274034212437508,
+      -0.052440575392368204
+    ],
+    "samples": 2000
+  },
+  "races": 81,
+  "settledRaceGroupShape": {
+    "maxCombinedStake": 1000.0,
+    "maxTickets": 5,
+    "racesOver1000Stake": 0,
+    "racesOver10Tickets": 0
+  }
+}
