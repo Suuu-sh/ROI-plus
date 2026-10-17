@@ -1,0 +1,265 @@
+{
+  "status": "insufficient_data",
+  "candidateOnly": true,
+  "registered": false,
+  "promoted": false,
+  "promotionEligible": false,
+  "probabilityStatus": "UNCALIBRATED",
+  "cutoffEvidence": "explicit_observed_at",
+  "objective": "monthly positive-profit frequency subject to JPY 10000 loss tolerance",
+  "fullyObservedMonths": 0,
+  "monthlyPositiveProfitFrequency": null,
+  "winner": null,
+  "observedRaceDates": [
+    "2026-10-14",
+    "2026-10-15",
+    "2026-10-16",
+    "2026-10-17"
+  ],
+  "policy": {
+    "stake": 100,
+    "perRaceCap": 1000,
+    "monthlyGrossStakeCap": 10000,
+    "initialBankroll": 100000,
+    "monthBoundary": "prior-month open exposure at month start permanently consumes this month allowance; no release or winnings recycling",
+    "profitAttribution": "purchase-month cohort; not settlement-calendar profit",
+    "riskPolicy": "no_recycling_gross_stake_proxy; unresolved stakes remain reserved",
+    "tieBreak": "purchase timestamp, race ID, selection lexicographic",
+    "holdoutBoundary": "2026-11-01T00:00:00+09:00",
+    "selectionGate": "no winner before at least 3 future fully observed complete calendar months"
+  },
+  "candidates": [
+    {
+      "minRawProbability": null,
+      "maxOdds": null,
+      "conservativePositiveRoiGate": false,
+      "months": {
+        "2026-10": {
+          "tickets": 100,
+          "races": 56,
+          "grossStake": 10000,
+          "settledTickets": 100,
+          "voidTickets": 0,
+          "hits": 1,
+          "realizedProfit": -7750.0,
+          "unresolvedStake": 0,
+          "budgetRejectedTickets": 51,
+          "carriedMonthStartExposure": 0,
+          "maxRealizedNetLoss": 7750.0,
+          "maxSettlementDrawdown": 9400.0,
+          "worstCaseProfit": -7750.0,
+          "hitRate": 0.01,
+          "monthlyObservation": "partial_not_monthly_evidence"
+        }
+      },
+      "settlementCalendarMonths": {
+        "2026-10": {
+          "profit": -7750.0,
+          "settledTickets": 100
+        }
+      },
+      "rejected": {}
+    },
+    {
+      "minRawProbability": 0.05,
+      "maxOdds": 20,
+      "conservativePositiveRoiGate": true,
+      "months": {
+        "2026-10": {
+          "tickets": 4,
+          "races": 4,
+          "grossStake": 400,
+          "settledTickets": 4,
+          "voidTickets": 2,
+          "hits": 0,
+          "realizedProfit": -200.0,
+          "unresolvedStake": 0,
+          "budgetRejectedTickets": 0,
+          "carriedMonthStartExposure": 0,
+          "maxRealizedNetLoss": 200.0,
+          "maxSettlementDrawdown": 200.0,
+          "worstCaseProfit": -200.0,
+          "hitRate": 0.0,
+          "monthlyObservation": "partial_not_monthly_evidence"
+        }
+      },
+      "settlementCalendarMonths": {
+        "2026-10": {
+          "profit": -200.0,
+          "settledTickets": 4
+        }
+      },
+      "rejected": {}
+    },
+    {
+      "minRawProbability": 0.05,
+      "maxOdds": 50,
+      "conservativePositiveRoiGate": true,
+      "months": {
+        "2026-10": {
+          "tickets": 27,
+          "races": 24,
+          "grossStake": 2700,
+          "settledTickets": 27,
+          "voidTickets": 2,
+          "hits": 1,
+          "realizedProfit": -250.0,
+          "unresolvedStake": 0,
+          "budgetRejectedTickets": 0,
+          "carriedMonthStartExposure": 0,
+          "maxRealizedNetLoss": 250.0,
+          "maxSettlementDrawdown": 2300.0,
+          "worstCaseProfit": -250.0,
+          "hitRate": 0.04,
+          "monthlyObservation": "partial_not_monthly_evidence"
+        }
+      },
+      "settlementCalendarMonths": {
+        "2026-10": {
+          "profit": -250.0,
+          "settledTickets": 27
+        }
+      },
+      "rejected": {}
+    },
+    {
+      "minRawProbability": 0.1,
+      "maxOdds": 20,
+      "conservativePositiveRoiGate": true,
+      "months": {
+        "2026-10": {
+          "tickets": 4,
+          "races": 4,
+          "grossStake": 400,
+          "settledTickets": 4,
+          "voidTickets": 2,
+          "hits": 0,
+          "realizedProfit": -200.0,
+          "unresolvedStake": 0,
+          "budgetRejectedTickets": 0,
+          "carriedMonthStartExposure": 0,
+          "maxRealizedNetLoss": 200.0,
+          "maxSettlementDrawdown": 200.0,
+          "worstCaseProfit": -200.0,
+          "hitRate": 0.0,
+          "monthlyObservation": "partial_not_monthly_evidence"
+        }
+      },
+      "settlementCalendarMonths": {
+        "2026-10": {
+          "profit": -200.0,
+          "settledTickets": 4
+        }
+      },
+      "rejected": {}
+    },
+    {
+      "minRawProbability": 0.1,
+      "maxOdds": 50,
+      "conservativePositiveRoiGate": true,
+      "months": {
+        "2026-10": {
+          "tickets": 20,
+          "races": 18,
+          "grossStake": 2000,
+          "settledTickets": 20,
+          "voidTickets": 2,
+          "hits": 1,
+          "realizedProfit": 450.0,
+          "unresolvedStake": 0,
+          "budgetRejectedTickets": 0,
+          "carriedMonthStartExposure": 0,
+          "maxRealizedNetLoss": 0,
+          "maxSettlementDrawdown": 1700.0,
+          "worstCaseProfit": 450.0,
+          "hitRate": 0.05555555555555555,
+          "monthlyObservation": "partial_not_monthly_evidence"
+        }
+      },
+      "settlementCalendarMonths": {
+        "2026-10": {
+          "profit": 450.0,
+          "settledTickets": 20
+        }
+      },
+      "rejected": {}
+    },
+    {
+      "minRawProbability": 0.2,
+      "maxOdds": 20,
+      "conservativePositiveRoiGate": true,
+      "months": {
+        "2026-10": {
+          "tickets": 3,
+          "races": 3,
+          "grossStake": 300,
+          "settledTickets": 3,
+          "voidTickets": 2,
+          "hits": 0,
+          "realizedProfit": -100.0,
+          "unresolvedStake": 0,
+          "budgetRejectedTickets": 0,
+          "carriedMonthStartExposure": 0,
+          "maxRealizedNetLoss": 100.0,
+          "maxSettlementDrawdown": 100.0,
+          "worstCaseProfit": -100.0,
+          "hitRate": 0.0,
+          "monthlyObservation": "partial_not_monthly_evidence"
+        }
+      },
+      "settlementCalendarMonths": {
+        "2026-10": {
+          "profit": -100.0,
+          "settledTickets": 3
+        }
+      },
+      "rejected": {}
+    },
+    {
+      "minRawProbability": 0.2,
+      "maxOdds": 50,
+      "conservativePositiveRoiGate": true,
+      "months": {
+        "2026-10": {
+          "tickets": 9,
+          "races": 8,
+          "grossStake": 900,
+          "settledTickets": 9,
+          "voidTickets": 2,
+          "hits": 0,
+          "realizedProfit": -700.0,
+          "unresolvedStake": 0,
+          "budgetRejectedTickets": 0,
+          "carriedMonthStartExposure": 0,
+          "maxRealizedNetLoss": 700.0,
+          "maxSettlementDrawdown": 700.0,
+          "worstCaseProfit": -700.0,
+          "hitRate": 0.0,
+          "monthlyObservation": "partial_not_monthly_evidence"
+        }
+      },
+      "settlementCalendarMonths": {
+        "2026-10": {
+          "profit": -700.0,
+          "settledTickets": 9
+        }
+      },
+      "rejected": {}
+    }
+  ],
+  "limitations": [
+    "Placed-ticket selection bias; not all 120 combinations.",
+    "API snapshot may be capped; no completeness proof, including calendar months.",
+    "Historical partial subset is exploratory, not threshold fitting or holdout evidence.",
+    "No monthly extrapolation, Monte Carlo evidence, or production changes.",
+    "Void tickets reserve budget at purchase; only explicit full refund settles at zero profit. Missing opportunities not simulated.",
+    "Gross budget is stricter than net-loss budget; winnings never replenish allowance.",
+    "Settlements credited at whole-race latest explicit settledAt only; otherwise unresolved.",
+    "Settlement drawdown excludes open risk; worstCaseProfit separately includes it."
+  ],
+  "observedAt": "2026-10-17T10:25:32.471519+09:00",
+  "provenance": {
+    "betsSha256": "cdf5ef86797db6b1c20a0d36758198501117c94cefb6368b1d0889dd7a46b584",
+    "endpoint": "/api/bets/experimental"
+  }
+}

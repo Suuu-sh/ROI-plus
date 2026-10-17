@@ -11,7 +11,7 @@ Safari で ROI+ を開き、共有ボタンから「ホーム画面に追加」�
 
 ## 期待値の確認と自律学習
 
-現時点の利益の根拠と限界は [期待値の監査](docs/EV_AUDIT.md)、自動フィードバックと候補再学習の運用は [自律学習](docs/LEARNING.md) を参照してください。モデル上の期待収益率と、実データの確定購入から得る収益実績は別です。 実験三連単の購入時確率と実的中の比較、および隔離校正候補の制約は [2026-10-17 校正監査](docs/reports/experimental-trifecta-calibration-2026-10-17.md) と [校正候補](docs/reports/2026-10-17-trifecta-calibration-candidate.md) を参照してください。
+現時点の利益の根拠と限界は [期待値の監査](docs/EV_AUDIT.md)、自動フィードバックと候補再学習の運用は [自律学習](docs/LEARNING.md) を参照してください。モデル上の期待収益率と、実データの確定購入から得る収益実績は別です。 実験三連単の購入時確率と実的中の比較、および隔離校正候補の制約は [2026-10-17 校正監査](docs/reports/experimental-trifecta-calibration-2026-10-17.md) と [校正候補](docs/reports/2026-10-17-trifecta-calibration-candidate.md) を参照してください。 月次損失許容額1万円・低確率券除外の隔離比較は [月次購入ルール候補](docs/reports/monthly-strategy-2026-10-17.md) を参照してください（部分月の探索的評価、未採用）。
 
 日次処理は予測と後日の結果を照合し、週次処理は新しい完了レースが十分に増えた場合に候補を再学習します。同じ未学習期間で比較できない・改善を確認できない候補は昇格不可として保存し、本番モデルを自動置換しません。レポートは GitHub Actions artifact に残します。
 
