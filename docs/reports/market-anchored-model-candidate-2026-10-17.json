@@ -1,0 +1,412 @@
+{
+  "schemaVersion": 1,
+  "candidateId": "market-anchor-research-2026-10-17",
+  "createdAt": "2026-10-17T03:55:59.969Z",
+  "inputDatasetSha256": "783705a602c92e9e5c9c2d5578d07dfb7761467293fd79ce6be57b6fd32e8f14",
+  "baseModelId": "boat-trifecta-exp-noweather-20261013-10559e2c79ce",
+  "baseModelArtifactSha256": "386ff046f73d0f604a293d2c7318acc794857d9448f1addaf3f164863a91bdda",
+  "alpha": 0,
+  "trainingNll": 3.933958696598721,
+  "marketOnlyTrainingNll": 3.933958696598721,
+  "identityTrainingNll": 4.756454330022893,
+  "rejected": {
+    "invalid_forecast_or_decision_time": 15,
+    "invalid_official_outcome": 11,
+    "label_after_fit_cutoff": 28,
+    "missing_forecast_source_proof": 1
+  },
+  "protocol": {
+    "method": "decision-time-normalized-inverse-odds-convex-mixture",
+    "minAlpha": 0,
+    "maxAlpha": 1,
+    "step": 0.01,
+    "tieBreak": "lower alpha",
+    "objective": "training multiclass NLL",
+    "simulatedFitCutoff": "2026-10-16T00:00:00+09:00",
+    "trainDates": [
+      "20261014",
+      "20261015"
+    ],
+    "testDates": [
+      "20261016",
+      "20261017"
+    ],
+    "qualifiedPipelineFloors": {
+      "train": 300,
+      "validation": 100,
+      "test": 100
+    },
+    "researchOnly": true
+  },
+  "candidateOnly": true,
+  "registered": false,
+  "promoted": false,
+  "evaluationQualified": false,
+  "promotionEligible": false,
+  "status": "low_data_research_candidate_not_qualified",
+  "uncertainty": "Original probStd retained unchanged as an UNCALIBRATED risk proxy, not calibrated uncertainty or covariance.",
+  "interpretation": "Normalized inverse decision-time odds are a market reference, NOT true or calibrated probability; decision-time counterfactual, not original prediction-time inference.",
+  "trainingRaceCount": 51,
+  "trainingRaceIds": [
+    "boat-20261014-04-03",
+    "boat-20261014-04-06",
+    "boat-20261014-06-03",
+    "boat-20261014-06-04",
+    "boat-20261014-06-05",
+    "boat-20261014-11-01",
+    "boat-20261014-11-04",
+    "boat-20261014-11-06",
+    "boat-20261014-11-08",
+    "boat-20261014-12-07",
+    "boat-20261014-12-09",
+    "boat-20261014-12-11",
+    "boat-20261014-12-12",
+    "boat-20261014-13-01",
+    "boat-20261014-13-02",
+    "boat-20261014-13-05",
+    "boat-20261014-13-06",
+    "boat-20261014-13-08",
+    "boat-20261014-14-08",
+    "boat-20261014-14-12",
+    "boat-20261014-15-06",
+    "boat-20261014-15-07",
+    "boat-20261014-15-08",
+    "boat-20261014-15-09",
+    "boat-20261014-15-10",
+    "boat-20261014-15-11",
+    "boat-20261014-15-12",
+    "boat-20261014-18-05",
+    "boat-20261014-18-06",
+    "boat-20261014-18-08",
+    "boat-20261014-18-09",
+    "boat-20261014-19-03",
+    "boat-20261014-19-06",
+    "boat-20261014-19-07",
+    "boat-20261014-19-08",
+    "boat-20261014-19-09",
+    "boat-20261014-19-10",
+    "boat-20261014-20-05",
+    "boat-20261014-20-07",
+    "boat-20261014-20-09",
+    "boat-20261014-21-07",
+    "boat-20261014-21-10",
+    "boat-20261014-21-11",
+    "boat-20261014-22-03",
+    "boat-20261014-24-06",
+    "boat-20261014-24-07",
+    "boat-20261014-24-09",
+    "boat-20261015-15-11",
+    "boat-20261015-15-12",
+    "boat-20261015-20-12",
+    "boat-20261015-24-11"
+  ],
+  "trainingLabels": [
+    {
+      "raceId": "boat-20261014-04-03",
+      "availableAt": "2026-10-14T03:41:28.278Z",
+      "bodySha256": "a733e6e0e69c056c27eaa992aa9fa97145fb9dbc78af8955919b4859f6ff4a59",
+      "winnerSelection": "1-6-5"
+    },
+    {
+      "raceId": "boat-20261014-04-06",
+      "availableAt": "2026-10-14T04:08:50.663Z",
+      "bodySha256": "2bd6ca4a8322eed30522bc6d283810b928b95a0df59779fb26a6acc0d5015c10",
+      "winnerSelection": "3-4-5"
+    },
+    {
+      "raceId": "boat-20261014-06-03",
+      "availableAt": "2026-10-14T03:36:49.133Z",
+      "bodySha256": "4adb3cddaa0bb0b6ea24d83029c9d91ae57a771a20127ca29a893b35334d5d50",
+      "winnerSelection": "1-2-4"
+    },
+    {
+      "raceId": "boat-20261014-06-04",
+      "availableAt": "2026-10-14T04:02:06.247Z",
+      "bodySha256": "e7eefcd8287b066c363f473ea4706bf4d03212adb4150795cd53daad963cee7d",
+      "winnerSelection": "1-5-4"
+    },
+    {
+      "raceId": "boat-20261014-06-05",
+      "availableAt": "2026-10-14T04:41:22.482Z",
+      "bodySha256": "33c100f4cbbb08f11605a6cdaa64e7436b107952202797ecf7de3d30e817c0b2",
+      "winnerSelection": "3-1-2"
+    },
+    {
+      "raceId": "boat-20261014-11-01",
+      "availableAt": "2026-10-14T03:36:56.139Z",
+      "bodySha256": "730636f550c8ce169f4373e91bdc2a3ec9907d6e2631b0c9d4b205f2753d8bb7",
+      "winnerSelection": "3-1-4"
+    },
+    {
+      "raceId": "boat-20261014-11-04",
+      "availableAt": "2026-10-14T03:41:45.903Z",
+      "bodySha256": "0e8123377f41e1e6f8c3550d93653e483a68dd19ffb1199f40ed812874635cb0",
+      "winnerSelection": "2-3-4"
+    },
+    {
+      "raceId": "boat-20261014-11-06",
+      "availableAt": "2026-10-14T03:58:50.406Z",
+      "bodySha256": "af9f824cf399c55ef167f999918336f75606acea33cd54b5d3cb7b590488105d",
+      "winnerSelection": "5-1-2"
+    },
+    {
+      "raceId": "boat-20261014-11-08",
+      "availableAt": "2026-10-14T05:01:34.804Z",
+      "bodySha256": "546aa60d9ffebedfa5fbbf463fb06309fe2c0001f54e5a1265712f1c5b3b99f6",
+      "winnerSelection": "3-4-6"
+    },
+    {
+      "raceId": "boat-20261014-12-07",
+      "availableAt": "2026-10-14T10:01:35.135Z",
+      "bodySha256": "1b4fefc121a2e02a65a96d8ef743df8b69e08ca6716ba66637fd099f36414deb",
+      "winnerSelection": "2-4-3"
+    },
+    {
+      "raceId": "boat-20261014-12-09",
+      "availableAt": "2026-10-14T10:10:35.808Z",
+      "bodySha256": "359fdb0868676d587d434f787d6f4da5a5126819dc809757661f7fc82de8717e",
+      "winnerSelection": "1-4-6"
+    },
+    {
+      "raceId": "boat-20261014-12-11",
+      "availableAt": "2026-10-14T11:20:52.468Z",
+      "bodySha256": "089868e803bd23864e8fefd08d2dcf6585b36ffc765260922b5f106ca109b7e3",
+      "winnerSelection": "1-2-4"
+    },
+    {
+      "raceId": "boat-20261014-12-12",
+      "availableAt": "2026-10-14T11:40:51.551Z",
+      "bodySha256": "99873557b9fb54f681e3c3f5cf2bc5363d050c9464eb40a6c765fa154c60fdf1",
+      "winnerSelection": "4-6-2"
+    },
+    {
+      "raceId": "boat-20261014-13-01",
+      "availableAt": "2026-10-14T03:41:10.273Z",
+      "bodySha256": "41822c9321dc46e89f434d728896055ad363f23f16d6603f38144b0b4e8d0846",
+      "winnerSelection": "1-4-3"
+    },
+    {
+      "raceId": "boat-20261014-13-02",
+      "availableAt": "2026-10-14T03:41:21.311Z",
+      "bodySha256": "f6b9079c60bf1ba914ca0d8fe5fb0ae50aad229c0ddb442a8c3468d404f35656",
+      "winnerSelection": "1-2-3"
+    },
+    {
+      "raceId": "boat-20261014-13-05",
+      "availableAt": "2026-10-14T03:45:27.909Z",
+      "bodySha256": "23ecd5a24ba4a668e844a0292f7d72a547346be8c86536efe45e2916b7c48392",
+      "winnerSelection": "3-6-2"
+    },
+    {
+      "raceId": "boat-20261014-13-06",
+      "availableAt": "2026-10-14T04:20:16.084Z",
+      "bodySha256": "e026ce460b925fe833c8ebe2d7914740a65ced5912aa62d3413e02526a0723ff",
+      "winnerSelection": "4-2-1"
+    },
+    {
+      "raceId": "boat-20261014-13-08",
+      "availableAt": "2026-10-14T05:21:21.060Z",
+      "bodySha256": "30d775428ee351cd020250541a1e330efa4b8887d430474bee8e7914d36066bf",
+      "winnerSelection": "3-6-1"
+    },
+    {
+      "raceId": "boat-20261014-14-08",
+      "availableAt": "2026-10-14T03:41:53.163Z",
+      "bodySha256": "004fc712534cc78a0bd637dfcce10808f46267406dd7e16e0e10d109be259417",
+      "winnerSelection": "3-4-6"
+    },
+    {
+      "raceId": "boat-20261014-14-12",
+      "availableAt": "2026-10-14T05:21:10.665Z",
+      "bodySha256": "95e9c9e61105b6752f3e58ebf6190115333267408d286440005b8349934800e8",
+      "winnerSelection": "3-4-1"
+    },
+    {
+      "raceId": "boat-20261014-15-06",
+      "availableAt": "2026-10-14T09:59:25.108Z",
+      "bodySha256": "4efd0ca5e1bd175ecfd0a11f23430cb6581e556391de2e1681ef78efea377890",
+      "winnerSelection": "5-1-6"
+    },
+    {
+      "raceId": "boat-20261014-15-07",
+      "availableAt": "2026-10-14T10:01:48.297Z",
+      "bodySha256": "5e5c3305cd8ee32483e3cebdb9d890e2aca838c8a955297334aae2d350dc30f1",
+      "winnerSelection": "1-4-6"
+    },
+    {
+      "raceId": "boat-20261014-15-08",
+      "availableAt": "2026-10-14T10:04:19.131Z",
+      "bodySha256": "7caa7fda2cc009264a55c24e4fcd2f609de401cfc6baa71ad6ee6ff63b4cd9a4",
+      "winnerSelection": "2-1-5"
+    },
+    {
+      "raceId": "boat-20261014-15-09",
+      "availableAt": "2026-10-14T10:21:04.787Z",
+      "bodySha256": "6f2f84c558219798f8a4c9767348045d43c96fc579556f394556dd84c4b581c1",
+      "winnerSelection": "4-3-5"
+    },
+    {
+      "raceId": "boat-20261014-15-10",
+      "availableAt": "2026-10-14T10:51:06.082Z",
+      "bodySha256": "5e6640a7b0097ff17a4ba81abf1ad09d822d7fb4f363116c508e93e5aae5f5bb",
+      "winnerSelection": "1-3-4"
+    },
+    {
+      "raceId": "boat-20261014-15-11",
+      "availableAt": "2026-10-14T11:31:20.061Z",
+      "bodySha256": "ba8bb113380c5626a4424a914f32b647fb5c927c70df11be5daef001521793ce",
+      "winnerSelection": "2-1-4"
+    },
+    {
+      "raceId": "boat-20261014-15-12",
+      "availableAt": "2026-10-14T11:51:03.767Z",
+      "bodySha256": "135ca964d5a769e28b5bc7e3eb12f76b5c445f9752646435329785faa59e8789",
+      "winnerSelection": "6-1-2"
+    },
+    {
+      "raceId": "boat-20261014-18-05",
+      "availableAt": "2026-10-14T03:41:06.674Z",
+      "bodySha256": "e48e362832c59870f60887a128e72bce9d2a89133e4dd21c2062736a0b8a554b",
+      "winnerSelection": "1-5-2"
+    },
+    {
+      "raceId": "boat-20261014-18-06",
+      "availableAt": "2026-10-14T03:41:13.909Z",
+      "bodySha256": "080a5da8aeeb8405d00e65e0ad35e5a1f6f773c0793e13e7e791a4d58dfb93a5",
+      "winnerSelection": "1-2-6"
+    },
+    {
+      "raceId": "boat-20261014-18-08",
+      "availableAt": "2026-10-14T03:45:19.965Z",
+      "bodySha256": "0832cb9be1d79917b16c7eec1c45c1afa0b10d5bdf99b96aeb959c01602a4610",
+      "winnerSelection": "1-3-5"
+    },
+    {
+      "raceId": "boat-20261014-18-09",
+      "availableAt": "2026-10-14T03:58:53.645Z",
+      "bodySha256": "311cdc28f1c7985e811a6dc96deaf8fd2a77e9857177ef8359b2af18ad4def75",
+      "winnerSelection": "1-3-4"
+    },
+    {
+      "raceId": "boat-20261014-19-03",
+      "availableAt": "2026-10-14T10:04:30.383Z",
+      "bodySha256": "763c2f91070ae68b59888300ff11aebb4d0452a6105282364d883b61780db1fb",
+      "winnerSelection": "1-3-2"
+    },
+    {
+      "raceId": "boat-20261014-19-06",
+      "availableAt": "2026-10-14T11:11:00.875Z",
+      "bodySha256": "64746b1f372606d9e8622c968fee3aaa2ab9c45c6aa6db0f9e45a002082bd65d",
+      "winnerSelection": "3-1-4"
+    },
+    {
+      "raceId": "boat-20261014-19-07",
+      "availableAt": "2026-10-14T11:41:05.261Z",
+      "bodySha256": "37e1053678030d4ebff5bb66b2bd4f011b12edebc7accb6edabd7f61300dcf14",
+      "winnerSelection": "1-2-5"
+    },
+    {
+      "raceId": "boat-20261014-19-08",
+      "availableAt": "2026-10-14T12:20:26.400Z",
+      "bodySha256": "debd887567072eefb96b7a756c3230eab83c66325b146d1ef50233edd7959e37",
+      "winnerSelection": "2-1-3"
+    },
+    {
+      "raceId": "boat-20261014-19-09",
+      "availableAt": "2026-10-14T12:40:24.855Z",
+      "bodySha256": "de38baa8d9691cf03b27e7d4f2652389cbcd38a9fd3ca43dc0defa94877fad35",
+      "winnerSelection": "1-2-4"
+    },
+    {
+      "raceId": "boat-20261014-19-10",
+      "availableAt": "2026-10-14T13:10:26.375Z",
+      "bodySha256": "201a3f9d073ba7fc7f1cdff498606997c494d36c5f04c295f96fa648fe84bab3",
+      "winnerSelection": "1-2-5"
+    },
+    {
+      "raceId": "boat-20261014-20-05",
+      "availableAt": "2026-10-14T09:58:48.576Z",
+      "bodySha256": "38a8df801df49001ad3145ead8a8ccb6ae5a21ed0cf5263892cff47652c285d0",
+      "winnerSelection": "1-3-5"
+    },
+    {
+      "raceId": "boat-20261014-20-07",
+      "availableAt": "2026-10-14T10:03:34.434Z",
+      "bodySha256": "ff5c004cead8f522cbbd6756f1f61fe653bce83ad31a53fdd12536560da0cb95",
+      "winnerSelection": "1-2-3"
+    },
+    {
+      "raceId": "boat-20261014-20-09",
+      "availableAt": "2026-10-14T10:42:08.040Z",
+      "bodySha256": "82a60fde91869b7af1b00fc3efb3fa47c5442d3cadec3527e58e6d7585b671d1",
+      "winnerSelection": "1-2-3"
+    },
+    {
+      "raceId": "boat-20261014-21-07",
+      "availableAt": "2026-10-14T03:41:42.292Z",
+      "bodySha256": "0906bf66283cc1a3fd2da6d95647345c7f1cae171c8269821346ff7dc1d7d5f9",
+      "winnerSelection": "2-3-1"
+    },
+    {
+      "raceId": "boat-20261014-21-10",
+      "availableAt": "2026-10-14T04:31:22.692Z",
+      "bodySha256": "de1020b7a6473c1049deef44760af64f02d1976eae23dcc2f781d6e1baefde71",
+      "winnerSelection": "1-4-6"
+    },
+    {
+      "raceId": "boat-20261014-21-11",
+      "availableAt": "2026-10-14T05:11:15.801Z",
+      "bodySha256": "eea28c6d556c7262fd28b55ee9809abee53c41e575d404356b4f93c1a9ae8389",
+      "winnerSelection": "1-3-4"
+    },
+    {
+      "raceId": "boat-20261014-22-03",
+      "availableAt": "2026-10-14T03:45:15.936Z",
+      "bodySha256": "0184236e6df587c7ea0a3c7e0e82a38ab48fe4f04177c77a37c80e59c601ff6a",
+      "winnerSelection": "4-1-5"
+    },
+    {
+      "raceId": "boat-20261014-24-06",
+      "availableAt": "2026-10-14T10:00:53.983Z",
+      "bodySha256": "46e0e7e6e32580711a402d38058054637d3d397ec16906f6bb7435a768e204b8",
+      "winnerSelection": "1-4-6"
+    },
+    {
+      "raceId": "boat-20261014-24-07",
+      "availableAt": "2026-10-14T10:01:59.546Z",
+      "bodySha256": "c9a8ea903795affedd61ec9bdd6bbd6359fa1e5231eba5df1cc5abd57c232772",
+      "winnerSelection": "1-2-5"
+    },
+    {
+      "raceId": "boat-20261014-24-09",
+      "availableAt": "2026-10-14T10:30:50.192Z",
+      "bodySha256": "f5d3ced0216246d7c030bbae882409ff32e477154580efdfa7c57d79d99d4562",
+      "winnerSelection": "1-5-2"
+    },
+    {
+      "raceId": "boat-20261015-15-11",
+      "availableAt": "2026-10-15T11:20:09.206Z",
+      "bodySha256": "5530bb9f27af30e50f9d7528d1b9d197ed5f2bddf44af69ef605a9288fdb258c",
+      "winnerSelection": "1-4-3"
+    },
+    {
+      "raceId": "boat-20261015-15-12",
+      "availableAt": "2026-10-15T11:50:19.652Z",
+      "bodySha256": "2e7af6615af0416458571b9dae890c6324ca8e50aee142626b972864376dd8f7",
+      "winnerSelection": "2-1-3"
+    },
+    {
+      "raceId": "boat-20261015-20-12",
+      "availableAt": "2026-10-15T12:00:06.564Z",
+      "bodySha256": "450cf62659bd6ab7d30f0f5a555b9c56f793cacf2df49f679cd3b7e798fe91b0",
+      "winnerSelection": "1-3-2"
+    },
+    {
+      "raceId": "boat-20261015-24-11",
+      "availableAt": "2026-10-15T11:30:12.986Z",
+      "bodySha256": "d0015f25d47e1506a1c3166e8e81a3d0ef3a680fd886a3683cd2dae08b021039",
+      "winnerSelection": "1-4-5"
+    }
+  ],
+  "trainingRaceIdsSha256": "4c2d28d9af2b104068178c991971077ab348d6e86f7e2475070b1931ceefc0b4"
+}
