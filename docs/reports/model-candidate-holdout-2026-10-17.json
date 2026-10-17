@@ -1,0 +1,4197 @@
+{
+  "analyticUniformReference": {
+    "meanNll": 4.787491742782046,
+    "multiclassBrier": 0.9916666666666667,
+    "notFittedOrSelected": true
+  },
+  "status": "retrospective_low_data_research_only",
+  "promotionEligible": false,
+  "registered": false,
+  "promoted": false,
+  "sourceAsOf": "2026-10-17T10:35:04.843+09:00",
+  "sourceModelId": "boat-trifecta-exp-noweather-20261013-10559e2c79ce",
+  "sourceArtifactSha256": "386ff046f73d0f604a293d2c7318acc794857d9448f1addaf3f164863a91bdda",
+  "fitCutoff": "2026-10-16T00:00:00+09:00",
+  "testStart": "2026-10-16T00:00:00+09:00",
+  "testEndExclusive": "2026-10-18T00:00:00+09:00",
+  "trainRaces": 51,
+  "testOpportunities": 164,
+  "testAccepted": 148,
+  "testLabeled": 124,
+  "testUnlabeled": 24,
+  "metricsByDate": {
+    "20261016": {
+      "baseline": {
+        "races": 116,
+        "meanNll": 5.326874243141163,
+        "multiclassBrier": 1.0173941113420728,
+        "top1Accuracy": 0.017241379310344827,
+        "top1ECE": 0.10345105356627296,
+        "reliability": [
+          {
+            "lower": 0,
+            "upper": 0.1,
+            "count": 13771,
+            "predictedSum": 94.94250707874606,
+            "actualSum": 112,
+            "meanPredicted": 0.00689438000717058,
+            "actualFrequency": 0.008133033185680053
+          },
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "count": 134,
+            "predictedSum": 17.568592262566877,
+            "actualSum": 3,
+            "meanPredicted": 0.13110889748184237,
+            "actualFrequency": 0.022388059701492536
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "count": 14,
+            "predictedSum": 3.1555838950706274,
+            "actualSum": 1,
+            "meanPredicted": 0.22539884964790197,
+            "actualFrequency": 0.07142857142857142
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "count": 1,
+            "predictedSum": 0.33331676361632756,
+            "actualSum": 0,
+            "meanPredicted": 0.33331676361632756,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.9,
+            "upper": 1,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          }
+        ],
+        "top1Reliability": [
+          {
+            "lower": 0,
+            "upper": 0.1,
+            "count": 46,
+            "predictedSum": 3.066923300753284,
+            "actualSum": 1,
+            "meanPredicted": 0.06667224566854965,
+            "actualFrequency": 0.021739130434782608
+          },
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "count": 58,
+            "predictedSum": 8.144876156233963,
+            "actualSum": 1,
+            "meanPredicted": 0.14042889924541316,
+            "actualFrequency": 0.017241379310344827
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "count": 11,
+            "predictedSum": 2.45520599308409,
+            "actualSum": 0,
+            "meanPredicted": 0.22320054482582635,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "count": 1,
+            "predictedSum": 0.33331676361632756,
+            "actualSum": 0,
+            "meanPredicted": 0.33331676361632756,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.9,
+            "upper": 1,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          }
+        ],
+        "unit": "Race is scoring unit; 120 correlated mutually exclusive outcomes are not independent samples."
+      },
+      "candidate": {
+        "races": 116,
+        "meanNll": 4.603878207316869,
+        "multiclassBrier": 0.989026640905916,
+        "top1Accuracy": 0.017241379310344827,
+        "top1ECE": 0.02630596778929114,
+        "reliability": [
+          {
+            "lower": 0,
+            "upper": 0.1,
+            "count": 13918,
+            "predictedSum": 115.74876954192096,
+            "actualSum": 116,
+            "meanPredicted": 0.008316480064802484,
+            "actualFrequency": 0.008334530823394165
+          },
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "count": 2,
+            "predictedSum": 0.2512304580793138,
+            "actualSum": 0,
+            "meanPredicted": 0.1256152290396569,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.9,
+            "upper": 1,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          }
+        ],
+        "top1Reliability": [
+          {
+            "lower": 0,
+            "upper": 0.1,
+            "count": 115,
+            "predictedSum": 4.925852698771599,
+            "actualSum": 2,
+            "meanPredicted": 0.042833501728448686,
+            "actualFrequency": 0.017391304347826087
+          },
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "count": 1,
+            "predictedSum": 0.12563956478617344,
+            "actualSum": 0,
+            "meanPredicted": 0.12563956478617344,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.9,
+            "upper": 1,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          }
+        ],
+        "unit": "Race is scoring unit; 120 correlated mutually exclusive outcomes are not independent samples."
+      }
+    },
+    "20261017": {
+      "baseline": {
+        "races": 8,
+        "meanNll": 4.946969496803495,
+        "multiclassBrier": 0.9866874992406832,
+        "top1Accuracy": 0.125,
+        "top1ECE": 0.18545272240613062,
+        "reliability": [
+          {
+            "lower": 0,
+            "upper": 0.1,
+            "count": 951,
+            "predictedSum": 6.244035051062311,
+            "actualSum": 6,
+            "meanPredicted": 0.00656575715148508,
+            "actualFrequency": 0.006309148264984227
+          },
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "count": 7,
+            "predictedSum": 1.1704530402420334,
+            "actualSum": 2,
+            "meanPredicted": 0.16720757717743334,
+            "actualFrequency": 0.2857142857142857
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "count": 1,
+            "predictedSum": 0.2591910609318696,
+            "actualSum": 0,
+            "meanPredicted": 0.2591910609318696,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "count": 1,
+            "predictedSum": 0.3263208477637764,
+            "actualSum": 0,
+            "meanPredicted": 0.3263208477637764,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.9,
+            "upper": 1,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          }
+        ],
+        "top1Reliability": [
+          {
+            "lower": 0,
+            "upper": 0.1,
+            "count": 4,
+            "predictedSum": 0.2720217192534261,
+            "actualSum": 0,
+            "meanPredicted": 0.06800542981335653,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "count": 2,
+            "predictedSum": 0.3739118487000272,
+            "actualSum": 1,
+            "meanPredicted": 0.1869559243500136,
+            "actualFrequency": 0.5
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "count": 1,
+            "predictedSum": 0.2591910609318696,
+            "actualSum": 0,
+            "meanPredicted": 0.2591910609318696,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "count": 1,
+            "predictedSum": 0.3263208477637764,
+            "actualSum": 0,
+            "meanPredicted": 0.3263208477637764,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.9,
+            "upper": 1,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          }
+        ],
+        "unit": "Race is scoring unit; 120 correlated mutually exclusive outcomes are not independent samples."
+      },
+      "candidate": {
+        "races": 8,
+        "meanNll": 4.375951616720426,
+        "multiclassBrier": 0.9738370429186161,
+        "top1Accuracy": 0.125,
+        "top1ECE": 0.09868328339685714,
+        "reliability": [
+          {
+            "lower": 0,
+            "upper": 0.1,
+            "count": 959,
+            "predictedSum": 7.899141904587035,
+            "actualSum": 8,
+            "meanPredicted": 0.008236852872353529,
+            "actualFrequency": 0.008342022940563087
+          },
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "count": 1,
+            "predictedSum": 0.10085809541297393,
+            "actualSum": 0,
+            "meanPredicted": 0.10085809541297393,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.9,
+            "upper": 1,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          }
+        ],
+        "top1Reliability": [
+          {
+            "lower": 0,
+            "upper": 0.1,
+            "count": 7,
+            "predictedSum": 0.31139182823811684,
+            "actualSum": 1,
+            "meanPredicted": 0.04448454689115955,
+            "actualFrequency": 0.14285714285714285
+          },
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "count": 1,
+            "predictedSum": 0.10085809541297393,
+            "actualSum": 0,
+            "meanPredicted": 0.10085809541297393,
+            "actualFrequency": 0
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          },
+          {
+            "lower": 0.9,
+            "upper": 1,
+            "count": 0,
+            "predictedSum": 0,
+            "actualSum": 0,
+            "meanPredicted": null,
+            "actualFrequency": null
+          }
+        ],
+        "unit": "Race is scoring unit; 120 correlated mutually exclusive outcomes are not independent samples."
+      }
+    }
+  },
+  "baselineMetrics": {
+    "races": 124,
+    "meanNll": 5.302364259506475,
+    "multiclassBrier": 1.015413039593596,
+    "top1Accuracy": 0.024193548387096774,
+    "top1ECE": 0.09864328782529648,
+    "reliability": [
+      {
+        "lower": 0,
+        "upper": 0.1,
+        "count": 14722,
+        "predictedSum": 101.1865421298082,
+        "actualSum": 118,
+        "meanPredicted": 0.006873151890355128,
+        "actualFrequency": 0.008015215324004892
+      },
+      {
+        "lower": 0.1,
+        "upper": 0.2,
+        "count": 141,
+        "predictedSum": 18.739045302808904,
+        "actualSum": 5,
+        "meanPredicted": 0.1329010305163752,
+        "actualFrequency": 0.03546099290780142
+      },
+      {
+        "lower": 0.2,
+        "upper": 0.3,
+        "count": 15,
+        "predictedSum": 3.414774956002497,
+        "actualSum": 1,
+        "meanPredicted": 0.22765166373349982,
+        "actualFrequency": 0.06666666666666667
+      },
+      {
+        "lower": 0.3,
+        "upper": 0.4,
+        "count": 2,
+        "predictedSum": 0.6596376113801039,
+        "actualSum": 0,
+        "meanPredicted": 0.32981880569005195,
+        "actualFrequency": 0
+      },
+      {
+        "lower": 0.4,
+        "upper": 0.5,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.5,
+        "upper": 0.6,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.6,
+        "upper": 0.7,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.7,
+        "upper": 0.8,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.8,
+        "upper": 0.9,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.9,
+        "upper": 1,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      }
+    ],
+    "top1Reliability": [
+      {
+        "lower": 0,
+        "upper": 0.1,
+        "count": 50,
+        "predictedSum": 3.33894502000671,
+        "actualSum": 1,
+        "meanPredicted": 0.06677890040013419,
+        "actualFrequency": 0.02
+      },
+      {
+        "lower": 0.1,
+        "upper": 0.2,
+        "count": 60,
+        "predictedSum": 8.51878800493399,
+        "actualSum": 2,
+        "meanPredicted": 0.14197980008223315,
+        "actualFrequency": 0.03333333333333333
+      },
+      {
+        "lower": 0.2,
+        "upper": 0.3,
+        "count": 12,
+        "predictedSum": 2.7143970540159597,
+        "actualSum": 0,
+        "meanPredicted": 0.22619975450132998,
+        "actualFrequency": 0
+      },
+      {
+        "lower": 0.3,
+        "upper": 0.4,
+        "count": 2,
+        "predictedSum": 0.6596376113801039,
+        "actualSum": 0,
+        "meanPredicted": 0.32981880569005195,
+        "actualFrequency": 0
+      },
+      {
+        "lower": 0.4,
+        "upper": 0.5,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.5,
+        "upper": 0.6,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.6,
+        "upper": 0.7,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.7,
+        "upper": 0.8,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.8,
+        "upper": 0.9,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.9,
+        "upper": 1,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      }
+    ],
+    "unit": "Race is scoring unit; 120 correlated mutually exclusive outcomes are not independent samples."
+  },
+  "candidateMetrics": {
+    "races": 124,
+    "meanNll": 4.589173265988065,
+    "multiclassBrier": 0.9880466668422193,
+    "top1Accuracy": 0.024193548387096774,
+    "top1ECE": 0.01986888860652308,
+    "reliability": [
+      {
+        "lower": 0,
+        "upper": 0.1,
+        "count": 14877,
+        "predictedSum": 123.64791144650789,
+        "actualSum": 124,
+        "meanPredicted": 0.008311347143006513,
+        "actualFrequency": 0.008335013779659877
+      },
+      {
+        "lower": 0.1,
+        "upper": 0.2,
+        "count": 3,
+        "predictedSum": 0.35208855349228774,
+        "actualSum": 0,
+        "meanPredicted": 0.11736285116409591,
+        "actualFrequency": 0
+      },
+      {
+        "lower": 0.2,
+        "upper": 0.3,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.3,
+        "upper": 0.4,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.4,
+        "upper": 0.5,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.5,
+        "upper": 0.6,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.6,
+        "upper": 0.7,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.7,
+        "upper": 0.8,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.8,
+        "upper": 0.9,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.9,
+        "upper": 1,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      }
+    ],
+    "top1Reliability": [
+      {
+        "lower": 0,
+        "upper": 0.1,
+        "count": 122,
+        "predictedSum": 5.2372445270097145,
+        "actualSum": 3,
+        "meanPredicted": 0.04292823382794848,
+        "actualFrequency": 0.02459016393442623
+      },
+      {
+        "lower": 0.1,
+        "upper": 0.2,
+        "count": 2,
+        "predictedSum": 0.22649766019914735,
+        "actualSum": 0,
+        "meanPredicted": 0.11324883009957368,
+        "actualFrequency": 0
+      },
+      {
+        "lower": 0.2,
+        "upper": 0.3,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.3,
+        "upper": 0.4,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.4,
+        "upper": 0.5,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.5,
+        "upper": 0.6,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.6,
+        "upper": 0.7,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.7,
+        "upper": 0.8,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.8,
+        "upper": 0.9,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      },
+      {
+        "lower": 0.9,
+        "upper": 1,
+        "count": 0,
+        "predictedSum": 0,
+        "actualSum": 0,
+        "meanPredicted": null,
+        "actualFrequency": null
+      }
+    ],
+    "unit": "Race is scoring unit; 120 correlated mutually exclusive outcomes are not independent samples."
+  },
+  "baselinePolicy": {
+    "status": "insufficient_full_month_coverage",
+    "candidateOnly": true,
+    "registered": false,
+    "promoted": false,
+    "promotionEligible": false,
+    "winner": null,
+    "probabilityStatus": "RAW_UNCALIBRATED",
+    "fullyObservedMonths": 0,
+    "monthlyPositiveProfitFrequency": null,
+    "sourceOpportunities": 164,
+    "acceptedOpportunities": 148,
+    "acceptedByOriginalOutcome": {
+      "placed": 56,
+      "abstained": 92,
+      "unknown": 0
+    },
+    "rejected": {
+      "invalid_forecast_or_decision_time": 11,
+      "missing_cutoff_proof": 4,
+      "missing_forecast_source_proof": 1
+    },
+    "policy": "Exact current Kelly selector; offline restrictive no-recycle gross JPY10000/month including month-start open exposure, JPY100000 initial non-recycling capital. Partial coverage only; no full-month proof accepted.",
+    "candidates": [
+      {
+        "minRawProbability": 0,
+        "maxOdds": null,
+        "months": {
+          "2026-10": {
+            "grossStake": 10000,
+            "carriedMonthStartExposure": 0,
+            "realizedProfit": -10000,
+            "unresolvedStake": 0,
+            "races": 23
+          }
+        },
+        "settlementMonths": {
+          "2026-10": -10000
+        },
+        "settlementMonthRisk": {
+          "2026-10": {
+            "maxRealizedNetLoss": 10000,
+            "maxSettlementDrawdown": 10000
+          }
+        },
+        "placedRaces": 23,
+        "abstainedRaces": 125,
+        "newlyPlacedFromOriginalAbstained": {
+          "count": 0,
+          "raceIds": []
+        },
+        "realizedProfit": -10000,
+        "maxRealizedNetLoss": 10000,
+        "maxSettlementDrawdown": 10000,
+        "unresolvedStake": 0,
+        "unresolvedRefundRaces": 0,
+        "worstCaseProfit": -10000,
+        "decisions": [
+          {
+            "raceId": "boat-20261016-21-03",
+            "stakes": [
+              {
+                "selection": "1-6-4",
+                "probability": 0.02631529686374532,
+                "probStd": 0.006066202472840682,
+                "odds": 102.3,
+                "conservativeProbability": 0.014425540016977583,
+                "expectedRoi": 0.47573274373680663,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-10-03",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-14-04",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-21-04",
+            "stakes": [
+              {
+                "selection": "2-1-4",
+                "probability": 0.06506777217043036,
+                "probStd": 0.01627304908364094,
+                "odds": 348.6,
+                "conservativeProbability": 0.03317259596649412,
+                "expectedRoi": 10.56396695391985,
+                "stake": 700
+              },
+              {
+                "selection": "2-4-1",
+                "probability": 0.02271771497137504,
+                "probStd": 0.007804190162322322,
+                "odds": 503.4,
+                "conservativeProbability": 0.007421502253223288,
+                "expectedRoi": 2.735984234272603,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-1",
+                "probability": 0.023977653332583566,
+                "probStd": 0.009457399013348841,
+                "odds": 454.8,
+                "conservativeProbability": 0.005441151266419839,
+                "expectedRoi": 1.4746355959677429,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-10-04",
+            "stakes": [
+              {
+                "selection": "2-5-1",
+                "probability": 0.04375179901825249,
+                "probStd": 0.014664753697260856,
+                "odds": 179.9,
+                "conservativeProbability": 0.015008881771621213,
+                "expectedRoi": 1.7000978307146561,
+                "stake": 200
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-08-01",
+            "stakes": [
+              {
+                "selection": "2-1-3",
+                "probability": 0.061292492897009686,
+                "probStd": 0.018562973683969586,
+                "odds": 83.9,
+                "conservativeProbability": 0.0249090644764293,
+                "expectedRoi": 1.0898705095724184,
+                "stake": 300
+              },
+              {
+                "selection": "2-3-1",
+                "probability": 0.02659067085228665,
+                "probStd": 0.008054790792240047,
+                "odds": 225.5,
+                "conservativeProbability": 0.01080328089949616,
+                "expectedRoi": 1.436139842836384,
+                "stake": 200
+              },
+              {
+                "selection": "2-6-1",
+                "probability": 0.05323452939626894,
+                "probStd": 0.018829472153665594,
+                "odds": 289.8,
+                "conservativeProbability": 0.01632876397508437,
+                "expectedRoi": 3.7320757999794507,
+                "stake": 300
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-10-05",
+            "stakes": [],
+            "abstentionReason": "minimum_virtual_stake_not_reached"
+          },
+          {
+            "raceId": "boat-20261016-02-01",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-04-02",
+            "stakes": [
+              {
+                "selection": "2-5-1",
+                "probability": 0.015874541361272754,
+                "probStd": 0.003640729252734948,
+                "odds": 218.4,
+                "conservativeProbability": 0.008738712025912256,
+                "expectedRoi": 0.9085347064592368,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-09-02",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-21-06",
+            "stakes": [
+              {
+                "selection": "3-1-6",
+                "probability": 0.1451769478683574,
+                "probStd": 0.0474313009560218,
+                "odds": 62.5,
+                "conservativeProbability": 0.05221159799455466,
+                "expectedRoi": 2.263224874659666,
+                "stake": 900
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-13-02",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-10-06",
+            "stakes": [
+              {
+                "selection": "1-5-2",
+                "probability": 0.031323407295145725,
+                "probStd": 0.005452581043783128,
+                "odds": 72.2,
+                "conservativeProbability": 0.020636348449330794,
+                "expectedRoi": 0.48994435804168335,
+                "stake": 200
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-08-03",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-03-01",
+            "stakes": [
+              {
+                "selection": "2-3-4",
+                "probability": 0.140576426847323,
+                "probStd": 0.04006723571278157,
+                "odds": 44.9,
+                "conservativeProbability": 0.06204464485027111,
+                "expectedRoi": 1.7858045537771727,
+                "stake": 400
+              },
+              {
+                "selection": "3-2-4",
+                "probability": 0.11273881568454122,
+                "probStd": 0.02463739418661338,
+                "odds": 30.4,
+                "conservativeProbability": 0.06444952307877899,
+                "expectedRoi": 0.9592655015948812,
+                "stake": 400
+              },
+              {
+                "selection": "3-4-2",
+                "probability": 0.04093878550174642,
+                "probStd": 0.007073781313937209,
+                "odds": 54.7,
+                "conservativeProbability": 0.02707417412642949,
+                "expectedRoi": 0.4809573247156933,
+                "stake": 100
+              },
+              {
+                "selection": "4-3-2",
+                "probability": 0.03158201586664073,
+                "probStd": 0.008096440838663422,
+                "odds": 214.5,
+                "conservativeProbability": 0.015712991822860425,
+                "expectedRoi": 2.370436746003561,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-02-02",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-09-03",
+            "stakes": [
+              {
+                "selection": "4-1-2",
+                "probability": 0.03533194612337135,
+                "probStd": 0.011913020442185939,
+                "odds": 395,
+                "conservativeProbability": 0.011982426056686913,
+                "expectedRoi": 3.7330582923913305,
+                "stake": 200
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-13-03",
+            "stakes": [],
+            "abstentionReason": "minimum_virtual_stake_not_reached"
+          },
+          {
+            "raceId": "boat-20261016-21-07",
+            "stakes": [
+              {
+                "selection": "4-2-1",
+                "probability": 0.029439438082629117,
+                "probStd": 0.004349869867975427,
+                "odds": 351.8,
+                "conservativeProbability": 0.02091369314139728,
+                "expectedRoi": 6.357437247143563,
+                "stake": 400
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-03-02",
+            "stakes": [
+              {
+                "selection": "4-1-2",
+                "probability": 0.03697655345886301,
+                "probStd": 0.009845882430420266,
+                "odds": 114.1,
+                "conservativeProbability": 0.017678623895239293,
+                "expectedRoi": 1.0171309864468032,
+                "stake": 200
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-08-04",
+            "stakes": [
+              {
+                "selection": "2-3-5",
+                "probability": 0.10993246767867518,
+                "probStd": 0.026293266532694953,
+                "odds": 53.8,
+                "conservativeProbability": 0.05839766527459307,
+                "expectedRoi": 2.1417943917731073,
+                "stake": 300
+              },
+              {
+                "selection": "2-5-3",
+                "probability": 0.1421664528467047,
+                "probStd": 0.033277573697750064,
+                "odds": 70,
+                "conservativeProbability": 0.07694240839911458,
+                "expectedRoi": 4.38596858793802,
+                "stake": 500
+              },
+              {
+                "selection": "3-2-5",
+                "probability": 0.05666327145776775,
+                "probStd": 0.015892285788600434,
+                "odds": 130.5,
+                "conservativeProbability": 0.025514391312110897,
+                "expectedRoi": 2.3296280662304722,
+                "stake": 200
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-02-03",
+            "stakes": [
+              {
+                "selection": "2-1-3",
+                "probability": 0.0727230679837816,
+                "probStd": 0.014689038756507976,
+                "odds": 28.9,
+                "conservativeProbability": 0.04393255202102597,
+                "expectedRoi": 0.26965075340765043,
+                "stake": 200
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-14-08",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-04-04",
+            "stakes": [],
+            "abstentionReason": "minimum_virtual_stake_not_reached"
+          },
+          {
+            "raceId": "boat-20261016-09-04",
+            "stakes": [
+              {
+                "selection": "5-2-1",
+                "probability": 0.03397880331887372,
+                "probStd": 0.005704032345101177,
+                "odds": 61.6,
+                "conservativeProbability": 0.022798899922475413,
+                "expectedRoi": 0.40441223522448544,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-13-04",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-21-08",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-03-03",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-10-08",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-02-04",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-08-05",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-14-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-04-05",
+            "stakes": [],
+            "abstentionReason": "minimum_virtual_stake_not_reached"
+          },
+          {
+            "raceId": "boat-20261016-09-05",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-13-05",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-03-04",
+            "stakes": [
+              {
+                "selection": "2-1-4",
+                "probability": 0.1449210996791779,
+                "probStd": 0.058265781440588076,
+                "odds": 48.1,
+                "conservativeProbability": 0.030720168055625274,
+                "expectedRoi": 0.4776400834755756,
+                "stake": 200
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-21-09",
+            "stakes": [
+              {
+                "selection": "1-2-3",
+                "probability": 0.20730583182093582,
+                "probStd": 0.06608088318487633,
+                "odds": 23.4,
+                "conservativeProbability": 0.0777873007785782,
+                "expectedRoi": 0.82022283821873,
+                "stake": 800
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-10-09",
+            "stakes": [
+              {
+                "selection": "5-2-1",
+                "probability": 0.00900218478788292,
+                "probStd": 0.0019051485465377894,
+                "odds": 383,
+                "conservativeProbability": 0.005268093636668853,
+                "expectedRoi": 1.0176798628441706,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-02-05",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-08-06",
+            "stakes": [
+              {
+                "selection": "2-1-3",
+                "probability": 0.07352996645556095,
+                "probStd": 0.023506252899694408,
+                "odds": 291.6,
+                "conservativeProbability": 0.027457710772159916,
+                "expectedRoi": 7.006668461161832,
+                "stake": 500
+              },
+              {
+                "selection": "3-1-2",
+                "probability": 0.027827376045547976,
+                "probStd": 0.011798911618092154,
+                "odds": 377.6,
+                "conservativeProbability": 0.004701509274087353,
+                "expectedRoi": 0.7752899018953847,
+                "stake": 100
+              },
+              {
+                "selection": "6-1-2",
+                "probability": 0.03212682743449723,
+                "probStd": 0.01086457960055896,
+                "odds": 192.9,
+                "conservativeProbability": 0.010832251417401666,
+                "expectedRoi": 1.0895412984167816,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-04-06",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-09-06",
+            "stakes": [
+              {
+                "selection": "4-1-5",
+                "probability": 0.04902153984608909,
+                "probStd": 0.01759262380543351,
+                "odds": 181.2,
+                "conservativeProbability": 0.01453999718743941,
+                "expectedRoi": 1.6346474903640211,
+                "stake": 200
+              },
+              {
+                "selection": "5-1-4",
+                "probability": 0.03549654874377603,
+                "probStd": 0.007392306776110167,
+                "odds": 61.8,
+                "conservativeProbability": 0.021007627462600105,
+                "expectedRoi": 0.29827137718868646,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-13-06",
+            "stakes": [
+              {
+                "selection": "2-3-6",
+                "probability": 0.04162648301254208,
+                "probStd": 0.01633512552284891,
+                "odds": 393.8,
+                "conservativeProbability": 0.009609636987758213,
+                "expectedRoi": 2.7842750457791845,
+                "stake": 100
+              },
+              {
+                "selection": "2-6-3",
+                "probability": 0.0427697667869308,
+                "probStd": 0.01377520964429992,
+                "odds": 629.1,
+                "conservativeProbability": 0.015770355884102954,
+                "expectedRoi": 8.921130886689168,
+                "stake": 300
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-03-05",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-21-10",
+            "stakes": [
+              {
+                "selection": "2-1-6",
+                "probability": 0.048002473023437575,
+                "probStd": 0.012959317446504554,
+                "odds": 58,
+                "conservativeProbability": 0.02260221082828865,
+                "expectedRoi": 0.3109282280407417,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-02-06",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-10-10",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-08-07",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-04-07",
+            "stakes": [
+              {
+                "selection": "2-1-3",
+                "probability": 0.18664626052986658,
+                "probStd": 0.05784053731626043,
+                "odds": 24.6,
+                "conservativeProbability": 0.07327880738999613,
+                "expectedRoi": 0.8026586617939051,
+                "stake": 700
+              },
+              {
+                "selection": "2-3-1",
+                "probability": 0.07457301792483254,
+                "probStd": 0.02424835883853003,
+                "odds": 52.8,
+                "conservativeProbability": 0.027046234601313675,
+                "expectedRoi": 0.4280411869493619,
+                "stake": 200
+              },
+              {
+                "selection": "2-4-1",
+                "probability": 0.016125039202013504,
+                "probStd": 0.004114575838887602,
+                "odds": 202.1,
+                "conservativeProbability": 0.008060470557793804,
+                "expectedRoi": 0.6290210997301278,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-09-07",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-03-06",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-13-07",
+            "stakes": [
+              {
+                "selection": "2-5-3",
+                "probability": 0.05227080895555532,
+                "probStd": 0.018257328519508228,
+                "odds": 458.1,
+                "conservativeProbability": 0.016486445057319193,
+                "expectedRoi": 6.552440480757923,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-14-11",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-21-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-07",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-08-08",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-10-11",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-09-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-08",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-14-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-21-12",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-03-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-10-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-09-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-13-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-02-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-08-10",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-03-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-13-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-10",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-09-10",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-02-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-01",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-03-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-11",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-13-11",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-09-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-11",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-24-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-11",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-03-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-12",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-13-12",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-24-03",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-20-03",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-04-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-04",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-01-04",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-24-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-05",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-24-06",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-20-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-01",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-01-06",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-24-07",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-20-07",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-19-02",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-01-07",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-24-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-08",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-24-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-19-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-24-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-05",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-20-10",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-01-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-06",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-24-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-11",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-19-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-12",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-01-12",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-19-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-09",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-19-10",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-19-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-12",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261017-14-01",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261017-21-01",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261017-10-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-14-02",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261017-21-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-10-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-14-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-21-03",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261017-14-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-10-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-08-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-14-05",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261017-04-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-09-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-21-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-10-05",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          }
+        ]
+      }
+    ]
+  },
+  "candidatePolicy": {
+    "counterfactual": {
+      "temperature": 2.23,
+      "actualCreatedAt": "2026-10-17T03:48:23.743Z",
+      "fitCutoff": "2026-10-16T00:00:00+09:00",
+      "notHistoricallyDeployed": true,
+      "originalSourceModelId": "boat-trifecta-exp-noweather-20261013-10559e2c79ce",
+      "originalSourceArtifactSha256": "386ff046f73d0f604a293d2c7318acc794857d9448f1addaf3f164863a91bdda",
+      "sourceProofsUnmodified": true,
+      "probStdStatus": "original_unchanged_risk_proxy_not_recalibrated"
+    },
+    "status": "insufficient_full_month_coverage",
+    "candidateOnly": true,
+    "registered": false,
+    "promoted": false,
+    "promotionEligible": false,
+    "winner": null,
+    "probabilityStatus": "RAW_UNCALIBRATED",
+    "fullyObservedMonths": 0,
+    "monthlyPositiveProfitFrequency": null,
+    "sourceOpportunities": 164,
+    "acceptedOpportunities": 148,
+    "acceptedByOriginalOutcome": {
+      "placed": 56,
+      "abstained": 92,
+      "unknown": 0
+    },
+    "rejected": {
+      "invalid_forecast_or_decision_time": 11,
+      "missing_cutoff_proof": 4,
+      "missing_forecast_source_proof": 1
+    },
+    "policy": "Exact current Kelly selector; offline restrictive no-recycle gross JPY10000/month including month-start open exposure, JPY100000 initial non-recycling capital. Partial coverage only; no full-month proof accepted.",
+    "candidates": [
+      {
+        "minRawProbability": 0,
+        "maxOdds": null,
+        "months": {
+          "2026-10": {
+            "grossStake": 10000,
+            "carriedMonthStartExposure": 0,
+            "realizedProfit": -10000,
+            "unresolvedStake": 0,
+            "races": 15
+          }
+        },
+        "settlementMonths": {
+          "2026-10": -10000
+        },
+        "settlementMonthRisk": {
+          "2026-10": {
+            "maxRealizedNetLoss": 10000,
+            "maxSettlementDrawdown": 10000
+          }
+        },
+        "placedRaces": 15,
+        "abstainedRaces": 133,
+        "newlyPlacedFromOriginalAbstained": {
+          "count": 7,
+          "raceIds": [
+            "boat-20261016-10-03",
+            "boat-20261016-14-04",
+            "boat-20261016-10-05",
+            "boat-20261016-02-01",
+            "boat-20261016-09-02",
+            "boat-20261016-13-02",
+            "boat-20261016-08-03"
+          ]
+        },
+        "realizedProfit": -10000,
+        "maxRealizedNetLoss": 10000,
+        "maxSettlementDrawdown": 10000,
+        "unresolvedStake": 0,
+        "unresolvedRefundRaces": 0,
+        "worstCaseProfit": -10000,
+        "decisions": [
+          {
+            "raceId": "boat-20261016-21-03",
+            "stakes": [
+              {
+                "selection": "1-6-4",
+                "probability": 0.028868155992990818,
+                "probStd": 0.006066202472840682,
+                "odds": 102.3,
+                "conservativeProbability": 0.01697839914622308,
+                "expectedRoi": 0.7368902326586211,
+                "stake": 100
+              },
+              {
+                "selection": "2-1-4",
+                "probability": 0.011428299557396469,
+                "probStd": 0.001903633665675263,
+                "odds": 272,
+                "conservativeProbability": 0.007697177572672954,
+                "expectedRoi": 1.0936322997670436,
+                "stake": 100
+              },
+              {
+                "selection": "3-6-1",
+                "probability": 0.007578017641578914,
+                "probStd": 0.0008496435447638498,
+                "odds": 732.3,
+                "conservativeProbability": 0.005912716293841769,
+                "expectedRoi": 3.3298821419803266,
+                "stake": 100
+              },
+              {
+                "selection": "4-1-2",
+                "probability": 0.013714603426075701,
+                "probStd": 0.0026022876316201455,
+                "odds": 366.1,
+                "conservativeProbability": 0.008614119668100217,
+                "expectedRoi": 2.1536292104914896,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-1",
+                "probability": 0.0056181874823086324,
+                "probStd": 0.0004788378548251713,
+                "odds": 738.4,
+                "conservativeProbability": 0.004679665286851297,
+                "expectedRoi": 2.4554648478109975,
+                "stake": 100
+              },
+              {
+                "selection": "4-6-1",
+                "probability": 0.007034038233245961,
+                "probStd": 0.001171888951855532,
+                "odds": 1292,
+                "conservativeProbability": 0.004737135887609118,
+                "expectedRoi": 5.12037956679098,
+                "stake": 100
+              },
+              {
+                "selection": "6-1-3",
+                "probability": 0.015487383784480968,
+                "probStd": 0.003726422082353652,
+                "odds": 697.4,
+                "conservativeProbability": 0.008183596503067811,
+                "expectedRoi": 4.707240201239491,
+                "stake": 100
+              },
+              {
+                "selection": "6-1-4",
+                "probability": 0.013545366523029264,
+                "probStd": 0.0028592153326871925,
+                "odds": 853.2,
+                "conservativeProbability": 0.007941304470962366,
+                "expectedRoi": 5.775520974625091,
+                "stake": 100
+              },
+              {
+                "selection": "6-3-1",
+                "probability": 0.007348005115107848,
+                "probStd": 0.0007903137890712572,
+                "odds": 1156,
+                "conservativeProbability": 0.005798990088528184,
+                "expectedRoi": 5.703632542338581,
+                "stake": 100
+              },
+              {
+                "selection": "6-4-1",
+                "probability": 0.006764851986100071,
+                "probStd": 0.0010190889417802747,
+                "odds": 1869,
+                "conservativeProbability": 0.004767437660210733,
+                "expectedRoi": 7.910340986933859,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-10-03",
+            "stakes": [
+              {
+                "selection": "2-6-4",
+                "probability": 0.0033135689796810804,
+                "probStd": 0.00042290933526177663,
+                "odds": 1877,
+                "conservativeProbability": 0.002484666682567998,
+                "expectedRoi": 3.6637193631801326,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-6",
+                "probability": 0.0032195684187191135,
+                "probStd": 0.000312757342974503,
+                "odds": 1313,
+                "conservativeProbability": 0.0026065640264890874,
+                "expectedRoi": 2.4224185667801716,
+                "stake": 100
+              },
+              {
+                "selection": "4-6-2",
+                "probability": 0.002682091855516952,
+                "probStd": 0.00016654262535352278,
+                "odds": 1970,
+                "conservativeProbability": 0.0023556683098240475,
+                "expectedRoi": 3.640666570353374,
+                "stake": 100
+              },
+              {
+                "selection": "6-1-2",
+                "probability": 0.00522543589497368,
+                "probStd": 0.0011284269076769448,
+                "odds": 916.6,
+                "conservativeProbability": 0.003013719155926868,
+                "expectedRoi": 1.7623749783225673,
+                "stake": 100
+              },
+              {
+                "selection": "6-1-4",
+                "probability": 0.004126096699458323,
+                "probStd": 0.0007064744159510668,
+                "odds": 3284,
+                "conservativeProbability": 0.002741406844194232,
+                "expectedRoi": 8.002780076333858,
+                "stake": 100
+              },
+              {
+                "selection": "6-2-1",
+                "probability": 0.0050737822724415075,
+                "probStd": 0.001157251661220741,
+                "odds": 2074,
+                "conservativeProbability": 0.0028055690164488552,
+                "expectedRoi": 4.8187501401149255,
+                "stake": 100
+              },
+              {
+                "selection": "6-2-4",
+                "probability": 0.002788182120129309,
+                "probStd": 0.0002480502719479828,
+                "odds": 3583,
+                "conservativeProbability": 0.0023020035871112628,
+                "expectedRoi": 7.2480788526196545,
+                "stake": 100
+              },
+              {
+                "selection": "6-2-5",
+                "probability": 0.0031561912801308166,
+                "probStd": 0.0004820513182056561,
+                "odds": 2130,
+                "conservativeProbability": 0.0022113706964477305,
+                "expectedRoi": 3.710219583433666,
+                "stake": 100
+              },
+              {
+                "selection": "6-4-1",
+                "probability": 0.003447411077093823,
+                "probStd": 0.0003967259832788522,
+                "odds": 3583,
+                "conservativeProbability": 0.002669828149867273,
+                "expectedRoi": 8.56599426097444,
+                "stake": 100
+              },
+              {
+                "selection": "6-4-2",
+                "probability": 0.002509596882965319,
+                "probStd": 0.00015164305467957315,
+                "odds": 3153,
+                "conservativeProbability": 0.002212376495793356,
+                "expectedRoi": 5.975623091236451,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-14-04",
+            "stakes": [
+              {
+                "selection": "2-3-1",
+                "probability": 0.004485190375721998,
+                "probStd": 0.0006542313602128488,
+                "odds": 537.5,
+                "conservativeProbability": 0.0032028969097048143,
+                "expectedRoi": 0.7215570889663376,
+                "stake": 100
+              },
+              {
+                "selection": "2-4-1",
+                "probability": 0.012191720591743862,
+                "probStd": 0.00381786103908983,
+                "odds": 317.2,
+                "conservativeProbability": 0.004708712955127795,
+                "expectedRoi": 0.4936037493665364,
+                "stake": 100
+              },
+              {
+                "selection": "2-6-1",
+                "probability": 0.009386509448049966,
+                "probStd": 0.003055077189117464,
+                "odds": 493.2,
+                "conservativeProbability": 0.003398558157379737,
+                "expectedRoi": 0.6761688832196864,
+                "stake": 100
+              },
+              {
+                "selection": "2-6-4",
+                "probability": 0.007040597301409198,
+                "probStd": 0.0017207661410338206,
+                "odds": 615,
+                "conservativeProbability": 0.00366789566498291,
+                "expectedRoi": 1.2557558339644896,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-21-04",
+            "stakes": [
+              {
+                "selection": "2-4-1",
+                "probability": 0.022205504963830888,
+                "probStd": 0.007804190162322322,
+                "odds": 503.4,
+                "conservativeProbability": 0.006909292245679136,
+                "expectedRoi": 2.478137716474877,
+                "stake": 100
+              },
+              {
+                "selection": "2-4-5",
+                "probability": 0.0054316203912193745,
+                "probStd": 0.001024306650266003,
+                "odds": 2422,
+                "conservativeProbability": 0.0034239793566980085,
+                "expectedRoi": 7.292878001922576,
+                "stake": 100
+              },
+              {
+                "selection": "2-5-1",
+                "probability": 0.008042865792716044,
+                "probStd": 0.0015269323152262144,
+                "odds": 1030,
+                "conservativeProbability": 0.005050078454872663,
+                "expectedRoi": 4.201580808518843,
+                "stake": 100
+              },
+              {
+                "selection": "2-5-4",
+                "probability": 0.0047788601749809605,
+                "probStd": 0.0006676671210498468,
+                "odds": 2635,
+                "conservativeProbability": 0.0034702326177232607,
+                "expectedRoi": 8.144062947700792,
+                "stake": 100
+              },
+              {
+                "selection": "4-5-2",
+                "probability": 0.004971008381473812,
+                "probStd": 0.0008126339579898382,
+                "odds": 1211,
+                "conservativeProbability": 0.003378245823813729,
+                "expectedRoi": 3.0910556926384256,
+                "stake": 100
+              },
+              {
+                "selection": "5-2-1",
+                "probability": 0.007531151588934578,
+                "probStd": 0.0013287072829711666,
+                "odds": 933.4,
+                "conservativeProbability": 0.004926885314311092,
+                "expectedRoi": 3.598754752377973,
+                "stake": 100
+              },
+              {
+                "selection": "5-2-4",
+                "probability": 0.004420408917866458,
+                "probStd": 0.0005343452948165169,
+                "odds": 1629,
+                "conservativeProbability": 0.0033730921400260848,
+                "expectedRoi": 4.494767096102492,
+                "stake": 100
+              },
+              {
+                "selection": "5-4-1",
+                "probability": 0.00723429698535011,
+                "probStd": 0.000755941668961816,
+                "odds": 409.2,
+                "conservativeProbability": 0.005752651314184951,
+                "expectedRoi": 1.3539849177644818,
+                "stake": 100
+              },
+              {
+                "selection": "5-4-2",
+                "probability": 0.00450113168434468,
+                "probStd": 0.0005891759749223761,
+                "odds": 2240,
+                "conservativeProbability": 0.003346346773496823,
+                "expectedRoi": 6.4958167726328835,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-10-04",
+            "stakes": [
+              {
+                "selection": "2-4-3",
+                "probability": 0.004579058946495758,
+                "probStd": 0.0007045900910262097,
+                "odds": 833.2,
+                "conservativeProbability": 0.003198062368084387,
+                "expectedRoi": 1.6646255650879112,
+                "stake": 100
+              },
+              {
+                "selection": "2-4-5",
+                "probability": 0.006793550154313427,
+                "probStd": 0.0016000032281087598,
+                "odds": 973.6,
+                "conservativeProbability": 0.003657543827220258,
+                "expectedRoi": 2.5609846701816434,
+                "stake": 100
+              },
+              {
+                "selection": "2-4-6",
+                "probability": 0.004098929142844764,
+                "probStd": 0.0005517911174947434,
+                "odds": 1267,
+                "conservativeProbability": 0.003017418552555067,
+                "expectedRoi": 2.8230693060872696,
+                "stake": 100
+              },
+              {
+                "selection": "2-6-4",
+                "probability": 0.004289000802430105,
+                "probStd": 0.000675710387966225,
+                "odds": 1516,
+                "conservativeProbability": 0.0029646084420163043,
+                "expectedRoi": 3.4943463980967175,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-1",
+                "probability": 0.007961660277449293,
+                "probStd": 0.0021364021600924587,
+                "odds": 915.7,
+                "conservativeProbability": 0.0037743120436680745,
+                "expectedRoi": 2.456137538386856,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-3",
+                "probability": 0.0038658592592463858,
+                "probStd": 0.0005522762212712821,
+                "odds": 1284,
+                "conservativeProbability": 0.002783397865554673,
+                "expectedRoi": 2.5738828593722003,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-5",
+                "probability": 0.006002409301105591,
+                "probStd": 0.0014004021457360584,
+                "odds": 1127,
+                "conservativeProbability": 0.0032576210954629167,
+                "expectedRoi": 2.6713389745867073,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-6",
+                "probability": 0.003404079595822948,
+                "probStd": 0.000394007853471732,
+                "odds": 1651,
+                "conservativeProbability": 0.002631824203018353,
+                "expectedRoi": 3.345141759183301,
+                "stake": 100
+              },
+              {
+                "selection": "6-2-3",
+                "probability": 0.004783748415704756,
+                "probStd": 0.0009696730409041811,
+                "odds": 1267,
+                "conservativeProbability": 0.0028831892555325612,
+                "expectedRoi": 2.653000786759755,
+                "stake": 100
+              },
+              {
+                "selection": "6-2-4",
+                "probability": 0.003709376098331204,
+                "probStd": 0.0006119557684692922,
+                "odds": 2202,
+                "conservativeProbability": 0.0025099427921313915,
+                "expectedRoi": 4.5268940282733245,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-08-01",
+            "stakes": [
+              {
+                "selection": "3-2-5",
+                "probability": 0.00617286306450865,
+                "probStd": 0.0009734647850216407,
+                "odds": 1283,
+                "conservativeProbability": 0.004264872085866234,
+                "expectedRoi": 4.471830886166378,
+                "stake": 100
+              },
+              {
+                "selection": "3-2-6",
+                "probability": 0.00781290157091302,
+                "probStd": 0.0016454191814124872,
+                "odds": 1197,
+                "conservativeProbability": 0.004587879975344546,
+                "expectedRoi": 4.491692330487422,
+                "stake": 100
+              },
+              {
+                "selection": "5-1-2",
+                "probability": 0.010023279656569014,
+                "probStd": 0.002751435242976931,
+                "odds": 962.5,
+                "conservativeProbability": 0.004630466580334229,
+                "expectedRoi": 3.4568240835716955,
+                "stake": 100
+              },
+              {
+                "selection": "5-2-1",
+                "probability": 0.013834344335697487,
+                "probStd": 0.005004836231684669,
+                "odds": 1382,
+                "conservativeProbability": 0.004024865321595536,
+                "expectedRoi": 4.5623638744450306,
+                "stake": 100
+              },
+              {
+                "selection": "5-2-3",
+                "probability": 0.006304803262302804,
+                "probStd": 0.0010931368940433324,
+                "odds": 1585,
+                "conservativeProbability": 0.004162254949977873,
+                "expectedRoi": 5.597174095714929,
+                "stake": 100
+              },
+              {
+                "selection": "5-2-6",
+                "probability": 0.00801083771049868,
+                "probStd": 0.0020317322617446616,
+                "odds": 1684,
+                "conservativeProbability": 0.004028642477479144,
+                "expectedRoi": 5.784233932074878,
+                "stake": 100
+              },
+              {
+                "selection": "6-2-3",
+                "probability": 0.00828353117162331,
+                "probStd": 0.0021053484168822227,
+                "odds": 1738,
+                "conservativeProbability": 0.004157048274534153,
+                "expectedRoi": 6.224949901140358,
+                "stake": 100
+              },
+              {
+                "selection": "6-2-5",
+                "probability": 0.00820960687426715,
+                "probStd": 0.00202109605962264,
+                "odds": 1858,
+                "conservativeProbability": 0.004248258597406775,
+                "expectedRoi": 6.893264473981787,
+                "stake": 100
+              },
+              {
+                "selection": "6-3-2",
+                "probability": 0.0055021353338971695,
+                "probStd": 0.0008570987219434482,
+                "odds": 1925,
+                "conservativeProbability": 0.003822221838888011,
+                "expectedRoi": 6.357777039859421,
+                "stake": 100
+              },
+              {
+                "selection": "6-5-2",
+                "probability": 0.004891809410624789,
+                "probStd": 0.00048546605427301316,
+                "odds": 1996,
+                "conservativeProbability": 0.0039402959442496836,
+                "expectedRoi": 6.864830704722368,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-10-05",
+            "stakes": [
+              {
+                "selection": "2-3-1",
+                "probability": 0.018527734767049064,
+                "probStd": 0.006413434822447864,
+                "odds": 253.3,
+                "conservativeProbability": 0.0059574025150512504,
+                "expectedRoi": 0.5090100570624818,
+                "stake": 100
+              },
+              {
+                "selection": "2-5-4",
+                "probability": 0.004302188827877117,
+                "probStd": 0.0005112963987948245,
+                "odds": 738.9,
+                "conservativeProbability": 0.003300047886239261,
+                "expectedRoi": 1.43840538314219,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-3",
+                "probability": 0.006664628345549103,
+                "probStd": 0.0011608839712354498,
+                "odds": 347.7,
+                "conservativeProbability": 0.004389295761927621,
+                "expectedRoi": 0.5261581364222339,
+                "stake": 100
+              },
+              {
+                "selection": "5-1-2",
+                "probability": 0.011314796563235807,
+                "probStd": 0.0027837519125366505,
+                "odds": 319.5,
+                "conservativeProbability": 0.005858642814663972,
+                "expectedRoi": 0.8718363792851391,
+                "stake": 100
+              },
+              {
+                "selection": "5-1-4",
+                "probability": 0.007867550680587872,
+                "probStd": 0.0013031747038848337,
+                "odds": 347.7,
+                "conservativeProbability": 0.005313328260973598,
+                "expectedRoi": 0.8474442363405199,
+                "stake": 100
+              },
+              {
+                "selection": "5-2-1",
+                "probability": 0.009374433723984464,
+                "probStd": 0.0011448474074632234,
+                "odds": 669.2,
+                "conservativeProbability": 0.007130532805356546,
+                "expectedRoi": 3.7717525533446015,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-02-01",
+            "stakes": [
+              {
+                "selection": "6-2-4",
+                "probability": 0.005404327499442231,
+                "probStd": 0.0013334853573531056,
+                "odds": 828,
+                "conservativeProbability": 0.002790696199030144,
+                "expectedRoi": 1.3106964527969591,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-04-02",
+            "stakes": [
+              {
+                "selection": "5-2-1",
+                "probability": 0.01089268988134727,
+                "probStd": 0.0033304447482859806,
+                "odds": 425.5,
+                "conservativeProbability": 0.004365018174706748,
+                "expectedRoi": 0.8573152333377214,
+                "stake": 100
+              },
+              {
+                "selection": "6-1-2",
+                "probability": 0.0067572304537307035,
+                "probStd": 0.0020070019076576387,
+                "odds": 776.8,
+                "conservativeProbability": 0.0028235067147217314,
+                "expectedRoi": 1.193300015995841,
+                "stake": 100
+              },
+              {
+                "selection": "6-2-1",
+                "probability": 0.006978641696015837,
+                "probStd": 0.0019506735723145293,
+                "odds": 1294,
+                "conservativeProbability": 0.0031553214942793596,
+                "expectedRoi": 3.082986013597491,
+                "stake": 100
+              },
+              {
+                "selection": "6-3-2",
+                "probability": 0.003754862911216332,
+                "probStd": 0.0006915102258418271,
+                "odds": 2225,
+                "conservativeProbability": 0.0023995028685663508,
+                "expectedRoi": 4.33889388256013,
+                "stake": 100
+              },
+              {
+                "selection": "6-3-4",
+                "probability": 0.003568148165964004,
+                "probStd": 0.0005903871268307839,
+                "odds": 1959,
+                "conservativeProbability": 0.0024109893973756676,
+                "expectedRoi": 3.7231282294589327,
+                "stake": 100
+              },
+              {
+                "selection": "6-4-1",
+                "probability": 0.0064551294126051866,
+                "probStd": 0.0020650471665476654,
+                "odds": 2034,
+                "conservativeProbability": 0.0024076369661717627,
+                "expectedRoi": 3.8971335891933654,
+                "stake": 100
+              },
+              {
+                "selection": "6-4-3",
+                "probability": 0.003915936050769507,
+                "probStd": 0.0007124908555181498,
+                "odds": 2373,
+                "conservativeProbability": 0.002519453973953933,
+                "expectedRoi": 4.9786642801926835,
+                "stake": 100
+              },
+              {
+                "selection": "6-5-3",
+                "probability": 0.002846899490229787,
+                "probStd": 0.00044601052126981295,
+                "odds": 2202,
+                "conservativeProbability": 0.0019727188685409536,
+                "expectedRoi": 3.34392694852718,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-09-02",
+            "stakes": [
+              {
+                "selection": "2-3-5",
+                "probability": 0.007860308906761097,
+                "probStd": 0.0018847466735086268,
+                "odds": 375.5,
+                "conservativeProbability": 0.004166205426684188,
+                "expectedRoi": 0.5644101377199127,
+                "stake": 100
+              },
+              {
+                "selection": "3-5-2",
+                "probability": 0.008504508801515112,
+                "probStd": 0.001870871879278176,
+                "odds": 303.2,
+                "conservativeProbability": 0.004837599918129888,
+                "expectedRoi": 0.46676029517698203,
+                "stake": 100
+              },
+              {
+                "selection": "3-6-5",
+                "probability": 0.006208332899875128,
+                "probStd": 0.001453642039036692,
+                "odds": 788.5,
+                "conservativeProbability": 0.0033591945033632116,
+                "expectedRoi": 1.6487248659018925,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-21-06",
+            "stakes": [
+              {
+                "selection": "3-1-5",
+                "probability": 0.009213360935795624,
+                "probStd": 0.0011304953889567494,
+                "odds": 555.2,
+                "conservativeProbability": 0.0069975899734403945,
+                "expectedRoi": 2.8850619532541075,
+                "stake": 100
+              },
+              {
+                "selection": "3-2-5",
+                "probability": 0.005386903561160921,
+                "probStd": 0.0005036714265518357,
+                "odds": 710.4,
+                "conservativeProbability": 0.004399707565119323,
+                "expectedRoi": 2.125552254260767,
+                "stake": 100
+              },
+              {
+                "selection": "3-5-1",
+                "probability": 0.005915378397532946,
+                "probStd": 0.0005661443294932516,
+                "odds": 1305,
+                "conservativeProbability": 0.004805735511726172,
+                "expectedRoi": 5.271484842802654,
+                "stake": 100
+              },
+              {
+                "selection": "3-5-2",
+                "probability": 0.00459499618745038,
+                "probStd": 0.0003414497164152261,
+                "odds": 985.8,
+                "conservativeProbability": 0.003925754743276538,
+                "expectedRoi": 2.870009025922011,
+                "stake": 100
+              },
+              {
+                "selection": "3-5-6",
+                "probability": 0.003921921307178229,
+                "probStd": 0.00026008586522514605,
+                "odds": 1725,
+                "conservativeProbability": 0.003412153011336943,
+                "expectedRoi": 4.885963944556226,
+                "stake": 100
+              },
+              {
+                "selection": "3-6-5",
+                "probability": 0.0043441999045767945,
+                "probStd": 0.00032649103020264886,
+                "odds": 754.8,
+                "conservativeProbability": 0.0037042774853796026,
+                "expectedRoi": 1.795988645964524,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-3",
+                "probability": 0.004758738188015854,
+                "probStd": 0.0007501701654569304,
+                "odds": 635.6,
+                "conservativeProbability": 0.0032884046637202706,
+                "expectedRoi": 1.090110004260604,
+                "stake": 100
+              },
+              {
+                "selection": "4-3-1",
+                "probability": 0.011760976873102342,
+                "probStd": 0.002265117093296522,
+                "odds": 555.2,
+                "conservativeProbability": 0.007321347370241159,
+                "expectedRoi": 3.064812059957892,
+                "stake": 100
+              },
+              {
+                "selection": "4-3-2",
+                "probability": 0.008062006041041419,
+                "probStd": 0.0013704494580063747,
+                "odds": 743.1,
+                "conservativeProbability": 0.005375925103348924,
+                "expectedRoi": 2.994849944298586,
+                "stake": 100
+              },
+              {
+                "selection": "5-3-1",
+                "probability": 0.0029027426708083687,
+                "probStd": 0.00011647937405415956,
+                "odds": 1725,
+                "conservativeProbability": 0.002674443097662216,
+                "expectedRoi": 3.6134143434673227,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-13-02",
+            "stakes": [
+              {
+                "selection": "2-4-5",
+                "probability": 0.003944863485389716,
+                "probStd": 0.0004719799404739031,
+                "odds": 688.7,
+                "conservativeProbability": 0.003019782802060866,
+                "expectedRoi": 1.0797244157793187,
+                "stake": 100
+              },
+              {
+                "selection": "4-1-2",
+                "probability": 0.004046840170377514,
+                "probStd": 0.00022427399611872016,
+                "odds": 495.4,
+                "conservativeProbability": 0.0036072631379848222,
+                "expectedRoi": 0.7870381585576809,
+                "stake": 100
+              },
+              {
+                "selection": "4-1-3",
+                "probability": 0.005737309971754132,
+                "probStd": 0.0006904072088327475,
+                "odds": 672.3,
+                "conservativeProbability": 0.004384111842441947,
+                "expectedRoi": 1.947438391673721,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-1",
+                "probability": 0.005713427981086145,
+                "probStd": 0.0008361549671309304,
+                "odds": 672.3,
+                "conservativeProbability": 0.004074564245509521,
+                "expectedRoi": 1.7393295422560509,
+                "stake": 100
+              },
+              {
+                "selection": "4-2-3",
+                "probability": 0.00997068960699074,
+                "probStd": 0.002350637453447163,
+                "odds": 1129,
+                "conservativeProbability": 0.005363440198234301,
+                "expectedRoi": 5.055323983806526,
+                "stake": 100
+              },
+              {
+                "selection": "4-3-1",
+                "probability": 0.008432679126008447,
+                "probStd": 0.002077930001391665,
+                "odds": 627.5,
+                "conservativeProbability": 0.004359936323280784,
+                "expectedRoi": 1.7358600428586919,
+                "stake": 100
+              },
+              {
+                "selection": "4-3-2",
+                "probability": 0.01064638873458308,
+                "probStd": 0.0029286783607204007,
+                "odds": 910.9,
+                "conservativeProbability": 0.004906179147571094,
+                "expectedRoi": 3.46903858552251,
+                "stake": 100
+              },
+              {
+                "selection": "4-3-5",
+                "probability": 0.0037297178433761276,
+                "probStd": 0.0002255360366472495,
+                "odds": 743.1,
+                "conservativeProbability": 0.0032876672115475184,
+                "expectedRoi": 1.4430655049009609,
+                "stake": 100
+              },
+              {
+                "selection": "5-3-4",
+                "probability": 0.003837965006124763,
+                "probStd": 0.0002279793930080858,
+                "odds": 532.7,
+                "conservativeProbability": 0.003391125395828915,
+                "expectedRoi": 0.806452498358063,
+                "stake": 100
+              },
+              {
+                "selection": "6-3-2",
+                "probability": 0.006236523695336694,
+                "probStd": 0.0009815330244389467,
+                "odds": 522.9,
+                "conservativeProbability": 0.0043127189674363586,
+                "expectedRoi": 1.2551207480724718,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-10-06",
+            "stakes": [
+              {
+                "selection": "1-5-2",
+                "probability": 0.027480390980891767,
+                "probStd": 0.005452581043783128,
+                "odds": 72.2,
+                "conservativeProbability": 0.016793332135076836,
+                "expectedRoi": 0.21247858015254772,
+                "stake": 100
+              },
+              {
+                "selection": "1-6-2",
+                "probability": 0.007081760904841917,
+                "probStd": 0.0008223326760744637,
+                "odds": 283.7,
+                "conservativeProbability": 0.0054699888597359685,
+                "expectedRoi": 0.5518358395070941,
+                "stake": 100
+              },
+              {
+                "selection": "3-1-2",
+                "probability": 0.023643303767140765,
+                "probStd": 0.0016524434227730474,
+                "odds": 56.6,
+                "conservativeProbability": 0.020404514658505592,
+                "expectedRoi": 0.1548955296714165,
+                "stake": 100
+              },
+              {
+                "selection": "5-1-2",
+                "probability": 0.019957910410807734,
+                "probStd": 0.004755763528295529,
+                "odds": 129.8,
+                "conservativeProbability": 0.010636613895348496,
+                "expectedRoi": 0.3806324836162349,
+                "stake": 100
+              },
+              {
+                "selection": "5-3-1",
+                "probability": 0.0066036625407748335,
+                "probStd": 0.0007835017128067505,
+                "odds": 295.9,
+                "conservativeProbability": 0.0050679991836736025,
+                "expectedRoi": 0.49962095844901877,
+                "stake": 100
+              },
+              {
+                "selection": "6-1-2",
+                "probability": 0.004933409386355434,
+                "probStd": 0.00033752988732037444,
+                "odds": 573.3,
+                "conservativeProbability": 0.0042718508072075,
+                "expectedRoi": 1.4490520677720595,
+                "stake": 100
+              },
+              {
+                "selection": "6-2-1",
+                "probability": 0.004234602049813862,
+                "probStd": 0.0002590975594859892,
+                "odds": 688,
+                "conservativeProbability": 0.003726770833221323,
+                "expectedRoi": 1.56401833325627,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-08-03",
+            "stakes": [
+              {
+                "selection": "4-3-2",
+                "probability": 0.0060265344895460695,
+                "probStd": 0.0007798044386120147,
+                "odds": 691.6,
+                "conservativeProbability": 0.0044981177898665205,
+                "expectedRoi": 2.1108982634716855,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-03-01",
+            "stakes": [
+              {
+                "selection": "6-3-2",
+                "probability": 0.007544611020014164,
+                "probStd": 0.0010797488672442243,
+                "odds": 1257,
+                "conservativeProbability": 0.0054283032402154836,
+                "expectedRoi": 5.823377172950863,
+                "stake": 100
+              }
+            ],
+            "abstentionReason": null
+          },
+          {
+            "raceId": "boat-20261016-02-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-09-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-21-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-03-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-14-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-09-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-21-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-03-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-10-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-14-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-09-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-03-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-21-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-10-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-09-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-03-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-21-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-10-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-09-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-03-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-14-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-21-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-10-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-09-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-14-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-21-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-03-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-10-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-09-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-03-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-09-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-03-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-09-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-02",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-20-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-11",
+            "stakes": [],
+            "abstentionReason": "no_conservative_positive_edge"
+          },
+          {
+            "raceId": "boat-20261016-03-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-08-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-13-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-04-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-02-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-06",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-07",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-24-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-20-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-01-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-08",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-09",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-10",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-11",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261016-19-12",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-14-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-21-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-10-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-14-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-21-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-10-02",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-14-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-21-03",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-14-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-10-04",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-08-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-14-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-04-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-09-01",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-21-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          },
+          {
+            "raceId": "boat-20261017-10-05",
+            "stakes": [],
+            "abstentionReason": "virtual_balance_unavailable"
+          }
+        ]
+      }
+    ]
+  },
+  "selectedTickets": {
+    "baselineOwn": {
+      "selectionDescription": {
+        "allSelectedTickets": 38,
+        "probability": {
+          "mean": 0.0631477919770077,
+          "min": 0.00900218478788292,
+          "max": 0.2073058318209357
+        },
+        "rawProbability": {
+          "mean": 0.06314779197700769,
+          "min": 0.00900218478788292,
+          "max": 0.20730583182093582
+        },
+        "odds": {
+          "mean": 196.56842105263163,
+          "min": 23.4,
+          "max": 629.1
+        },
+        "oddsAtLeast100": 22
+      },
+      "tickets": 38,
+      "meanPredicted": 0.0631477919770077,
+      "actualHitRate": 0,
+      "hits": 0,
+      "unlabeledSelectedTickets": 0
+    },
+    "candidateOwn": {
+      "selectionDescription": {
+        "allSelectedTickets": 100,
+        "probability": {
+          "mean": 0.007455456505213451,
+          "min": 0.002509596882965319,
+          "max": 0.028868155992990818
+        },
+        "rawProbability": {
+          "mean": 0.0031814074420693193,
+          "min": 0.00015386876899697361,
+          "max": 0.031323407295145725
+        },
+        "odds": {
+          "mean": 1145.8399999999997,
+          "min": 56.6,
+          "max": 3583
+        },
+        "oddsAtLeast100": 98
+      },
+      "tickets": 100,
+      "meanPredicted": 0.007455456505213451,
+      "actualHitRate": 0,
+      "hits": 0,
+      "unlabeledSelectedTickets": 0
+    },
+    "baselineOnCandidateCohort": {
+      "selectionDescription": {
+        "allSelectedTickets": 100,
+        "probability": {
+          "mean": 0.0031814074420693193,
+          "min": 0.00015386876899697348,
+          "max": 0.031323407295145704
+        },
+        "rawProbability": {
+          "mean": 0.0031814074420693193,
+          "min": 0.00015386876899697361,
+          "max": 0.031323407295145725
+        },
+        "odds": {
+          "mean": 1145.8399999999997,
+          "min": 56.6,
+          "max": 3583
+        },
+        "oddsAtLeast100": 98
+      },
+      "tickets": 100,
+      "meanPredicted": 0.0031814074420693193,
+      "actualHitRate": 0,
+      "hits": 0,
+      "unlabeledSelectedTickets": 0
+    },
+    "candidateOnBaselineCohort": {
+      "selectionDescription": {
+        "allSelectedTickets": 38,
+        "probability": {
+          "mean": 0.030957152301437352,
+          "min": 0.009889366160240262,
+          "max": 0.06271388803789935
+        },
+        "rawProbability": {
+          "mean": 0.06314779197700769,
+          "min": 0.00900218478788292,
+          "max": 0.20730583182093582
+        },
+        "odds": {
+          "mean": 196.56842105263163,
+          "min": 23.4,
+          "max": 629.1
+        },
+        "oddsAtLeast100": 22
+      },
+      "tickets": 38,
+      "meanPredicted": 0.030957152301437352,
+      "actualHitRate": 0,
+      "hits": 0,
+      "unlabeledSelectedTickets": 0
+    }
+  },
+  "caveats": [
+    "Retrospective temporal holdout; prior aggregates were already inspected. Not independent untouched validation.",
+    "One-parameter final-mean calibration only; no market input. Original std remains an unchanged risk proxy, not calibrated uncertainty.",
+    "Test bankroll resets to JPY100000; identical current Kelly selector, no candidate probability/odds filter, restrictive monthly gross JPY10000 + carry overlay.",
+    "Unlabeled opportunities remain in policy decisions and reserve risk; only scoring excludes missing labels.",
+    "Zero full calendar months: monthly positive-profit frequency null. Race/date dependence and tiny labeled cohort preclude profitability proof."
+  ],
+  "candidateArtifactSha256": "001423374aff34b891def01289ec637041ba284ef574319f87b0d5582e205a77",
+  "inputDatasetSha256": "783705a602c92e9e5c9c2d5578d07dfb7761467293fd79ce6be57b6fd32e8f14"
+}

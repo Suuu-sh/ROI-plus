@@ -1,0 +1,760 @@
+{
+  "schemaVersion": 1,
+  "modelId": "boat-trifecta-saved-mean-temperature-research-20261017",
+  "createdAt": "2026-10-17T03:48:23.743Z",
+  "baseModelId": "boat-trifecta-exp-noweather-20261013-10559e2c79ce",
+  "baseArtifactSha256": "386ff046f73d0f604a293d2c7318acc794857d9448f1addaf3f164863a91bdda",
+  "inputDatasetSha256": "783705a602c92e9e5c9c2d5578d07dfb7761467293fd79ce6be57b6fd32e8f14",
+  "frozenInputAsOf": "2026-10-17T10:35:04.843+09:00",
+  "temperature": 2.23,
+  "trainingNll": 4.371345575883627,
+  "identityTrainingNll": 4.756454330022893,
+  "rejected": {
+    "invalid_forecast_or_decision_time": 15,
+    "missing_or_invalid_official_outcome": 11,
+    "outcome_not_available_before_fit_cutoff": 28,
+    "missing_forecast_source_proof": 1
+  },
+  "protocol": {
+    "method": "saved-mean-power-temperature",
+    "minTemperature": 1,
+    "maxTemperature": 10,
+    "step": 0.01,
+    "objective": "mean training multiclass negative log likelihood",
+    "regularization": 0,
+    "simulatedFitCutoff": "2026-10-16T00:00:00+09:00",
+    "trainDates": [
+      "20261014",
+      "20261015"
+    ],
+    "testDates": [
+      "20261016",
+      "20261017"
+    ],
+    "qualifiedPipelineFloors": {
+      "train": 300,
+      "validation": 100,
+      "test": 100
+    },
+    "researchOnly": true
+  },
+  "candidateOnly": true,
+  "registered": false,
+  "promoted": false,
+  "evaluationQualified": false,
+  "promotionEligible": false,
+  "status": "low_data_research_candidate_not_qualified",
+  "uncertainty": "Original probStd retained unchanged as conservative uncertainty proxy; not calibrated uncertainty or covariance.",
+  "trainingRaceCount": 51,
+  "trainRaceIdsSha256": "4c2d28d9af2b104068178c991971077ab348d6e86f7e2475070b1931ceefc0b4",
+  "partitions": {
+    "train": [
+      {
+        "raceId": "boat-20261014-04-03",
+        "outcomeAvailableAt": "2026-10-14T03:41:28.278Z"
+      },
+      {
+        "raceId": "boat-20261014-04-06",
+        "outcomeAvailableAt": "2026-10-14T04:08:50.663Z"
+      },
+      {
+        "raceId": "boat-20261014-06-03",
+        "outcomeAvailableAt": "2026-10-14T03:36:49.133Z"
+      },
+      {
+        "raceId": "boat-20261014-06-04",
+        "outcomeAvailableAt": "2026-10-14T04:02:06.247Z"
+      },
+      {
+        "raceId": "boat-20261014-06-05",
+        "outcomeAvailableAt": "2026-10-14T04:41:22.482Z"
+      },
+      {
+        "raceId": "boat-20261014-11-01",
+        "outcomeAvailableAt": "2026-10-14T03:36:56.139Z"
+      },
+      {
+        "raceId": "boat-20261014-11-04",
+        "outcomeAvailableAt": "2026-10-14T03:41:45.903Z"
+      },
+      {
+        "raceId": "boat-20261014-11-06",
+        "outcomeAvailableAt": "2026-10-14T03:58:50.406Z"
+      },
+      {
+        "raceId": "boat-20261014-11-08",
+        "outcomeAvailableAt": "2026-10-14T05:01:34.804Z"
+      },
+      {
+        "raceId": "boat-20261014-12-07",
+        "outcomeAvailableAt": "2026-10-14T10:01:35.135Z"
+      },
+      {
+        "raceId": "boat-20261014-12-09",
+        "outcomeAvailableAt": "2026-10-14T10:10:35.808Z"
+      },
+      {
+        "raceId": "boat-20261014-12-11",
+        "outcomeAvailableAt": "2026-10-14T11:20:52.468Z"
+      },
+      {
+        "raceId": "boat-20261014-12-12",
+        "outcomeAvailableAt": "2026-10-14T11:40:51.551Z"
+      },
+      {
+        "raceId": "boat-20261014-13-01",
+        "outcomeAvailableAt": "2026-10-14T03:41:10.273Z"
+      },
+      {
+        "raceId": "boat-20261014-13-02",
+        "outcomeAvailableAt": "2026-10-14T03:41:21.311Z"
+      },
+      {
+        "raceId": "boat-20261014-13-05",
+        "outcomeAvailableAt": "2026-10-14T03:45:27.909Z"
+      },
+      {
+        "raceId": "boat-20261014-13-06",
+        "outcomeAvailableAt": "2026-10-14T04:20:16.084Z"
+      },
+      {
+        "raceId": "boat-20261014-13-08",
+        "outcomeAvailableAt": "2026-10-14T05:21:21.060Z"
+      },
+      {
+        "raceId": "boat-20261014-14-08",
+        "outcomeAvailableAt": "2026-10-14T03:41:53.163Z"
+      },
+      {
+        "raceId": "boat-20261014-14-12",
+        "outcomeAvailableAt": "2026-10-14T05:21:10.665Z"
+      },
+      {
+        "raceId": "boat-20261014-15-06",
+        "outcomeAvailableAt": "2026-10-14T09:59:25.108Z"
+      },
+      {
+        "raceId": "boat-20261014-15-07",
+        "outcomeAvailableAt": "2026-10-14T10:01:48.297Z"
+      },
+      {
+        "raceId": "boat-20261014-15-08",
+        "outcomeAvailableAt": "2026-10-14T10:04:19.131Z"
+      },
+      {
+        "raceId": "boat-20261014-15-09",
+        "outcomeAvailableAt": "2026-10-14T10:21:04.787Z"
+      },
+      {
+        "raceId": "boat-20261014-15-10",
+        "outcomeAvailableAt": "2026-10-14T10:51:06.082Z"
+      },
+      {
+        "raceId": "boat-20261014-15-11",
+        "outcomeAvailableAt": "2026-10-14T11:31:20.061Z"
+      },
+      {
+        "raceId": "boat-20261014-15-12",
+        "outcomeAvailableAt": "2026-10-14T11:51:03.767Z"
+      },
+      {
+        "raceId": "boat-20261014-18-05",
+        "outcomeAvailableAt": "2026-10-14T03:41:06.674Z"
+      },
+      {
+        "raceId": "boat-20261014-18-06",
+        "outcomeAvailableAt": "2026-10-14T03:41:13.909Z"
+      },
+      {
+        "raceId": "boat-20261014-18-08",
+        "outcomeAvailableAt": "2026-10-14T03:45:19.965Z"
+      },
+      {
+        "raceId": "boat-20261014-18-09",
+        "outcomeAvailableAt": "2026-10-14T03:58:53.645Z"
+      },
+      {
+        "raceId": "boat-20261014-19-03",
+        "outcomeAvailableAt": "2026-10-14T10:04:30.383Z"
+      },
+      {
+        "raceId": "boat-20261014-19-06",
+        "outcomeAvailableAt": "2026-10-14T11:11:00.875Z"
+      },
+      {
+        "raceId": "boat-20261014-19-07",
+        "outcomeAvailableAt": "2026-10-14T11:41:05.261Z"
+      },
+      {
+        "raceId": "boat-20261014-19-08",
+        "outcomeAvailableAt": "2026-10-14T12:20:26.400Z"
+      },
+      {
+        "raceId": "boat-20261014-19-09",
+        "outcomeAvailableAt": "2026-10-14T12:40:24.855Z"
+      },
+      {
+        "raceId": "boat-20261014-19-10",
+        "outcomeAvailableAt": "2026-10-14T13:10:26.375Z"
+      },
+      {
+        "raceId": "boat-20261014-20-05",
+        "outcomeAvailableAt": "2026-10-14T09:58:48.576Z"
+      },
+      {
+        "raceId": "boat-20261014-20-07",
+        "outcomeAvailableAt": "2026-10-14T10:03:34.434Z"
+      },
+      {
+        "raceId": "boat-20261014-20-09",
+        "outcomeAvailableAt": "2026-10-14T10:42:08.040Z"
+      },
+      {
+        "raceId": "boat-20261014-21-07",
+        "outcomeAvailableAt": "2026-10-14T03:41:42.292Z"
+      },
+      {
+        "raceId": "boat-20261014-21-10",
+        "outcomeAvailableAt": "2026-10-14T04:31:22.692Z"
+      },
+      {
+        "raceId": "boat-20261014-21-11",
+        "outcomeAvailableAt": "2026-10-14T05:11:15.801Z"
+      },
+      {
+        "raceId": "boat-20261014-22-03",
+        "outcomeAvailableAt": "2026-10-14T03:45:15.936Z"
+      },
+      {
+        "raceId": "boat-20261014-24-06",
+        "outcomeAvailableAt": "2026-10-14T10:00:53.983Z"
+      },
+      {
+        "raceId": "boat-20261014-24-07",
+        "outcomeAvailableAt": "2026-10-14T10:01:59.546Z"
+      },
+      {
+        "raceId": "boat-20261014-24-09",
+        "outcomeAvailableAt": "2026-10-14T10:30:50.192Z"
+      },
+      {
+        "raceId": "boat-20261015-15-11",
+        "outcomeAvailableAt": "2026-10-15T11:20:09.206Z"
+      },
+      {
+        "raceId": "boat-20261015-15-12",
+        "outcomeAvailableAt": "2026-10-15T11:50:19.652Z"
+      },
+      {
+        "raceId": "boat-20261015-20-12",
+        "outcomeAvailableAt": "2026-10-15T12:00:06.564Z"
+      },
+      {
+        "raceId": "boat-20261015-24-11",
+        "outcomeAvailableAt": "2026-10-15T11:30:12.986Z"
+      }
+    ],
+    "test": [
+      {
+        "raceId": "boat-20261016-14-01"
+      },
+      {
+        "raceId": "boat-20261016-21-01"
+      },
+      {
+        "raceId": "boat-20261016-10-01"
+      },
+      {
+        "raceId": "boat-20261016-14-02"
+      },
+      {
+        "raceId": "boat-20261016-21-02"
+      },
+      {
+        "raceId": "boat-20261016-10-02"
+      },
+      {
+        "raceId": "boat-20261016-14-03"
+      },
+      {
+        "raceId": "boat-20261016-21-03"
+      },
+      {
+        "raceId": "boat-20261016-10-03"
+      },
+      {
+        "raceId": "boat-20261016-14-04"
+      },
+      {
+        "raceId": "boat-20261016-21-04"
+      },
+      {
+        "raceId": "boat-20261016-10-04"
+      },
+      {
+        "raceId": "boat-20261016-08-01"
+      },
+      {
+        "raceId": "boat-20261016-04-01"
+      },
+      {
+        "raceId": "boat-20261016-14-05"
+      },
+      {
+        "raceId": "boat-20261016-10-05"
+      },
+      {
+        "raceId": "boat-20261016-13-01"
+      },
+      {
+        "raceId": "boat-20261016-08-02"
+      },
+      {
+        "raceId": "boat-20261016-02-01"
+      },
+      {
+        "raceId": "boat-20261016-04-02"
+      },
+      {
+        "raceId": "boat-20261016-09-02"
+      },
+      {
+        "raceId": "boat-20261016-21-06"
+      },
+      {
+        "raceId": "boat-20261016-13-02"
+      },
+      {
+        "raceId": "boat-20261016-10-06"
+      },
+      {
+        "raceId": "boat-20261016-08-03"
+      },
+      {
+        "raceId": "boat-20261016-03-01"
+      },
+      {
+        "raceId": "boat-20261016-02-02"
+      },
+      {
+        "raceId": "boat-20261016-14-07"
+      },
+      {
+        "raceId": "boat-20261016-09-03"
+      },
+      {
+        "raceId": "boat-20261016-13-03"
+      },
+      {
+        "raceId": "boat-20261016-21-07"
+      },
+      {
+        "raceId": "boat-20261016-10-07"
+      },
+      {
+        "raceId": "boat-20261016-03-02"
+      },
+      {
+        "raceId": "boat-20261016-08-04"
+      },
+      {
+        "raceId": "boat-20261016-02-03"
+      },
+      {
+        "raceId": "boat-20261016-14-08"
+      },
+      {
+        "raceId": "boat-20261016-04-04"
+      },
+      {
+        "raceId": "boat-20261016-09-04"
+      },
+      {
+        "raceId": "boat-20261016-13-04"
+      },
+      {
+        "raceId": "boat-20261016-21-08"
+      },
+      {
+        "raceId": "boat-20261016-03-03"
+      },
+      {
+        "raceId": "boat-20261016-10-08"
+      },
+      {
+        "raceId": "boat-20261016-02-04"
+      },
+      {
+        "raceId": "boat-20261016-08-05"
+      },
+      {
+        "raceId": "boat-20261016-14-09"
+      },
+      {
+        "raceId": "boat-20261016-04-05"
+      },
+      {
+        "raceId": "boat-20261016-09-05"
+      },
+      {
+        "raceId": "boat-20261016-13-05"
+      },
+      {
+        "raceId": "boat-20261016-03-04"
+      },
+      {
+        "raceId": "boat-20261016-21-09"
+      },
+      {
+        "raceId": "boat-20261016-10-09"
+      },
+      {
+        "raceId": "boat-20261016-02-05"
+      },
+      {
+        "raceId": "boat-20261016-08-06"
+      },
+      {
+        "raceId": "boat-20261016-04-06"
+      },
+      {
+        "raceId": "boat-20261016-09-06"
+      },
+      {
+        "raceId": "boat-20261016-14-10"
+      },
+      {
+        "raceId": "boat-20261016-13-06"
+      },
+      {
+        "raceId": "boat-20261016-03-05"
+      },
+      {
+        "raceId": "boat-20261016-21-10"
+      },
+      {
+        "raceId": "boat-20261016-02-06"
+      },
+      {
+        "raceId": "boat-20261016-10-10"
+      },
+      {
+        "raceId": "boat-20261016-08-07"
+      },
+      {
+        "raceId": "boat-20261016-04-07"
+      },
+      {
+        "raceId": "boat-20261016-09-07"
+      },
+      {
+        "raceId": "boat-20261016-03-06"
+      },
+      {
+        "raceId": "boat-20261016-13-07"
+      },
+      {
+        "raceId": "boat-20261016-14-11"
+      },
+      {
+        "raceId": "boat-20261016-21-11"
+      },
+      {
+        "raceId": "boat-20261016-02-07"
+      },
+      {
+        "raceId": "boat-20261016-08-08"
+      },
+      {
+        "raceId": "boat-20261016-10-11"
+      },
+      {
+        "raceId": "boat-20261016-09-08"
+      },
+      {
+        "raceId": "boat-20261016-13-08"
+      },
+      {
+        "raceId": "boat-20261016-14-12"
+      },
+      {
+        "raceId": "boat-20261016-02-08"
+      },
+      {
+        "raceId": "boat-20261016-08-09"
+      },
+      {
+        "raceId": "boat-20261016-21-12"
+      },
+      {
+        "raceId": "boat-20261016-03-08"
+      },
+      {
+        "raceId": "boat-20261016-10-12"
+      },
+      {
+        "raceId": "boat-20261016-04-09"
+      },
+      {
+        "raceId": "boat-20261016-09-09"
+      },
+      {
+        "raceId": "boat-20261016-13-09"
+      },
+      {
+        "raceId": "boat-20261016-02-09"
+      },
+      {
+        "raceId": "boat-20261016-08-10"
+      },
+      {
+        "raceId": "boat-20261016-03-09"
+      },
+      {
+        "raceId": "boat-20261016-13-10"
+      },
+      {
+        "raceId": "boat-20261016-04-10"
+      },
+      {
+        "raceId": "boat-20261016-09-10"
+      },
+      {
+        "raceId": "boat-20261016-02-10"
+      },
+      {
+        "raceId": "boat-20261016-20-01"
+      },
+      {
+        "raceId": "boat-20261016-03-10"
+      },
+      {
+        "raceId": "boat-20261016-01-01"
+      },
+      {
+        "raceId": "boat-20261016-08-11"
+      },
+      {
+        "raceId": "boat-20261016-13-11"
+      },
+      {
+        "raceId": "boat-20261016-09-11"
+      },
+      {
+        "raceId": "boat-20261016-04-11"
+      },
+      {
+        "raceId": "boat-20261016-24-02"
+      },
+      {
+        "raceId": "boat-20261016-20-02"
+      },
+      {
+        "raceId": "boat-20261016-02-11"
+      },
+      {
+        "raceId": "boat-20261016-03-11"
+      },
+      {
+        "raceId": "boat-20261016-01-02"
+      },
+      {
+        "raceId": "boat-20261016-08-12"
+      },
+      {
+        "raceId": "boat-20261016-13-12"
+      },
+      {
+        "raceId": "boat-20261016-24-03"
+      },
+      {
+        "raceId": "boat-20261016-20-03"
+      },
+      {
+        "raceId": "boat-20261016-09-12"
+      },
+      {
+        "raceId": "boat-20261016-04-12"
+      },
+      {
+        "raceId": "boat-20261016-01-03"
+      },
+      {
+        "raceId": "boat-20261016-02-12"
+      },
+      {
+        "raceId": "boat-20261016-24-04"
+      },
+      {
+        "raceId": "boat-20261016-20-04"
+      },
+      {
+        "raceId": "boat-20261016-01-04"
+      },
+      {
+        "raceId": "boat-20261016-24-05"
+      },
+      {
+        "raceId": "boat-20261016-20-05"
+      },
+      {
+        "raceId": "boat-20261016-01-05"
+      },
+      {
+        "raceId": "boat-20261016-24-06"
+      },
+      {
+        "raceId": "boat-20261016-20-06"
+      },
+      {
+        "raceId": "boat-20261016-19-01"
+      },
+      {
+        "raceId": "boat-20261016-01-06"
+      },
+      {
+        "raceId": "boat-20261016-24-07"
+      },
+      {
+        "raceId": "boat-20261016-20-07"
+      },
+      {
+        "raceId": "boat-20261016-19-02"
+      },
+      {
+        "raceId": "boat-20261016-01-07"
+      },
+      {
+        "raceId": "boat-20261016-24-08"
+      },
+      {
+        "raceId": "boat-20261016-19-03"
+      },
+      {
+        "raceId": "boat-20261016-20-08"
+      },
+      {
+        "raceId": "boat-20261016-01-08"
+      },
+      {
+        "raceId": "boat-20261016-24-09"
+      },
+      {
+        "raceId": "boat-20261016-19-04"
+      },
+      {
+        "raceId": "boat-20261016-20-09"
+      },
+      {
+        "raceId": "boat-20261016-24-10"
+      },
+      {
+        "raceId": "boat-20261016-19-05"
+      },
+      {
+        "raceId": "boat-20261016-20-10"
+      },
+      {
+        "raceId": "boat-20261016-01-10"
+      },
+      {
+        "raceId": "boat-20261016-19-06"
+      },
+      {
+        "raceId": "boat-20261016-24-11"
+      },
+      {
+        "raceId": "boat-20261016-20-11"
+      },
+      {
+        "raceId": "boat-20261016-01-11"
+      },
+      {
+        "raceId": "boat-20261016-19-07"
+      },
+      {
+        "raceId": "boat-20261016-24-12"
+      },
+      {
+        "raceId": "boat-20261016-20-12"
+      },
+      {
+        "raceId": "boat-20261016-01-12"
+      },
+      {
+        "raceId": "boat-20261016-19-08"
+      },
+      {
+        "raceId": "boat-20261016-19-09"
+      },
+      {
+        "raceId": "boat-20261016-19-10"
+      },
+      {
+        "raceId": "boat-20261016-19-11"
+      },
+      {
+        "raceId": "boat-20261016-19-12"
+      },
+      {
+        "raceId": "boat-20261017-14-01"
+      },
+      {
+        "raceId": "boat-20261017-21-01"
+      },
+      {
+        "raceId": "boat-20261017-10-01"
+      },
+      {
+        "raceId": "boat-20261017-14-02"
+      },
+      {
+        "raceId": "boat-20261017-21-02"
+      },
+      {
+        "raceId": "boat-20261017-10-02"
+      },
+      {
+        "raceId": "boat-20261017-14-03"
+      },
+      {
+        "raceId": "boat-20261017-21-03"
+      },
+      {
+        "raceId": "boat-20261017-10-03"
+      },
+      {
+        "raceId": "boat-20261017-14-04"
+      },
+      {
+        "raceId": "boat-20261017-10-04"
+      },
+      {
+        "raceId": "boat-20261017-08-01"
+      },
+      {
+        "raceId": "boat-20261017-14-05"
+      },
+      {
+        "raceId": "boat-20261017-04-01"
+      },
+      {
+        "raceId": "boat-20261017-09-01"
+      },
+      {
+        "raceId": "boat-20261017-21-05"
+      },
+      {
+        "raceId": "boat-20261017-10-05"
+      }
+    ]
+  },
+  "predictSemantics": "q_i = p_i^(1/T) / sum_j p_j^(1/T), full 120 saved ensemble MEAN probabilities only, exact zeros preserved. No member distributions available; not member-level temperature calibration.",
+  "limitations": [
+    "Retrospective holdout previously audited; not independent discovery evidence.",
+    "No validation partition; research candidate only, existing 300/100/100 qualification floors unchanged.",
+    "No final odds, purchase odds, payout values or test outcomes enter fitting objective. Source market proof is an eligibility gate only.",
+    "Actual artifact creation occurs after test dates; simulated fit cutoff is not an actual historical trainedAt.",
+    "Never registered, promoted or connected to runtime."
+  ]
+}

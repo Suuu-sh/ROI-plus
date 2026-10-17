@@ -24,3 +24,23 @@ describe('offline opportunity replay',()=>{
  })
  it('rejects duplicate race opportunities rather than choosing favorable record',()=>{const f=fixture();f.races.push(f.races[0]);expect(replayOpportunities(f).acceptedOpportunities).toBe(0)})
 })
+
+describe('counterfactual transform boundary',()=>{
+ it('keeps identity default identical, rejects invalid and changed risk inputs',()=>{
+  const f=fixture(), base=replayOpportunities(f)
+  const transformed=replayOpportunities(f,{forecastTransform:t=>t})
+  expect(transformed.candidates).toEqual(base.candidates)
+  expect(()=>replayOpportunities(f,{forecastTransform:t=>t.map(x=>({...x,probability:-1}))})).toThrow()
+  expect(()=>replayOpportunities(f,{forecastTransform:t=>t.map(x=>({...x,probStd:1}))})).toThrow()
+ })
+ it('does not transform rejected source rows',()=>{
+  const f=fixture();f.races[0].tickets.pop();let called=false
+  expect(replayOpportunities(f,{forecastTransform:t=>{called=true;return t}}).acceptedOpportunities).toBe(0)
+  expect(called).toBe(false)
+ })
+})
+it('never gives outcome labels to a forecast transform',()=>{
+ const f=fixture();let argumentCount=0
+ replayOpportunities(f,{forecastTransform:function(t){argumentCount=arguments.length;return t}})
+ expect(argumentCount).toBe(1)
+})

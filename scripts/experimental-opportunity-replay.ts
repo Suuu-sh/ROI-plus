@@ -43,14 +43,27 @@ export function rejection(r: Opportunity, input: ReplayInput): string | null {
   if (!Array.isArray(o.odds) || o.odds.length!==120 || new Set(o.odds.map(t=>t.selection)).size!==120 || r.tickets.some(t=>o.odds.find(x=>x.selection===t.selection)?.odds!==t.odds)) return 'incomplete_or_mismatched_market'
   return null
 }
-export function replayOpportunities(input: ReplayInput) {
+export interface ReplayOptions {
+  forecastTransform?: (tickets: ExperimentalTicket[]) => ExperimentalTicket[]
+  counterfactualMetadata?: Record<string, unknown>
+  currentPolicyOnly?: boolean
+}
+export function replayOpportunities(input: ReplayInput, options: ReplayOptions = {}) {
   if (input.schemaVersion!==1 || !Number.isFinite(ms(input.asOf))) throw new Error('Invalid replay envelope')
   const duplicates=new Set<string>(), seen=new Set<string>()
   for(const r of input.races) { if(seen.has(r.raceId))duplicates.add(r.raceId); seen.add(r.raceId) }
   const accepted: Opportunity[]=[]; const rejected: Record<string,number>={}
-  for (const r of input.races) { const reason=duplicates.has(r.raceId)?'duplicate_race':rejection(r,input); if(reason)rejected[reason]=(rejected[reason]??0)+1; else accepted.push(r) }
+  for (const r of input.races) { const reason=duplicates.has(r.raceId)?'duplicate_race':rejection(r,input); if(reason)rejected[reason]=(rejected[reason]??0)+1; else {
+      if (!options.forecastTransform) accepted.push(r)
+      else {
+        const tickets=options.forecastTransform(structuredClone(r.tickets))
+        if (!Array.isArray(tickets) || tickets.length!==120 || new Set(tickets.map(t=>t.selection)).size!==120 || tickets.some(t=>!selections.has(t.selection) || !Number.isFinite(t.probability) || t.probability<0 || t.probability>1 || r.tickets.find(x=>x.selection===t.selection)?.probStd!==t.probStd || r.tickets.find(x=>x.selection===t.selection)?.odds!==t.odds) || Math.abs(tickets.reduce((n,t)=>n+t.probability,0)-1)>1e-6) throw new Error('Invalid counterfactual forecast transform')
+        accepted.push({...r,tickets})
+      }
+    } }
   accepted.sort((a,b)=>ms(a.decisionAt)-ms(b.decisionAt)||a.raceId.localeCompare(b.raceId))
-  const candidates=[{minProbability:0,maxOdds:Infinity}, ...[.05,.1,.2].flatMap(minProbability=>[20,50].map(maxOdds=>({minProbability,maxOdds})))].map(policy=>{
+  const policies=[{minProbability:0,maxOdds:Infinity}, ...[.05,.1,.2].flatMap(minProbability=>[20,50].map(maxOdds=>({minProbability,maxOdds})))];
+  const candidates=(options.currentPolicyOnly?policies.slice(0,1):policies).map(policy=>{
     let spent=0; const exposures: {at:number;closed:number;stake:number}[]=[]; const events: {at:number;profit:number}[]=[]
     const months: Record<string,{grossStake:number;carriedMonthStartExposure:number;realizedProfit:number;unresolvedStake:number;races:number}>={}
     let unresolvedRefundRaces=0; const decisions=[]; const newlyPlacedFromOriginalAbstained: string[]=[]
@@ -81,5 +94,5 @@ export function replayOpportunities(input: ReplayInput) {
     const unresolved=Object.values(months).reduce((s,m)=>s+m.unresolvedStake,0)
     return {minRawProbability:policy.minProbability,maxOdds:Number.isFinite(policy.maxOdds)?policy.maxOdds:null,months,settlementMonths,settlementMonthRisk,placedRaces:decisions.filter(d=>d.stakes.length>0).length,abstainedRaces:decisions.filter(d=>d.stakes.length===0).length,newlyPlacedFromOriginalAbstained:{count:newlyPlacedFromOriginalAbstained.length,raceIds:newlyPlacedFromOriginalAbstained},realizedProfit:net,maxRealizedNetLoss:maxLoss,maxSettlementDrawdown:maxDrawdown,unresolvedStake:unresolved,unresolvedRefundRaces,worstCaseProfit:net-unresolved,decisions}
   })
-  return {status:'insufficient_full_month_coverage',candidateOnly:true,registered:false,promoted:false,promotionEligible:false,winner:null,probabilityStatus:'RAW_UNCALIBRATED',fullyObservedMonths:0,monthlyPositiveProfitFrequency:null,sourceOpportunities:input.races.length,acceptedOpportunities:accepted.length,acceptedByOriginalOutcome:{placed:accepted.filter(r=>r.originalDecisionOutcome==='placed').length,abstained:accepted.filter(r=>r.originalDecisionOutcome==='abstained').length,unknown:accepted.filter(r=>!r.originalDecisionOutcome).length},rejected,policy:'Exact current Kelly selector; offline restrictive no-recycle gross JPY10000/month including month-start open exposure, JPY100000 initial non-recycling capital. Partial coverage only; no full-month proof accepted.',candidates}
+  return {...(options.forecastTransform?{counterfactual:{...options.counterfactualMetadata,originalSourceModelId:input.modelId,originalSourceArtifactSha256:input.artifactSha256,sourceProofsUnmodified:true,probStdStatus:'original_unchanged_risk_proxy_not_recalibrated'}}:{}),status:'insufficient_full_month_coverage',candidateOnly:true,registered:false,promoted:false,promotionEligible:false,winner:null,probabilityStatus:'RAW_UNCALIBRATED',fullyObservedMonths:0,monthlyPositiveProfitFrequency:null,sourceOpportunities:input.races.length,acceptedOpportunities:accepted.length,acceptedByOriginalOutcome:{placed:accepted.filter(r=>r.originalDecisionOutcome==='placed').length,abstained:accepted.filter(r=>r.originalDecisionOutcome==='abstained').length,unknown:accepted.filter(r=>!r.originalDecisionOutcome).length},rejected,policy:'Exact current Kelly selector; offline restrictive no-recycle gross JPY10000/month including month-start open exposure, JPY100000 initial non-recycling capital. Partial coverage only; no full-month proof accepted.',candidates}
 }
