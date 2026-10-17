@@ -1,0 +1,325 @@
+{
+  "status": "insufficient_full_month_coverage",
+  "candidateOnly": true,
+  "registered": false,
+  "promoted": false,
+  "promotionEligible": false,
+  "winner": null,
+  "probabilityStatus": "RAW_UNCALIBRATED",
+  "fullyObservedMonths": 0,
+  "monthlyPositiveProfitFrequency": null,
+  "sourceOpportunities": 346,
+  "acceptedOpportunities": 238,
+  "acceptedByOriginalOutcome": {
+    "placed": 87,
+    "abstained": 151,
+    "unknown": 0
+  },
+  "rejected": {
+    "user_declared_test_purchase_date": 76,
+    "invalid_forecast_or_decision_time": 26,
+    "missing_forecast_source_proof": 2,
+    "missing_cutoff_proof": 4
+  },
+  "policy": "Exact current Kelly selector; offline restrictive no-recycle gross JPY10000/month including month-start open exposure, JPY100000 initial non-recycling capital. Partial coverage only; no full-month proof accepted.",
+  "schema": "roi-historical-opportunity-backtest-v1",
+  "asOf": "2026-10-17T10:35:04.843+09:00",
+  "modelId": "boat-trifecta-exp-noweather-20261013-10559e2c79ce",
+  "artifactSha256": "386ff046f73d0f604a293d2c7318acc794857d9448f1addaf3f164863a91bdda",
+  "codeBaseSha": "4174e0012ba6133d32361aa762e0f39f74a4c99d",
+  "sourceInventory": "docs/reports/historical-source-inventory-2026-10-17.json",
+  "inputSha256": "783705a602c92e9e5c9c2d5578d07dfb7761467293fd79ce6be57b6fd32e8f14",
+  "rawOutputSha256": "10d4908a0e4965fb0881064cad5de8f82fd3bca78de4115f512a6299918cc16b",
+  "implementationSha256": {
+    "scripts/experimental-opportunity-replay.ts": "90acaa99d7b88d9be42febedcb509b9596c5b82ec3869e95361fd42bac41a14e",
+    "apps/api/src/services/experimentalSizing.ts": "599a634eb7bdf07a6595a15484394910889df4a6d3ddf95a8028bc0a223ec6e2",
+    "apps/api/src/services/paperTiming.ts": "af5a92bd6368b3da8ba4cf6ed84d7c602b1baf1cd2959ecea0df9beb6dabafcd",
+    "scripts/normalize-experimental-opportunity-input.py": "4cb818e256e55ef560a29de6933ddf70de7b7679f45ec80ffba0f5d41682a3b4"
+  },
+  "candidates": [
+    {
+      "minRawProbability": 0,
+      "maxOdds": null,
+      "months": {
+        "2026-10": {
+          "grossStake": 10000,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": -6150,
+          "unresolvedStake": 1600,
+          "races": 20
+        }
+      },
+      "settlementMonths": {
+        "2026-10": -6150
+      },
+      "settlementMonthRisk": {
+        "2026-10": {
+          "maxRealizedNetLoss": 6150,
+          "maxSettlementDrawdown": 6150
+        }
+      },
+      "placedRaces": 20,
+      "abstainedRaces": 218,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": -6150,
+      "maxRealizedNetLoss": 6150,
+      "maxSettlementDrawdown": 6150,
+      "unresolvedStake": 1600,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": -7750,
+      "placedTickets": 33,
+      "acceptedOriginalAbstentionReasons": {
+        "no_conservative_positive_edge": 127,
+        "minimum_virtual_stake_not_reached": 24
+      }
+    },
+    {
+      "minRawProbability": 0.05,
+      "maxOdds": 20,
+      "months": {
+        "2026-10": {
+          "grossStake": 3400,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": -1400,
+          "unresolvedStake": 2000,
+          "races": 4
+        }
+      },
+      "settlementMonths": {
+        "2026-10": -1400
+      },
+      "settlementMonthRisk": {
+        "2026-10": {
+          "maxRealizedNetLoss": 1400,
+          "maxSettlementDrawdown": 1400
+        }
+      },
+      "placedRaces": 4,
+      "abstainedRaces": 234,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": -1400,
+      "maxRealizedNetLoss": 1400,
+      "maxSettlementDrawdown": 1400,
+      "unresolvedStake": 2000,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": -3400,
+      "placedTickets": 4,
+      "acceptedOriginalAbstentionReasons": {
+        "no_conservative_positive_edge": 127,
+        "minimum_virtual_stake_not_reached": 24
+      }
+    },
+    {
+      "minRawProbability": 0.05,
+      "maxOdds": 50,
+      "months": {
+        "2026-10": {
+          "grossStake": 10000,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": -6150,
+          "unresolvedStake": 1600,
+          "races": 17
+        }
+      },
+      "settlementMonths": {
+        "2026-10": -6150
+      },
+      "settlementMonthRisk": {
+        "2026-10": {
+          "maxRealizedNetLoss": 6150,
+          "maxSettlementDrawdown": 6150
+        }
+      },
+      "placedRaces": 17,
+      "abstainedRaces": 221,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": -6150,
+      "maxRealizedNetLoss": 6150,
+      "maxSettlementDrawdown": 6150,
+      "unresolvedStake": 1600,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": -7750,
+      "placedTickets": 20,
+      "acceptedOriginalAbstentionReasons": {
+        "no_conservative_positive_edge": 127,
+        "minimum_virtual_stake_not_reached": 24
+      }
+    },
+    {
+      "minRawProbability": 0.1,
+      "maxOdds": 20,
+      "months": {
+        "2026-10": {
+          "grossStake": 3400,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": -1400,
+          "unresolvedStake": 2000,
+          "races": 4
+        }
+      },
+      "settlementMonths": {
+        "2026-10": -1400
+      },
+      "settlementMonthRisk": {
+        "2026-10": {
+          "maxRealizedNetLoss": 1400,
+          "maxSettlementDrawdown": 1400
+        }
+      },
+      "placedRaces": 4,
+      "abstainedRaces": 234,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": -1400,
+      "maxRealizedNetLoss": 1400,
+      "maxSettlementDrawdown": 1400,
+      "unresolvedStake": 2000,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": -3400,
+      "placedTickets": 4,
+      "acceptedOriginalAbstentionReasons": {
+        "no_conservative_positive_edge": 127,
+        "minimum_virtual_stake_not_reached": 24
+      }
+    },
+    {
+      "minRawProbability": 0.1,
+      "maxOdds": 50,
+      "months": {
+        "2026-10": {
+          "grossStake": 10000,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": -5450,
+          "unresolvedStake": 2300,
+          "races": 15
+        }
+      },
+      "settlementMonths": {
+        "2026-10": -5450
+      },
+      "settlementMonthRisk": {
+        "2026-10": {
+          "maxRealizedNetLoss": 5450,
+          "maxSettlementDrawdown": 5450
+        }
+      },
+      "placedRaces": 15,
+      "abstainedRaces": 223,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": -5450,
+      "maxRealizedNetLoss": 5450,
+      "maxSettlementDrawdown": 5450,
+      "unresolvedStake": 2300,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": -7750,
+      "placedTickets": 17,
+      "acceptedOriginalAbstentionReasons": {
+        "no_conservative_positive_edge": 127,
+        "minimum_virtual_stake_not_reached": 24
+      }
+    },
+    {
+      "minRawProbability": 0.2,
+      "maxOdds": 20,
+      "months": {
+        "2026-10": {
+          "grossStake": 2700,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": -700,
+          "unresolvedStake": 2000,
+          "races": 3
+        }
+      },
+      "settlementMonths": {
+        "2026-10": -700
+      },
+      "settlementMonthRisk": {
+        "2026-10": {
+          "maxRealizedNetLoss": 700,
+          "maxSettlementDrawdown": 700
+        }
+      },
+      "placedRaces": 3,
+      "abstainedRaces": 235,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": -700,
+      "maxRealizedNetLoss": 700,
+      "maxSettlementDrawdown": 700,
+      "unresolvedStake": 2000,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": -2700,
+      "placedTickets": 3,
+      "acceptedOriginalAbstentionReasons": {
+        "no_conservative_positive_edge": 127,
+        "minimum_virtual_stake_not_reached": 24
+      }
+    },
+    {
+      "minRawProbability": 0.2,
+      "maxOdds": 50,
+      "months": {
+        "2026-10": {
+          "grossStake": 6400,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": -4400,
+          "unresolvedStake": 2000,
+          "races": 8
+        }
+      },
+      "settlementMonths": {
+        "2026-10": -4400
+      },
+      "settlementMonthRisk": {
+        "2026-10": {
+          "maxRealizedNetLoss": 4400,
+          "maxSettlementDrawdown": 4400
+        }
+      },
+      "placedRaces": 8,
+      "abstainedRaces": 230,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": -4400,
+      "maxRealizedNetLoss": 4400,
+      "maxSettlementDrawdown": 4400,
+      "unresolvedStake": 2000,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": -6400,
+      "placedTickets": 9,
+      "acceptedOriginalAbstentionReasons": {
+        "no_conservative_positive_edge": 127,
+        "minimum_virtual_stake_not_reached": 24
+      }
+    }
+  ],
+  "limitations": [
+    "Only saved decision opportunities with contemporaneously persisted full 120 forecasts and same-window purchase markets; not all historical races.",
+    "October 13 is user-declared test purchase date and excluded; primary accepted observations are October 14-17 partial month.",
+    "Raw model probability is uncalibrated; no calibrated probability substitute exists in this replay.",
+    "No full calendar-month population proof: positive-month frequency is null; no extrapolation.",
+    "Current exact selector under identical restrictive risk overlay, not reproduction of original bankroll or old deployment version stakes.",
+    "No recycling: every stake permanently reduces offline initial 100000 sizing capital and monthly gross 10000 allowance; month-start open prior exposure also reserves monthly allowance.",
+    "Result availability is original fetchedAt validated against saved collector proof and current D1 six-finish/payout equality; incomplete/refund evidence remains unresolved.",
+    "Original raw HTML bodies were not re-fetched or rehashed; persisted source SHA is provenance not signature.",
+    "Candidates are descriptive fixed-grid comparisons, not winners, qualifications, registry entries or promotions; production unchanged."
+  ]
+}

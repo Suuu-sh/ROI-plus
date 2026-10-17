@@ -1,0 +1,134 @@
+{
+  "forecastRowBindingAudit": {
+    "schema": "roi-forecast-binding-check-v1",
+    "asOf": "2026-10-17T10:35:04.843+09:00",
+    "modelId": "boat-trifecta-exp-noweather-20261013-10559e2c79ce",
+    "artifactSha256": "386ff046f73d0f604a293d2c7318acc794857d9448f1addaf3f164863a91bdda",
+    "decisionsSha256": "793e08a5f9d89cacac09dba31eed11e9dfdef97e18b2fdd40c9ddfdb680d24ba",
+    "queryScope": "read-only D1; decision race/model/predictedAt exact join; decision_at <= asOf",
+    "matchedRows": 31440,
+    "matchedRaces": 262,
+    "artifactMismatchCount": 0,
+    "featureSchemaMismatchCount": 0,
+    "originMismatchCount": 0
+  },
+  "schema": "roi-historical-source-inventory-v1",
+  "asOf": "2026-10-17T10:35:04.843+09:00",
+  "source": "read-only persisted D1 decisions, forecasts, immutable capture archives, verified collector proof and current D1 result/payout rows",
+  "sourceDecisionCount": 346,
+  "uniqueRaceCount": 346,
+  "modelId": "boat-trifecta-exp-noweather-20261013-10559e2c79ce",
+  "artifactSha256": "386ff046f73d0f604a293d2c7318acc794857d9448f1addaf3f164863a91bdda",
+  "trainedAt": "2026-10-13T04:05:54.477577+00:00",
+  "dates": {
+    "2026-10-13": 76,
+    "2026-10-14": 87,
+    "2026-10-15": 19,
+    "2026-10-16": 147,
+    "2026-10-17": 17
+  },
+  "decisionOutcomes": {
+    "abstained": 251,
+    "placed": 95
+  },
+  "decisionReasons": {
+    "experimental_forecast_missing_or_invalid": 84,
+    "official_archive_missing_or_stale": 5,
+    "placed": 95,
+    "no_conservative_positive_edge": 137,
+    "minimum_virtual_stake_not_reached": 25
+  },
+  "completeForecastCount": 262,
+  "completePurchaseMarketCount": 240,
+  "validatedForecastSourceCount": 255,
+  "verifiedOutcomeAvailableAsOfCount": 223,
+  "userDeclaredTestPurchaseDate": "2026-10-13",
+  "excludedTestDateCount": 76,
+  "completeCalendarMonths": 0,
+  "monthlyPositiveProfitFrequency": null,
+  "limitations": [
+    "Saved decision population only; not all historical races have point-in-time decision markets and forecasts.",
+    "Current model was trained 2026-10-13; prior historical features cannot be scored as contemporaneous forecasts.",
+    "Fixed historical BASE R2 archive uses a different model and is not pooled.",
+    "Outcome trust is persisted verified collector SHA/proof plus D1 six-lane/payout equality; original HTML bodies were not re-fetched or rehashed.",
+    "Market source SHA is persisted provenance, not a cryptographic signature.",
+    "No inferred or final odds substitution; no missing probability or outcome imputation.",
+    "No full calendar month or positive-month frequency estimate."
+  ],
+  "files": {
+    "decisions": {
+      "sha256": "793e08a5f9d89cacac09dba31eed11e9dfdef97e18b2fdd40c9ddfdb680d24ba"
+    },
+    "captures": {
+      "sha256": "25049577356c82c0fb4a357c76102fa4af66e6fdca589cf1b803aaeb54f3c5f9"
+    },
+    "outcomes": {
+      "sha256": "b977c12f69bffc9c45f6dcbde8779764cd579ee1bf4a9eae7bb93dad7d9c310d"
+    },
+    "normalizedInput": {
+      "sha256": "783705a602c92e9e5c9c2d5578d07dfb7761467293fd79ce6be57b6fd32e8f14"
+    },
+    "forecastBinding": {
+      "sha256": "7e9d7cb1231d3a887b139211c800032c0a3fc380edc150aad89fb8070d5a5017"
+    }
+  },
+  "localHistoricalStores": [
+    {
+      "name": "rows.json",
+      "bytes": 127361419,
+      "tableCounts": {
+        "races": 15588,
+        "entries": 93528,
+        "odds_snapshots": 24,
+        "results": 91657,
+        "payouts": 125424,
+        "predictions": 14112,
+        "models": 2,
+        "collection_runs": 103
+      },
+      "firstRaceDate": "2026-07-01",
+      "lastRaceDate": "2026-10-09",
+      "monthRaceCounts": {
+        "2026-07": 4788,
+        "2026-08": 4860,
+        "2026-09": 4620,
+        "2026-10": 1320
+      },
+      "oddsBetTypeCounts": {
+        "win": 24
+      },
+      "predictionModelCounts": {
+        "boat-win-lgbm-v1": 14112
+      },
+      "ticketPredictionTablePresent": false,
+      "eligibleAsCurrentModelContemporaneousReplay": false,
+      "exclusion": "No contemporaneous current-model 120 trifecta forecasts or 120 decision-time trifecta odds; old WIN model only."
+    },
+    {
+      "name": "rows.prod.json",
+      "bytes": 10653178,
+      "tableCounts": {
+        "races": 1320,
+        "entries": 7920,
+        "results": 7515,
+        "payouts": 10524,
+        "predictions": 7920,
+        "models": 1,
+        "collection_runs": 9,
+        "odds_snapshots": 0
+      },
+      "firstRaceDate": "2026-10-01",
+      "lastRaceDate": "2026-10-09",
+      "monthRaceCounts": {
+        "2026-10": 1320
+      },
+      "oddsBetTypeCounts": {},
+      "predictionModelCounts": {
+        "boat-win-lgbm-v1": 7920
+      },
+      "ticketPredictionTablePresent": false,
+      "eligibleAsCurrentModelContemporaneousReplay": false,
+      "exclusion": "No contemporaneous current-model 120 trifecta forecasts or 120 decision-time trifecta odds; old WIN model only."
+    }
+  ]
+}
