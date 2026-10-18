@@ -1,0 +1,3834 @@
+{
+  "status": "repeated_retrospective_previously_inspected_test_not_unseen_or_prospective",
+  "fixedOpportunities": 125,
+  "labelledNormalRaces": 123,
+  "refundsExcludedFromSingleWinnerMetrics": 2,
+  "unknownLabels": 0,
+  "metrics": {
+    "current": {
+      "races": 123,
+      "meanNll": 5.215190370584726,
+      "multiclassBrier": 1.0165872597549968
+    },
+    "oldResidual": {
+      "races": 123,
+      "meanNll": 3.7809086140820334,
+      "multiclassBrier": 0.9571656529260871
+    },
+    "market": {
+      "races": 123,
+      "meanNll": 3.7615479836716696,
+      "multiclassBrier": 0.9559758227694948
+    },
+    "candidate": {
+      "races": 123,
+      "meanNll": 3.7611548571670177,
+      "multiclassBrier": 0.9559259309416175
+    }
+  },
+  "comparisons": {
+    "candidate_minus_current": {
+      "nll": {
+        "meanDifference": -1.454035513417706,
+        "percentile95": [
+          -1.7941239546365377,
+          -1.1098715502921879
+        ],
+        "iterations": 3000,
+        "seed": 20261019,
+        "unit": "race",
+        "interpretation": "left minus right; negative better; repeated retrospective sample, not prospective proof"
+      },
+      "brier": {
+        "meanDifference": -0.0606613288133796,
+        "percentile95": [
+          -0.07585020560853487,
+          -0.04472079871309353
+        ],
+        "iterations": 3000,
+        "seed": 20261019,
+        "unit": "race",
+        "interpretation": "left minus right; negative better; repeated retrospective sample, not prospective proof"
+      }
+    },
+    "candidate_minus_oldResidual": {
+      "nll": {
+        "meanDifference": -0.01975375691501482,
+        "percentile95": [
+          -0.03760006738253105,
+          -0.001155987332948583
+        ],
+        "iterations": 3000,
+        "seed": 20261019,
+        "unit": "race",
+        "interpretation": "left minus right; negative better; repeated retrospective sample, not prospective proof"
+      },
+      "brier": {
+        "meanDifference": -0.0012397219844702341,
+        "percentile95": [
+          -0.0029073353368995946,
+          0.00041722208533592065
+        ],
+        "iterations": 3000,
+        "seed": 20261019,
+        "unit": "race",
+        "interpretation": "left minus right; negative better; repeated retrospective sample, not prospective proof"
+      }
+    },
+    "candidate_minus_market": {
+      "nll": {
+        "meanDifference": -0.0003931265046520755,
+        "percentile95": [
+          -0.003622444713516812,
+          0.0026560773404537908
+        ],
+        "iterations": 3000,
+        "seed": 20261019,
+        "unit": "race",
+        "interpretation": "left minus right; negative better; repeated retrospective sample, not prospective proof"
+      },
+      "brier": {
+        "meanDifference": -0.0000498918278774127,
+        "percentile95": [
+          -0.00039120205644398246,
+          0.00028343635450580733
+        ],
+        "iterations": 3000,
+        "seed": 20261019,
+        "unit": "race",
+        "interpretation": "left minus right; negative better; repeated retrospective sample, not prospective proof"
+      }
+    }
+  },
+  "calibration": {
+    "current": {
+      "all": [
+        {
+          "lower": 0,
+          "upper": 0.01,
+          "count": 11912,
+          "meanProbability": 0.0016785069265786903,
+          "observedWinFrequency": 0.0052048354600402955
+        },
+        {
+          "lower": 0.01,
+          "upper": 0.05,
+          "count": 2292,
+          "meanProbability": 0.02256385830253106,
+          "observedWinFrequency": 0.02006980802792321
+        },
+        {
+          "lower": 0.05,
+          "upper": 0.1,
+          "count": 397,
+          "meanProbability": 0.06809370136885176,
+          "observedWinFrequency": 0.02518891687657431
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 138,
+          "meanProbability": 0.1359342878551534,
+          "observedWinFrequency": 0.036231884057971016
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.5,
+          "count": 21,
+          "meanProbability": 0.2617681473213358,
+          "observedWinFrequency": 0
+        },
+        {
+          "lower": 0.5,
+          "upper": 1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        }
+      ],
+      "lowProbability": {
+        "count": 11912,
+        "expectedWins": 19.994374509405358,
+        "wins": 62,
+        "meanProbability": 0.0016785069265786903,
+        "observedWinFrequency": 0.0052048354600402955
+      },
+      "oddsAtLeast100": {
+        "count": 10788,
+        "expectedWins": 44.40996216227827,
+        "wins": 24,
+        "meanProbability": 0.0041166075419242,
+        "observedWinFrequency": 0.002224694104560623
+      },
+      "selected": {
+        "count": 9,
+        "expectedWins": 1.8455119270441784,
+        "wins": 0,
+        "meanProbability": 0.2050568807826865,
+        "observedWinFrequency": 0
+      },
+      "selectedReliability": [
+        {
+          "lower": 0,
+          "upper": 0.01,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.01,
+          "upper": 0.05,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.05,
+          "upper": 0.1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 5,
+          "meanProbability": 0.1630872591767712,
+          "observedWinFrequency": 0
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.5,
+          "count": 4,
+          "meanProbability": 0.2575189077900806,
+          "observedWinFrequency": 0
+        },
+        {
+          "lower": 0.5,
+          "upper": 1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        }
+      ]
+    },
+    "oldResidual": {
+      "all": [
+        {
+          "lower": 0,
+          "upper": 0.01,
+          "count": 11621,
+          "meanProbability": 0.0028384983387363034,
+          "observedWinFrequency": 0.0023233800877721367
+        },
+        {
+          "lower": 0.01,
+          "upper": 0.05,
+          "count": 2739,
+          "meanProbability": 0.021263972792413016,
+          "observedWinFrequency": 0.023001095290251915
+        },
+        {
+          "lower": 0.05,
+          "upper": 0.1,
+          "count": 327,
+          "meanProbability": 0.06712890372724174,
+          "observedWinFrequency": 0.0672782874617737
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 68,
+          "meanProbability": 0.12616582010529062,
+          "observedWinFrequency": 0.14705882352941177
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.5,
+          "count": 5,
+          "meanProbability": 0.24827240823165483,
+          "observedWinFrequency": 0.2
+        },
+        {
+          "lower": 0.5,
+          "upper": 1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        }
+      ],
+      "lowProbability": {
+        "count": 11621,
+        "expectedWins": 32.98618919445458,
+        "wins": 27,
+        "meanProbability": 0.0028384983387363034,
+        "observedWinFrequency": 0.0023233800877721367
+      },
+      "oddsAtLeast100": {
+        "count": 10788,
+        "expectedWins": 25.94966577260754,
+        "wins": 24,
+        "meanProbability": 0.0024054195191516073,
+        "observedWinFrequency": 0.002224694104560623
+      },
+      "selected": {
+        "count": 0,
+        "expectedWins": 0,
+        "wins": 0,
+        "meanProbability": null,
+        "observedWinFrequency": null
+      },
+      "selectedReliability": [
+        {
+          "lower": 0,
+          "upper": 0.01,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.01,
+          "upper": 0.05,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.05,
+          "upper": 0.1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.5,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.5,
+          "upper": 1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        }
+      ]
+    },
+    "market": {
+      "all": [
+        {
+          "lower": 0,
+          "upper": 0.01,
+          "count": 11617,
+          "meanProbability": 0.0028116889398018576,
+          "observedWinFrequency": 0.0023241800809158993
+        },
+        {
+          "lower": 0.01,
+          "upper": 0.05,
+          "count": 2732,
+          "meanProbability": 0.021204426398320313,
+          "observedWinFrequency": 0.022693997071742314
+        },
+        {
+          "lower": 0.05,
+          "upper": 0.1,
+          "count": 341,
+          "meanProbability": 0.06787794565474935,
+          "observedWinFrequency": 0.07038123167155426
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 65,
+          "meanProbability": 0.12425844076902483,
+          "observedWinFrequency": 0.13846153846153847
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.5,
+          "count": 5,
+          "meanProbability": 0.2365877095709008,
+          "observedWinFrequency": 0.2
+        },
+        {
+          "lower": 0.5,
+          "upper": 1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        }
+      ],
+      "lowProbability": {
+        "count": 11617,
+        "expectedWins": 32.66339041367818,
+        "wins": 27,
+        "meanProbability": 0.0028116889398018576,
+        "observedWinFrequency": 0.0023241800809158993
+      },
+      "oddsAtLeast100": {
+        "count": 10788,
+        "expectedWins": 25.497632689447602,
+        "wins": 24,
+        "meanProbability": 0.0023635180468527623,
+        "observedWinFrequency": 0.002224694104560623
+      },
+      "selected": {
+        "count": 0,
+        "expectedWins": 0,
+        "wins": 0,
+        "meanProbability": null,
+        "observedWinFrequency": null
+      },
+      "selectedReliability": [
+        {
+          "lower": 0,
+          "upper": 0.01,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.01,
+          "upper": 0.05,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.05,
+          "upper": 0.1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.5,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.5,
+          "upper": 1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        }
+      ]
+    },
+    "candidate": {
+      "all": [
+        {
+          "lower": 0,
+          "upper": 0.01,
+          "count": 11630,
+          "meanProbability": 0.0028079745594986306,
+          "observedWinFrequency": 0.0023215821152192603
+        },
+        {
+          "lower": 0.01,
+          "upper": 0.05,
+          "count": 2724,
+          "meanProbability": 0.021297490009915952,
+          "observedWinFrequency": 0.02276064610866373
+        },
+        {
+          "lower": 0.05,
+          "upper": 0.1,
+          "count": 332,
+          "meanProbability": 0.0679517267795478,
+          "observedWinFrequency": 0.06927710843373494
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 69,
+          "meanProbability": 0.12422577513209261,
+          "observedWinFrequency": 0.14492753623188406
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.5,
+          "count": 5,
+          "meanProbability": 0.23946826221913922,
+          "observedWinFrequency": 0.2
+        },
+        {
+          "lower": 0.5,
+          "upper": 1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        }
+      ],
+      "lowProbability": {
+        "count": 11630,
+        "expectedWins": 32.65674412696907,
+        "wins": 27,
+        "meanProbability": 0.0028079745594986306,
+        "observedWinFrequency": 0.0023215821152192603
+      },
+      "oddsAtLeast100": {
+        "count": 10788,
+        "expectedWins": 25.38605103476655,
+        "wins": 24,
+        "meanProbability": 0.0023531749197966767,
+        "observedWinFrequency": 0.002224694104560623
+      },
+      "selected": {
+        "count": 0,
+        "expectedWins": 0,
+        "wins": 0,
+        "meanProbability": null,
+        "observedWinFrequency": null
+      },
+      "selectedReliability": [
+        {
+          "lower": 0,
+          "upper": 0.01,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.01,
+          "upper": 0.05,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.05,
+          "upper": 0.1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.1,
+          "upper": 0.2,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.2,
+          "upper": 0.5,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        },
+        {
+          "lower": 0.5,
+          "upper": 1,
+          "count": 0,
+          "meanProbability": null,
+          "observedWinFrequency": null
+        }
+      ]
+    }
+  },
+  "arms": {
+    "current": {
+      "minRawProbability": 0.1,
+      "maxOdds": 50,
+      "months": {
+        "2026-10": {
+          "grossStake": 5800,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": -5800,
+          "unresolvedStake": 0,
+          "races": 8
+        }
+      },
+      "settlementMonths": {
+        "2026-10": -5800
+      },
+      "settlementMonthRisk": {
+        "2026-10": {
+          "maxRealizedNetLoss": 5800,
+          "maxSettlementDrawdown": 5800
+        }
+      },
+      "placedRaces": 8,
+      "abstainedRaces": 117,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 1,
+        "raceIds": [
+          "boat-20261018-23-05"
+        ]
+      },
+      "realizedProfit": -5800,
+      "maxRealizedNetLoss": 5800,
+      "maxSettlementDrawdown": 5800,
+      "unresolvedStake": 0,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": -5800,
+      "decisions": [
+        {
+          "raceId": "boat-20261018-18-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-02",
+          "stakes": [
+            {
+              "selection": "1-3-5",
+              "probability": 0.1790522930576231,
+              "probStd": 0.04280204106089542,
+              "odds": 13.5,
+              "conservativeProbability": 0.09516029257826808,
+              "expectedRoi": 0.284663949806619,
+              "stake": 500
+            }
+          ],
+          "abstentionReason": null
+        },
+        {
+          "raceId": "boat-20261018-21-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-03",
+          "stakes": [
+            {
+              "selection": "1-2-3",
+              "probability": 0.1902178799051785,
+              "probStd": 0.04491634381355822,
+              "odds": 24.9,
+              "conservativeProbability": 0.10218184603060439,
+              "expectedRoi": 1.544327966162049,
+              "stake": 800
+            },
+            {
+              "selection": "1-3-2",
+              "probability": 0.2242637548528083,
+              "probStd": 0.07751326222879748,
+              "odds": 16.7,
+              "conservativeProbability": 0.07233776088436525,
+              "expectedRoi": 0.20804060676889957,
+              "stake": 200
+            }
+          ],
+          "abstentionReason": null
+        },
+        {
+          "raceId": "boat-20261018-21-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-03",
+          "stakes": [
+            {
+              "selection": "1-2-3",
+              "probability": 0.2204520654840491,
+              "probStd": 0.0395519608513383,
+              "odds": 24.3,
+              "conservativeProbability": 0.14293022221542603,
+              "expectedRoi": 2.4732043998348527,
+              "stake": 900
+            }
+          ],
+          "abstentionReason": null
+        },
+        {
+          "raceId": "boat-20261018-08-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-05",
+          "stakes": [
+            {
+              "selection": "2-1-3",
+              "probability": 0.1151673131649763,
+              "probStd": 0.038552846396342044,
+              "odds": 32.2,
+              "conservativeProbability": 0.03960373422814589,
+              "expectedRoi": 0.27524024214629783,
+              "stake": 200
+            }
+          ],
+          "abstentionReason": null
+        },
+        {
+          "raceId": "boat-20261018-02-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-12",
+          "stakes": [],
+          "abstentionReason": "minimum_virtual_stake_not_reached"
+        },
+        {
+          "raceId": "boat-20261018-02-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-11",
+          "stakes": [
+            {
+              "selection": "3-1-4",
+              "probability": 0.19719688223930115,
+              "probStd": 0.045574310415445844,
+              "odds": 42.9,
+              "conservativeProbability": 0.1078712338250273,
+              "expectedRoi": 3.6276759310936706,
+              "stake": 1000
+            }
+          ],
+          "abstentionReason": null
+        },
+        {
+          "raceId": "boat-20261018-04-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-08",
+          "stakes": [
+            {
+              "selection": "2-3-1",
+              "probability": 0.31067528961074115,
+              "probStd": 0.07335378030297386,
+              "odds": 30.4,
+              "conservativeProbability": 0.16690188021691238,
+              "expectedRoi": 4.073817158594136,
+              "stake": 1000
+            }
+          ],
+          "abstentionReason": null
+        },
+        {
+          "raceId": "boat-20261018-19-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-12",
+          "stakes": [
+            {
+              "selection": "3-1-2",
+              "probability": 0.2746845212127239,
+              "probStd": 0.08861247603876597,
+              "odds": 18.4,
+              "conservativeProbability": 0.1010040681767426,
+              "expectedRoi": 0.8584748544520635,
+              "stake": 1000
+            }
+          ],
+          "abstentionReason": null
+        },
+        {
+          "raceId": "boat-20261018-01-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-09",
+          "stakes": [
+            {
+              "selection": "1-2-4",
+              "probability": 0.133801927516777,
+              "probStd": 0.024808312203673227,
+              "odds": 13.6,
+              "conservativeProbability": 0.08517763559757748,
+              "expectedRoi": 0.15841584412705356,
+              "stake": 200
+            }
+          ],
+          "abstentionReason": null
+        },
+        {
+          "raceId": "boat-20261018-19-10",
+          "stakes": [],
+          "abstentionReason": "minimum_virtual_stake_not_reached"
+        },
+        {
+          "raceId": "boat-20261018-19-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        }
+      ]
+    },
+    "oldResidual": {
+      "minRawProbability": 0.1,
+      "maxOdds": 50,
+      "months": {
+        "2026-10": {
+          "grossStake": 0,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": 0,
+          "unresolvedStake": 0,
+          "races": 0
+        }
+      },
+      "settlementMonths": {},
+      "settlementMonthRisk": {},
+      "placedRaces": 0,
+      "abstainedRaces": 125,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": 0,
+      "maxRealizedNetLoss": 0,
+      "maxSettlementDrawdown": 0,
+      "unresolvedStake": 0,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": 0,
+      "decisions": [
+        {
+          "raceId": "boat-20261018-18-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        }
+      ]
+    },
+    "market": {
+      "minRawProbability": 0.1,
+      "maxOdds": 50,
+      "months": {
+        "2026-10": {
+          "grossStake": 0,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": 0,
+          "unresolvedStake": 0,
+          "races": 0
+        }
+      },
+      "settlementMonths": {},
+      "settlementMonthRisk": {},
+      "placedRaces": 0,
+      "abstainedRaces": 125,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": 0,
+      "maxRealizedNetLoss": 0,
+      "maxSettlementDrawdown": 0,
+      "unresolvedStake": 0,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": 0,
+      "decisions": [
+        {
+          "raceId": "boat-20261018-18-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        }
+      ]
+    },
+    "candidate": {
+      "minRawProbability": 0.1,
+      "maxOdds": 50,
+      "months": {
+        "2026-10": {
+          "grossStake": 0,
+          "carriedMonthStartExposure": 0,
+          "realizedProfit": 0,
+          "unresolvedStake": 0,
+          "races": 0
+        }
+      },
+      "settlementMonths": {},
+      "settlementMonthRisk": {},
+      "placedRaces": 0,
+      "abstainedRaces": 125,
+      "newlyPlacedFromOriginalAbstained": {
+        "count": 0,
+        "raceIds": []
+      },
+      "realizedProfit": 0,
+      "maxRealizedNetLoss": 0,
+      "maxSettlementDrawdown": 0,
+      "unresolvedStake": 0,
+      "unresolvedRefundRaces": 0,
+      "worstCaseProfit": 0,
+      "decisions": [
+        {
+          "raceId": "boat-20261018-18-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-10-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-21-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-18-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-03-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-08-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-16-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-09-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-04-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-02-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-23-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-01",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-02",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-03",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-04",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-05",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-06",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-07",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-20-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-01-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-08",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-09",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-10",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-11",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        },
+        {
+          "raceId": "boat-20261018-19-12",
+          "stakes": [],
+          "abstentionReason": "no_conservative_positive_edge"
+        }
+      ]
+    }
+  },
+  "fullyObservedMonths": 0,
+  "monthlyPositiveProfitFrequency": null,
+  "limitations": [
+    "October 18 only; not a full month",
+    "Zero observed initial open carry is an offline assumption, not production exposure proof",
+    "Refund selections remain reserved unresolved exposure; no fabricated refund P&L",
+    "Original probStd retained unchanged, not recalibrated",
+    "Repeated previously inspected holdout, not independent superiority evidence"
+  ],
+  "registered": false,
+  "promoted": false,
+  "promotionEligible": false,
+  "provenance": {
+    "actualFrozenAt": "2026-10-18T20:53:11.260689+00:00",
+    "candidateArtifactSha256": "999ef9d5ecabe531dbd889150f020f70036b30c4a48745e65b8ae7b1111924f5",
+    "oldArtifactSha256": "0a875cbfb51030ccf6fb2010f13cd3b7b58602b9170b1c84e1338c8d2370c0b5",
+    "implementationSha256": "b1ad6bc8a22383549d9c1d65c7c430d2a2bf3728a9b2255644de24c1f9759f43",
+    "testInputSha256": "76f4666502249ba7c44b186814d2362120d0ec51bea33f49eaa188d807f2472c",
+    "nonOutcomeInputSha256": "687bebb2e02599922ee7b0c5775c278e7076c2533aaf8c30ad942b0e0f330944",
+    "trainInputSha256": "a13160766653a369ba4fd1e94a0f3efc25805332dc10a85be263fe9549f86c1e",
+    "datasetAuditSha256": "94e9fdbd8fb9c2f28beeb5656e4e3d652501fe1d9e080b1056cfb5700e30bc88",
+    "asOf": "2026-10-18T20:52:08.444Z",
+    "originalAsOf": "2026-10-18T18:34:30Z",
+    "trainingRaceCount": 363,
+    "trainingRaceIds": [
+      "boat-20261014-04-03",
+      "boat-20261014-04-04",
+      "boat-20261014-04-06",
+      "boat-20261014-04-07",
+      "boat-20261014-04-08",
+      "boat-20261014-06-03",
+      "boat-20261014-06-04",
+      "boat-20261014-06-05",
+      "boat-20261014-11-01",
+      "boat-20261014-11-04",
+      "boat-20261014-11-05",
+      "boat-20261014-11-06",
+      "boat-20261014-11-08",
+      "boat-20261014-11-09",
+      "boat-20261014-12-06",
+      "boat-20261014-12-07",
+      "boat-20261014-12-08",
+      "boat-20261014-12-09",
+      "boat-20261014-12-10",
+      "boat-20261014-12-11",
+      "boat-20261014-12-12",
+      "boat-20261014-13-01",
+      "boat-20261014-13-02",
+      "boat-20261014-13-03",
+      "boat-20261014-13-04",
+      "boat-20261014-13-05",
+      "boat-20261014-13-06",
+      "boat-20261014-13-08",
+      "boat-20261014-13-09",
+      "boat-20261014-14-08",
+      "boat-20261014-14-12",
+      "boat-20261014-15-05",
+      "boat-20261014-15-06",
+      "boat-20261014-15-07",
+      "boat-20261014-15-08",
+      "boat-20261014-15-09",
+      "boat-20261014-15-10",
+      "boat-20261014-15-11",
+      "boat-20261014-15-12",
+      "boat-20261014-18-05",
+      "boat-20261014-18-06",
+      "boat-20261014-18-08",
+      "boat-20261014-18-09",
+      "boat-20261014-18-10",
+      "boat-20261014-18-12",
+      "boat-20261014-19-01",
+      "boat-20261014-19-02",
+      "boat-20261014-19-03",
+      "boat-20261014-19-04",
+      "boat-20261014-19-05",
+      "boat-20261014-19-06",
+      "boat-20261014-19-07",
+      "boat-20261014-19-08",
+      "boat-20261014-19-09",
+      "boat-20261014-19-10",
+      "boat-20261014-19-12",
+      "boat-20261014-20-05",
+      "boat-20261014-20-06",
+      "boat-20261014-20-07",
+      "boat-20261014-20-09",
+      "boat-20261014-20-10",
+      "boat-20261014-20-11",
+      "boat-20261014-20-12",
+      "boat-20261014-21-05",
+      "boat-20261014-21-06",
+      "boat-20261014-21-07",
+      "boat-20261014-21-09",
+      "boat-20261014-21-10",
+      "boat-20261014-21-11",
+      "boat-20261014-21-12",
+      "boat-20261014-22-03",
+      "boat-20261014-22-08",
+      "boat-20261014-24-05",
+      "boat-20261014-24-06",
+      "boat-20261014-24-07",
+      "boat-20261014-24-08",
+      "boat-20261014-24-09",
+      "boat-20261014-24-10",
+      "boat-20261014-24-11",
+      "boat-20261014-24-12",
+      "boat-20261015-12-12",
+      "boat-20261015-15-11",
+      "boat-20261015-15-12",
+      "boat-20261015-20-11",
+      "boat-20261015-20-12",
+      "boat-20261015-24-11",
+      "boat-20261015-24-12",
+      "boat-20261016-01-01",
+      "boat-20261016-01-02",
+      "boat-20261016-01-03",
+      "boat-20261016-01-04",
+      "boat-20261016-01-05",
+      "boat-20261016-01-06",
+      "boat-20261016-01-07",
+      "boat-20261016-01-08",
+      "boat-20261016-01-10",
+      "boat-20261016-01-11",
+      "boat-20261016-02-01",
+      "boat-20261016-02-02",
+      "boat-20261016-02-03",
+      "boat-20261016-02-04",
+      "boat-20261016-02-06",
+      "boat-20261016-02-07",
+      "boat-20261016-02-08",
+      "boat-20261016-02-09",
+      "boat-20261016-02-10",
+      "boat-20261016-02-11",
+      "boat-20261016-02-12",
+      "boat-20261016-03-01",
+      "boat-20261016-03-02",
+      "boat-20261016-03-03",
+      "boat-20261016-03-04",
+      "boat-20261016-03-05",
+      "boat-20261016-03-06",
+      "boat-20261016-03-08",
+      "boat-20261016-03-09",
+      "boat-20261016-03-10",
+      "boat-20261016-03-11",
+      "boat-20261016-04-02",
+      "boat-20261016-04-04",
+      "boat-20261016-04-05",
+      "boat-20261016-04-06",
+      "boat-20261016-04-07",
+      "boat-20261016-04-09",
+      "boat-20261016-04-10",
+      "boat-20261016-04-11",
+      "boat-20261016-04-12",
+      "boat-20261016-08-01",
+      "boat-20261016-08-03",
+      "boat-20261016-08-04",
+      "boat-20261016-08-05",
+      "boat-20261016-08-06",
+      "boat-20261016-08-07",
+      "boat-20261016-08-08",
+      "boat-20261016-08-09",
+      "boat-20261016-08-10",
+      "boat-20261016-08-11",
+      "boat-20261016-08-12",
+      "boat-20261016-09-02",
+      "boat-20261016-09-03",
+      "boat-20261016-09-04",
+      "boat-20261016-09-05",
+      "boat-20261016-09-06",
+      "boat-20261016-09-07",
+      "boat-20261016-09-08",
+      "boat-20261016-09-09",
+      "boat-20261016-09-10",
+      "boat-20261016-09-11",
+      "boat-20261016-10-03",
+      "boat-20261016-10-04",
+      "boat-20261016-10-05",
+      "boat-20261016-10-06",
+      "boat-20261016-10-08",
+      "boat-20261016-10-09",
+      "boat-20261016-10-10",
+      "boat-20261016-10-11",
+      "boat-20261016-10-12",
+      "boat-20261016-13-02",
+      "boat-20261016-13-03",
+      "boat-20261016-13-04",
+      "boat-20261016-13-05",
+      "boat-20261016-13-06",
+      "boat-20261016-13-07",
+      "boat-20261016-13-08",
+      "boat-20261016-13-09",
+      "boat-20261016-13-10",
+      "boat-20261016-13-11",
+      "boat-20261016-13-12",
+      "boat-20261016-14-04",
+      "boat-20261016-14-08",
+      "boat-20261016-14-11",
+      "boat-20261016-14-12",
+      "boat-20261016-19-01",
+      "boat-20261016-19-02",
+      "boat-20261016-19-03",
+      "boat-20261016-19-04",
+      "boat-20261016-19-05",
+      "boat-20261016-19-06",
+      "boat-20261016-19-07",
+      "boat-20261016-19-08",
+      "boat-20261016-19-09",
+      "boat-20261016-19-11",
+      "boat-20261016-19-12",
+      "boat-20261016-20-01",
+      "boat-20261016-20-02",
+      "boat-20261016-20-03",
+      "boat-20261016-20-04",
+      "boat-20261016-20-07",
+      "boat-20261016-20-08",
+      "boat-20261016-20-09",
+      "boat-20261016-20-10",
+      "boat-20261016-20-11",
+      "boat-20261016-20-12",
+      "boat-20261016-21-03",
+      "boat-20261016-21-04",
+      "boat-20261016-21-06",
+      "boat-20261016-21-07",
+      "boat-20261016-21-08",
+      "boat-20261016-21-09",
+      "boat-20261016-21-10",
+      "boat-20261016-21-11",
+      "boat-20261016-24-02",
+      "boat-20261016-24-03",
+      "boat-20261016-24-04",
+      "boat-20261016-24-05",
+      "boat-20261016-24-06",
+      "boat-20261016-24-07",
+      "boat-20261016-24-08",
+      "boat-20261016-24-09",
+      "boat-20261016-24-10",
+      "boat-20261016-24-11",
+      "boat-20261016-24-12",
+      "boat-20261017-01-01",
+      "boat-20261017-01-02",
+      "boat-20261017-01-04",
+      "boat-20261017-01-05",
+      "boat-20261017-01-06",
+      "boat-20261017-01-07",
+      "boat-20261017-01-08",
+      "boat-20261017-01-09",
+      "boat-20261017-01-10",
+      "boat-20261017-01-11",
+      "boat-20261017-01-12",
+      "boat-20261017-02-01",
+      "boat-20261017-02-02",
+      "boat-20261017-02-03",
+      "boat-20261017-02-04",
+      "boat-20261017-02-05",
+      "boat-20261017-02-06",
+      "boat-20261017-02-09",
+      "boat-20261017-02-10",
+      "boat-20261017-02-11",
+      "boat-20261017-02-12",
+      "boat-20261017-03-01",
+      "boat-20261017-03-02",
+      "boat-20261017-03-03",
+      "boat-20261017-03-04",
+      "boat-20261017-03-05",
+      "boat-20261017-03-06",
+      "boat-20261017-03-07",
+      "boat-20261017-03-08",
+      "boat-20261017-03-09",
+      "boat-20261017-03-10",
+      "boat-20261017-03-11",
+      "boat-20261017-04-01",
+      "boat-20261017-04-02",
+      "boat-20261017-04-03",
+      "boat-20261017-04-05",
+      "boat-20261017-04-06",
+      "boat-20261017-04-07",
+      "boat-20261017-04-09",
+      "boat-20261017-04-10",
+      "boat-20261017-04-11",
+      "boat-20261017-04-12",
+      "boat-20261017-08-01",
+      "boat-20261017-08-02",
+      "boat-20261017-08-03",
+      "boat-20261017-08-04",
+      "boat-20261017-08-05",
+      "boat-20261017-08-06",
+      "boat-20261017-08-07",
+      "boat-20261017-08-09",
+      "boat-20261017-08-10",
+      "boat-20261017-08-11",
+      "boat-20261017-08-12",
+      "boat-20261017-09-01",
+      "boat-20261017-09-02",
+      "boat-20261017-09-03",
+      "boat-20261017-09-04",
+      "boat-20261017-09-05",
+      "boat-20261017-09-06",
+      "boat-20261017-09-07",
+      "boat-20261017-09-09",
+      "boat-20261017-09-10",
+      "boat-20261017-09-11",
+      "boat-20261017-10-01",
+      "boat-20261017-10-02",
+      "boat-20261017-10-04",
+      "boat-20261017-10-05",
+      "boat-20261017-10-06",
+      "boat-20261017-10-07",
+      "boat-20261017-10-08",
+      "boat-20261017-10-09",
+      "boat-20261017-10-10",
+      "boat-20261017-10-12",
+      "boat-20261017-13-01",
+      "boat-20261017-13-02",
+      "boat-20261017-13-03",
+      "boat-20261017-13-04",
+      "boat-20261017-13-05",
+      "boat-20261017-13-06",
+      "boat-20261017-13-07",
+      "boat-20261017-13-08",
+      "boat-20261017-13-09",
+      "boat-20261017-13-10",
+      "boat-20261017-13-12",
+      "boat-20261017-14-01",
+      "boat-20261017-14-02",
+      "boat-20261017-14-03",
+      "boat-20261017-14-04",
+      "boat-20261017-14-05",
+      "boat-20261017-14-06",
+      "boat-20261017-14-07",
+      "boat-20261017-14-08",
+      "boat-20261017-14-10",
+      "boat-20261017-14-12",
+      "boat-20261017-16-01",
+      "boat-20261017-16-02",
+      "boat-20261017-16-03",
+      "boat-20261017-16-04",
+      "boat-20261017-16-05",
+      "boat-20261017-16-06",
+      "boat-20261017-16-07",
+      "boat-20261017-16-08",
+      "boat-20261017-16-09",
+      "boat-20261017-16-10",
+      "boat-20261017-16-11",
+      "boat-20261017-16-12",
+      "boat-20261017-19-01",
+      "boat-20261017-19-02",
+      "boat-20261017-19-03",
+      "boat-20261017-19-04",
+      "boat-20261017-19-05",
+      "boat-20261017-19-06",
+      "boat-20261017-19-07",
+      "boat-20261017-19-08",
+      "boat-20261017-19-09",
+      "boat-20261017-19-10",
+      "boat-20261017-19-11",
+      "boat-20261017-19-12",
+      "boat-20261017-20-01",
+      "boat-20261017-20-02",
+      "boat-20261017-20-03",
+      "boat-20261017-20-04",
+      "boat-20261017-20-05",
+      "boat-20261017-20-06",
+      "boat-20261017-20-08",
+      "boat-20261017-20-09",
+      "boat-20261017-20-10",
+      "boat-20261017-20-11",
+      "boat-20261017-20-12",
+      "boat-20261017-21-01",
+      "boat-20261017-21-02",
+      "boat-20261017-21-05",
+      "boat-20261017-21-06",
+      "boat-20261017-21-07",
+      "boat-20261017-21-08",
+      "boat-20261017-21-09",
+      "boat-20261017-21-10",
+      "boat-20261017-21-11",
+      "boat-20261017-21-12",
+      "boat-20261017-24-01",
+      "boat-20261017-24-02",
+      "boat-20261017-24-03",
+      "boat-20261017-24-04",
+      "boat-20261017-24-05",
+      "boat-20261017-24-06",
+      "boat-20261017-24-07",
+      "boat-20261017-24-08",
+      "boat-20261017-24-09",
+      "boat-20261017-24-10",
+      "boat-20261017-24-11",
+      "boat-20261017-24-12"
+    ],
+    "trainMaxRaceDate": "20261017",
+    "testRaceIds": [
+      "boat-20261018-01-01",
+      "boat-20261018-01-02",
+      "boat-20261018-01-04",
+      "boat-20261018-01-05",
+      "boat-20261018-01-06",
+      "boat-20261018-01-07",
+      "boat-20261018-01-08",
+      "boat-20261018-01-11",
+      "boat-20261018-01-12",
+      "boat-20261018-02-01",
+      "boat-20261018-02-02",
+      "boat-20261018-02-03",
+      "boat-20261018-02-05",
+      "boat-20261018-02-06",
+      "boat-20261018-02-07",
+      "boat-20261018-02-08",
+      "boat-20261018-02-09",
+      "boat-20261018-02-10",
+      "boat-20261018-02-11",
+      "boat-20261018-02-12",
+      "boat-20261018-03-01",
+      "boat-20261018-03-02",
+      "boat-20261018-03-03",
+      "boat-20261018-03-04",
+      "boat-20261018-03-07",
+      "boat-20261018-03-08",
+      "boat-20261018-03-09",
+      "boat-20261018-03-10",
+      "boat-20261018-03-11",
+      "boat-20261018-04-01",
+      "boat-20261018-04-02",
+      "boat-20261018-04-03",
+      "boat-20261018-04-04",
+      "boat-20261018-04-05",
+      "boat-20261018-04-06",
+      "boat-20261018-04-07",
+      "boat-20261018-04-09",
+      "boat-20261018-04-11",
+      "boat-20261018-04-12",
+      "boat-20261018-08-01",
+      "boat-20261018-08-02",
+      "boat-20261018-08-03",
+      "boat-20261018-08-04",
+      "boat-20261018-08-05",
+      "boat-20261018-08-06",
+      "boat-20261018-08-07",
+      "boat-20261018-08-08",
+      "boat-20261018-08-09",
+      "boat-20261018-08-10",
+      "boat-20261018-08-11",
+      "boat-20261018-08-12",
+      "boat-20261018-09-04",
+      "boat-20261018-09-05",
+      "boat-20261018-09-06",
+      "boat-20261018-09-07",
+      "boat-20261018-09-08",
+      "boat-20261018-09-09",
+      "boat-20261018-09-11",
+      "boat-20261018-09-12",
+      "boat-20261018-10-01",
+      "boat-20261018-10-03",
+      "boat-20261018-10-04",
+      "boat-20261018-10-05",
+      "boat-20261018-10-06",
+      "boat-20261018-10-07",
+      "boat-20261018-16-01",
+      "boat-20261018-16-02",
+      "boat-20261018-16-06",
+      "boat-20261018-16-08",
+      "boat-20261018-16-09",
+      "boat-20261018-16-11",
+      "boat-20261018-18-01",
+      "boat-20261018-18-02",
+      "boat-20261018-18-04",
+      "boat-20261018-18-05",
+      "boat-20261018-18-06",
+      "boat-20261018-18-07",
+      "boat-20261018-18-08",
+      "boat-20261018-18-09",
+      "boat-20261018-18-10",
+      "boat-20261018-18-11",
+      "boat-20261018-18-12",
+      "boat-20261018-19-01",
+      "boat-20261018-19-02",
+      "boat-20261018-19-03",
+      "boat-20261018-19-04",
+      "boat-20261018-19-05",
+      "boat-20261018-19-06",
+      "boat-20261018-19-07",
+      "boat-20261018-19-08",
+      "boat-20261018-19-09",
+      "boat-20261018-19-10",
+      "boat-20261018-19-11",
+      "boat-20261018-19-12",
+      "boat-20261018-20-01",
+      "boat-20261018-20-02",
+      "boat-20261018-20-03",
+      "boat-20261018-20-04",
+      "boat-20261018-20-05",
+      "boat-20261018-20-06",
+      "boat-20261018-20-07",
+      "boat-20261018-20-08",
+      "boat-20261018-20-09",
+      "boat-20261018-20-10",
+      "boat-20261018-20-11",
+      "boat-20261018-20-12",
+      "boat-20261018-21-01",
+      "boat-20261018-21-02",
+      "boat-20261018-21-03",
+      "boat-20261018-21-04",
+      "boat-20261018-21-05",
+      "boat-20261018-21-06",
+      "boat-20261018-21-07",
+      "boat-20261018-21-10",
+      "boat-20261018-23-01",
+      "boat-20261018-23-02",
+      "boat-20261018-23-03",
+      "boat-20261018-23-04",
+      "boat-20261018-23-05",
+      "boat-20261018-23-06",
+      "boat-20261018-23-07",
+      "boat-20261018-23-08",
+      "boat-20261018-23-10",
+      "boat-20261018-23-11",
+      "boat-20261018-23-12"
+    ],
+    "trainTestOverlap": 0,
+    "features": "127 ticket-derived lane, ordered-pair, incumbent/market ratio and market-marginal interactions; decision-time odds only; no outcomes/exhibition data passed to scorer",
+    "decisionSourceProofsUnchanged": true,
+    "originalInputUnchanged": true,
+    "artifactUnchanged": true,
+    "productionWrites": false,
+    "modelRegistryWrites": false,
+    "sourceCompatibility": {
+      "candidateSourceMatchesTrainAndTest": true,
+      "oldSourceMatchesTrainAndTest": true,
+      "protocolFileSha256Verified": true,
+      "protocolContentVerified": true,
+      "trainerSha256Verified": true,
+      "verification": "Standalone read-only provenance audit after initial replay; no re-fit or replay; metrics and decisions unchanged"
+    },
+    "auditedAt": "2026-10-18T20:55:34.056Z",
+    "evaluatedAt": null,
+    "evaluatedAtStatus": "Initial evaluation occurred after frozen-artifact verification; exact wall-clock timestamp was not recorded and is not reconstructed",
+    "originalDataAsOf": "2026-10-18T20:52:08.444Z",
+    "asOfMeaning": "Recovered-label data snapshot, earlier than artifact creation; not the time this evaluation ran"
+  },
+  "selection": {
+    "arm": "market",
+    "l2": null,
+    "validationNll": 3.8311074251932853,
+    "selectedPolicyArm": "market",
+    "learnedResearchCandidateL2": 3,
+    "validationScores": [
+      {
+        "arm": "market",
+        "l2": null,
+        "validationNll": 3.8311074251932853
+      },
+      {
+        "arm": "learned",
+        "l2": 0.03,
+        "validationNll": 3.929855436098996
+      },
+      {
+        "arm": "learned",
+        "l2": 0.3,
+        "validationNll": 3.8427345958246826
+      },
+      {
+        "arm": "learned",
+        "l2": 3,
+        "validationNll": 3.8312651682156726
+      }
+    ],
+    "noTestWinnerSelection": true,
+    "explanation": "Train-only inner validation selected exact zero-residual market. Nonzero candidate retained as research proposal; test results do not change selection."
+  }
+}

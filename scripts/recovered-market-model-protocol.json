@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "method": "conditional multinomial softmax with log normalized inverse decision-time odds offset",
+  "featureSchema": "recovered-market-interactions-v1",
+  "featureCount": 127,
+  "features": ["18 position-lane indicators", "90 ordered lane-pair indicators in position pairs (0,1),(0,2),(1,2), enumerated first lane then distinct second lane", "clipped log incumbent/market ratio divided by 5", "18 position-lane indicators multiplied by clipped log market position marginal divided by 5"],
+  "trainingDates": ["20261014", "20261015", "20261016", "20261017"],
+  "innerFitDates": ["20261014", "20261015", "20261016"],
+  "innerValidationDates": ["20261017"],
+  "l2Grid": [0.03, 0.3, 3],
+  "objective": "mean multiclass negative log likelihood plus l2/2 * squared weight norm",
+  "optimizer": {"method": "L-BFGS-B", "maxiter": 300, "ftol": 1e-10, "gtol": 1e-7},
+  "selection": "minimum Oct17 validation mean NLL including exact zero-residual market; tie within 1e-10 favors market then larger l2. Save best nonzero candidate separately even if market wins. Refit chosen nonzero l2 on Oct14-17 once. No further variants.",
+  "test": "Oct18 already inspected in prior research, retrospective only. Do not open test outcomes before artifact freeze. No test-driven model or policy changes.",
+  "policy": {"minProbability": 0.1, "maxOdds": 50, "monthlyGrossStakeCap": 10000, "perRaceCap": 1000, "recyclePayouts": false},
+  "uncertainty": "Original probStd unchanged, UNCALIBRATED conservative proxy; not learned model uncertainty",
+  "researchOnly": true,
+  "promotionEligible": false
+}
