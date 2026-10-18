@@ -255,6 +255,13 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         return {number:e.number,racerId,finishCode};
       });
       if(entries.length!==6||entries.some(e=>!e.racerId))throw new Error('saved complete registry missing');
+      // R2 membership was validated by the bounded caller before selection. Bind
+      // that authority to this exact persisted race/cutoff, never to a global flag.
+      const archiveRaceId=archiveRaceIds.includes(race.id)?race.id:null;
+      const archiveOnly=!!archiveRaceId&&!await first(db,`SELECT 1 FROM bets WHERE race_id=? AND data_origin='real'
+        UNION ALL SELECT 1 FROM experimental_paper_bets WHERE race_id=? AND data_origin='real'
+        UNION ALL SELECT 1 FROM historical_trifecta_experiment_bets WHERE race_id=? AND data_origin='real' LIMIT 1`,race.id,race.id,race.id);
+      const preserveEntries=labelOnly||archiveOnly;
       let labelArchiveId:string|null=null;
       if(labelOnly){
         reason='archived-prerace-evidence-unavailable';
@@ -302,7 +309,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         if(existingResults.length||existingPayouts.length)throw new Error('stored evidence conflicts with refund-only outcome');
         const archiveHashBytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(archiveRow.archive_json));
         const archiveSha256=Array.from(new Uint8Array(archiveHashBytes),b=>b.toString(16).padStart(2,'0')).join('');
-        const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:[],payouts:[],labelOnly:false,labelArchiveId:null,
+        const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:[],payouts:[],labelOnly:false,labelArchiveId:null,archiveRaceId,
           refundArchiveId:archiveRow.id,refundArchiveCapturedAt:archiveRow.captured_at,refundArchiveJson:archiveRow.archive_json});
         const proof={raceId:race.id,url,sha256,fetchedAt:new Date().toISOString(),quality:'verified-official-refund-outcome-v1',refundTablePresent:true,
           refundNumbers:refund.refundNumbers,payouts:refund.payouts,archiveId:archiveRow.id,archiveCapturedAt:archiveRow.captured_at,archiveSha256};
@@ -354,9 +361,9 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
           break;
         }
       }
-      const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId});
-      const guardedEntries=labelOnly?entries:entries.map(e=>({...e,finishCode:parsed.terminalEntries.find(x=>x.number===e.number)?.finishCode??e.finishCode}));
-      const guardAfterTerminal=JSON.stringify({race,entries:guardedEntries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId});
+      const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId,archiveRaceId});
+      const guardedEntries=preserveEntries?entries:entries.map(e=>({...e,finishCode:parsed.terminalEntries.find(x=>x.number===e.number)?.finishCode??e.finishCode}));
+      const guardAfterTerminal=JSON.stringify({race,entries:guardedEntries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId,archiveRaceId});
       const statements:Statement[]=[];
       statements.push(db.prepare(`INSERT INTO results(race_id,number,finish_order,data_origin)
         SELECT ?,json_extract(value,'$.number'),json_extract(value,'$.finishOrder'),'real' FROM json_each(?) WHERE ${currentSourceGuard}
@@ -364,7 +371,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       statements.push(db.prepare(`INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin)
         SELECT ?,json_extract(value,'$.betType'),json_extract(value,'$.selection'),json_extract(value,'$.payout'),'real' FROM json_each(?) WHERE ${currentSourceGuard}
         ON CONFLICT(race_id,bet_type,selection) DO NOTHING`).bind(race.id,JSON.stringify(parsed.payouts),guardData));
-      if(!labelOnly&&parsed.terminalEntries.length) statements.push(db.prepare(`UPDATE entries SET features_json=json_set(CASE WHEN json_valid(features_json) THEN features_json ELSE '{}' END,'$.finish_code',
+      if(!preserveEntries&&parsed.terminalEntries.length) statements.push(db.prepare(`UPDATE entries SET features_json=json_set(CASE WHEN json_valid(features_json) THEN features_json ELSE '{}' END,'$.finish_code',
         (SELECT json_extract(terminal.value,'$.finishCode') FROM json_each(?) terminal WHERE json_extract(terminal.value,'$.number')=entries.number))
         WHERE race_id=? AND data_origin='real' AND number IN (SELECT json_extract(value,'$.number') FROM json_each(?)) AND ${currentSourceGuard}`)
         .bind(JSON.stringify(parsed.terminalEntries),race.id,JSON.stringify(parsed.terminalEntries),guardData));
@@ -420,6 +427,13 @@ const currentSourceGuard = `EXISTS(SELECT 1 FROM races current JOIN (SELECT ? da
       OR EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb
         JOIN historical_trifecta_experiment_decisions hd ON hd.id=hb.decision_id AND hd.experiment_key='boat-trifecta-historical-base-v1'
         WHERE hb.race_id=current.id AND hb.data_origin='real' AND hb.status='open')
+      OR (json_extract(gate.data,'$.archiveRaceId')=current.id
+        AND current.betting_cutoff_source='boatrace-racelist-cutoff-v1'
+        AND current.betting_cutoff_source=json_extract(gate.data,'$.race.betting_cutoff_source')
+        AND current.betting_cutoff_at=json_extract(gate.data,'$.race.betting_cutoff_at')
+        AND julianday(current.betting_cutoff_at)<=julianday(json_extract(gate.data,'$.cutoff'))
+        AND NOT EXISTS(SELECT 1 FROM collection_runs proof WHERE proof.id='boat-result:'||current.id AND proof.source='boatrace-results-worker-v1'
+          AND proof.status='success' AND json_valid(proof.reason) AND json_extract(proof.reason,'$.quality')='verified-official-outcome-v2'))
       OR (json_extract(gate.data,'$.labelOnly')=1 AND json_extract(gate.data,'$.labelArchiveId') IS NOT NULL
         AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=current.id AND b.data_origin='real' AND b.status='open')
         AND current.betting_cutoff_source='boatrace-racelist-cutoff-v1'

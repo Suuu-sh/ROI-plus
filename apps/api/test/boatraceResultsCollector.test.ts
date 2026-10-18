@@ -239,6 +239,51 @@ describe('purchased real boat results',()=>{
     expect(targets.map(row=>row.id)).not.toContain(unlisted);
     expect(targets.map(row=>row.id)).not.toContain(wrongCutoff);
   });
+  it.each([false,true])('persists verified R2 archive-only results without bets (terminal=%s)',async terminal=>{
+    const raceId=seed();sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
+    // The production cursor validates R2, not the D1 capture archive table.
+    sqlite.prepare("UPDATE races SET betting_cutoff_at=?,betting_cutoff_source='boatrace-racelist-cutoff-v1' WHERE id=?")
+      .run('2026-10-11T03:00:00Z',raceId);
+    const before=sqlite.prepare('SELECT features_json FROM entries ORDER BY number').all();
+    const html=terminal?boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']}):page();
+    expect(await collectResults(DB,now,{archiveRaceIds:[raceId],fetch:async()=>new Response(html)}))
+      .toMatchObject({status:'success',verified:1,targets:1,attempted:1});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:terminal?5:6});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM payouts').get()).toMatchObject({n:2});
+    expect(sqlite.prepare('SELECT status FROM races WHERE id=?').get(raceId)).toMatchObject({status:'finished'});
+    const log=sqlite.prepare('SELECT status,reason FROM collection_runs').get() as {status:string;reason:string};
+    expect(log.status).toBe('success');
+    expect(JSON.parse(log.reason)).toMatchObject({raceId,quality:'verified-official-outcome-v2',sha256:createHash('sha256').update(html).digest('hex')});
+    expect(sqlite.prepare('SELECT features_json FROM entries ORDER BY number').all()).toEqual(before);
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM bets').get()).toMatchObject({n:0});
+    // Existing verified evidence makes the next automatic invocation a no-op.
+    expect(await collectResults(DB,new Date(now.getTime()+3600_000),{archiveRaceIds:[raceId],fetch:fetchPage}))
+      .toMatchObject({verified:0,attempted:0});
+  });
+  it('does not collect an unpurchased race absent from the verified archive list',async()=>{
+    seedT60Archive();const fetcher=vi.fn(fetchPage);
+    expect(await collectResults(DB,now,{fetch:fetcher})).toMatchObject({verified:0,attempted:0});
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:0});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM collection_runs').get()).toMatchObject({n:0});
+  });
+  it.each(['registry','quarantine','cutoff','cutoffSource','identity','postTime'])('rejects archive-only %s changes during fetch',async change=>{
+    const raceId=seedT60Archive();
+    const fetcher=async(input:string)=>{
+      if(change==='registry')sqlite.prepare("UPDATE entries SET features_json='{}' WHERE number=1").run();
+      if(change==='quarantine')sqlite.prepare("INSERT INTO data_repair_quarantined_races(race_id,repair_id,reason) VALUES(?,'fixture','fixture')").run(raceId);
+      if(change==='cutoff')sqlite.prepare("UPDATE races SET betting_cutoff_at='2026-10-11T02:59:00Z' WHERE id=?").run(raceId);
+      if(change==='cutoffSource')sqlite.prepare("UPDATE races SET betting_cutoff_source=NULL WHERE id=?").run(raceId);
+      if(change==='identity')sqlite.prepare('UPDATE races SET race_no=2 WHERE id=?').run(raceId);
+      if(change==='postTime')sqlite.prepare("UPDATE races SET post_time='2099-01-01T00:00:00Z' WHERE id=?").run(raceId);
+      return fetchPage(input);
+    };
+    expect(await collectResults(DB,now,{archiveRaceIds:[raceId],fetch:fetcher})).toMatchObject({status:'failed',records:0,verified:0});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results').get()).toMatchObject({n:0});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM payouts').get()).toMatchObject({n:0});
+    const log=sqlite.prepare('SELECT status,reason FROM collection_runs').get() as {status:string;reason:string};
+    expect(log.status).toBe('failed');expect(JSON.parse(log.reason).reason).toBe('source-state-changed');
+  });
   it('targets a historical-only open virtual race while excluding unrelated races',async()=>{
     seed(2);seed(3,'real','won');
     sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(id(2));
