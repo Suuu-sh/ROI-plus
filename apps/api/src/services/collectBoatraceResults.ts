@@ -351,7 +351,8 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       let refundArchiveProof:Record<string,unknown>|undefined;
       if(parsed.refundNumbers.length){
         reason='refund-outcome-archive-unavailable';
-        const row=await first<{id:string;captured_at:string;archive_json:string}>(db,"SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin='real' AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1",race.id,new Date(Date.parse(race.betting_cutoff_at??'')-60_000).toISOString());
+        const cutoffMs=Date.parse(race.betting_cutoff_at??'');
+        const row=Number.isFinite(cutoffMs)?await first<{id:string;captured_at:string;archive_json:string}>(db,"SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin='real' AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1",race.id,new Date(cutoffMs-60_000).toISOString()):null;
         if(!row||race.betting_cutoff_source!=='boatrace-racelist-cutoff-v1'){
           if(!explicitBackfill)throw new Error('refund archive missing');
         } else {

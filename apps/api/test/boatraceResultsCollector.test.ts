@@ -572,6 +572,14 @@ describe('purchased real boat results',()=>{
     const html=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'F']}).replace('<div class="numberSet1_row"></div><div class="numberSet1_row"></div>','<div class="numberSet1_row"><span class="numberSet1_number">6</span></div>');
     expect(await collectResults(DB,replayNow,{mode:'manual',labelOnly:true,historicalLabelRaceIds:[raceId],backfillRunId:'b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0',cachedFetchedAt:()=>now.toISOString(),fetch:async()=>new Response(html),sleep:async()=>{}})).toMatchObject({verified:0,failed:1});
   });
+  it.each([['K0','欠'],['K1','欠'],['L0','L'],['L1','L'],['F','F']])('accepts stored %s only with official %s and explicit lane refund',async(code,token)=>{
+    const replayNow=new Date('2026-10-19T00:00:00Z');vi.useFakeTimers();vi.setSystemTime(replayNow);const raceId=seed();
+    sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
+    sqlite.prepare("UPDATE entries SET features_json=json_set(features_json,'$.finish_code',?) WHERE race_id=? AND number=6").run(code,raceId);
+    const html=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,token]}).replace('<div class="numberSet1_row"></div><div class="numberSet1_row"></div>','<div class="numberSet1_row"><span class="numberSet1_number">6</span></div>');
+    expect(await collectResults(DB,replayNow,{mode:'manual',labelOnly:true,historicalLabelRaceIds:[raceId],backfillRunId:'b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0',cachedFetchedAt:()=>now.toISOString(),fetch:async()=>new Response(html),sleep:async()=>{}})).toMatchObject({verified:1});
+    expect(JSON.parse((sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number=6').get(raceId) as any).features_json).finish_code).toBe(code);
+  });
   it('bounds historical label replay to explicit IDs, preserves acquisition time and PIT entries',async()=>{
     const replayNow=new Date('2026-10-19T00:00:00Z');vi.useFakeTimers();vi.setSystemTime(replayNow);
     const raceId=seedT60Archive(),excluded=seedT60Archive(2);
