@@ -1,0 +1,734 @@
+{
+  "schema": "all-historical-official-recovery-audit-v1",
+  "asOf": "2026-10-18T20:24:16.913Z",
+  "scope": "Real nonquarantined races before 2026-10-19 with saved decision/archive/bet/result-collector evidence; not all pure training races",
+  "sourceEligible": 986,
+  "existingCanonicalOfficialV2": 348,
+  "existingCanonicalRefundV1": 0,
+  "pendingAtInventory": 638,
+  "pendingManifestSha256": "7241b93219b3fbf72d7054e8351b32a44c0dc9558bd402eb3d45a8d819ce83e8",
+  "rosterSource": "Current production entries.features_json.racer_id: registration identity only, not prediction-time feature evidence",
+  "cacheReused": 93,
+  "newOfficialGetAttempts": 545,
+  "counts": {
+    "verified_normal": 594,
+    "verified_refund": 12,
+    "unsupported": 32
+  },
+  "byDate": {
+    "20261011": {
+      "total": 5,
+      "verified_normal": 4,
+      "verified_refund": 1,
+      "unsupported": 0,
+      "fetch_failure": 0
+    },
+    "20261012": {
+      "total": 58,
+      "verified_normal": 55,
+      "verified_refund": 0,
+      "unsupported": 3,
+      "fetch_failure": 0
+    },
+    "20261013": {
+      "total": 102,
+      "verified_normal": 99,
+      "verified_refund": 0,
+      "unsupported": 3,
+      "fetch_failure": 0
+    },
+    "20261014": {
+      "total": 70,
+      "verified_normal": 66,
+      "verified_refund": 2,
+      "unsupported": 2,
+      "fetch_failure": 0
+    },
+    "20261015": {
+      "total": 149,
+      "verified_normal": 142,
+      "verified_refund": 1,
+      "unsupported": 6,
+      "fetch_failure": 0
+    },
+    "20261016": {
+      "total": 23,
+      "verified_normal": 10,
+      "verified_refund": 3,
+      "unsupported": 10,
+      "fetch_failure": 0
+    },
+    "20261017": {
+      "total": 107,
+      "verified_normal": 98,
+      "verified_refund": 3,
+      "unsupported": 6,
+      "fetch_failure": 0
+    },
+    "20261018": {
+      "total": 124,
+      "verified_normal": 120,
+      "verified_refund": 2,
+      "unsupported": 2,
+      "fetch_failure": 0
+    }
+  },
+  "productionPersisted": false,
+  "productionWrites": false,
+  "promotionEligible": false,
+  "fitPerformed": false,
+  "artifactSha256": "0a875cbfb51030ccf6fb2010f13cd3b7b58602b9170b1c84e1338c8d2370c0b5",
+  "comparison": {
+    "evaluationRaceCount": 125,
+    "labeledRaceCount": 121,
+    "excludedCount": 4,
+    "excludedRefundRaces": [
+      "boat-20261018-02-11",
+      "boat-20261018-16-06"
+    ],
+    "excludedUnsupportedRaces": [
+      "boat-20261018-16-11",
+      "boat-20261018-23-11"
+    ],
+    "metrics": {
+      "current": {
+        "races": 121,
+        "meanNll": 5.197888942116909,
+        "multiclassBrier": 1.0172268779704787
+      },
+      "residual": {
+        "races": 121,
+        "meanNll": 3.765274547421693,
+        "multiclassBrier": 0.9564213199689473
+      },
+      "market": {
+        "races": 121,
+        "meanNll": 3.745122941888407,
+        "multiclassBrier": 0.9553318286009715
+      }
+    },
+    "arms": {
+      "current": {
+        "placedRaces": 8,
+        "realizedProfit": -5800,
+        "grossStake": 5800,
+        "unresolvedStake": 0
+      },
+      "residual": {
+        "placedRaces": 0,
+        "realizedProfit": 0,
+        "grossStake": 0,
+        "unresolvedStake": 0
+      },
+      "market": {
+        "placedRaces": 0,
+        "realizedProfit": 0,
+        "grossStake": 0,
+        "unresolvedStake": 0
+      }
+    }
+  },
+  "unsupported": [
+    {
+      "raceId": "boat-20261012-03-10",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261012&jcd=03&rno=10",
+      "bodySha256": "80b38b8a09498f69bf5aaa1cbb15309da53d3f2c6fbccefdaf118aebb5c72bb4",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 1,
+          "code": "沈"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261012-16-11",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261012&jcd=16&rno=11",
+      "bodySha256": "d1da90e0d4cdbdbf98e1e90d2a445fd28046c26ec903441c742946ddd3178d58",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 1,
+          "code": "落"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261012-23-02",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261012&jcd=23&rno=2",
+      "bodySha256": "9a6b287552a49c29e71c4456ed24cb66d5ee5f1a40dc03d21ed61d23d84fa67e",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 4,
+          "code": "エ"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261013-11-03",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261013&jcd=11&rno=3",
+      "bodySha256": "815413cca05fda4231f5c870f95106d9bf64671c2a9a35f01110061c3739456d",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 1,
+          "code": "落"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261013-14-08",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261013&jcd=14&rno=8",
+      "bodySha256": "1cd9646e9d6254a65b31e80780d9fe8c0fc2a4e6d86a09be00044277ccd9f920",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 3,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261013-14-12",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261013&jcd=14&rno=12",
+      "bodySha256": "6656dbbe8191fd22c1f8df29c603cae2361d55fc35f472126f754787a048039e",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 1,
+          "code": "転"
+        },
+        {
+          "number": 3,
+          "code": "落"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261014-14-10",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261014&jcd=14&rno=10",
+      "bodySha256": "28cf3f3affa945a11b5887bce7dd1a86c1123bcf04e41518d8e1656d737482ab",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 1,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261014-24-10",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261014&jcd=24&rno=10",
+      "bodySha256": "9c5572d12a360ddeceacf4c785f7c5d9942728bfa11d59ef4b0729750367b3cd",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 6,
+          "code": "不"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261015-02-08",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261015&jcd=02&rno=8",
+      "bodySha256": "8435180d3e804b9d0a6611211654e8ac9595d5436187b9863d87c67f0b774ea9",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 5,
+          "code": "転"
+        },
+        {
+          "number": 6,
+          "code": "エ"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261015-04-05",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261015&jcd=04&rno=5",
+      "bodySha256": "a356e53180194ad84494877b774fe827e89e1151e5eed7d2489406bd9d1a6982",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 2,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261015-04-07",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261015&jcd=04&rno=7",
+      "bodySha256": "6e51e3299ff607094bef5c37cebc7c7f35e46419bdee9814bc624468fc173b30",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 6,
+          "code": "エ"
+        },
+        {
+          "number": 5,
+          "code": "転"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261015-12-12",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261015&jcd=12&rno=12",
+      "bodySha256": "dfdc53286ea60f34274e1ce4cd125e22b9d82511b83e83f88473df0da1c3a273",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 2,
+          "code": "転"
+        },
+        {
+          "number": 6,
+          "code": "妨"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261015-21-01",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261015&jcd=21&rno=1",
+      "bodySha256": "dd9a417ddf399f856fefb5207742df95f8f615df234afb12de95ed076d10ecf1",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 2,
+          "code": "落"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261015-22-03",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261015&jcd=22&rno=3",
+      "bodySha256": "5f7acb04f8409472dd04df57312a02bb895203942eca284e177644dba1a60581",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 5,
+          "code": "転"
+        },
+        {
+          "number": 6,
+          "code": "エ"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261016-01-02",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=01&rno=2",
+      "bodySha256": "ad46c2a8a04edd754788aa3bf0f08f02168769581bae3baf741b344e29cd0dcd",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 3,
+          "code": "エ"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261016-02-05",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=02&rno=5",
+      "bodySha256": "a083b2b713af167f609ff64dc3c54868185d188348871dec301297a4d458ac94",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 1,
+          "code": "Ｆ"
+        },
+        {
+          "number": 3,
+          "code": "Ｆ"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261016-02-08",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=02&rno=8",
+      "bodySha256": "94bbc6001bd6f02a3a146a574955bec6f2547aa963cb948146002a3a06598791",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 5,
+          "code": "落"
+        },
+        {
+          "number": 6,
+          "code": "転"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261016-03-05",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=03&rno=5",
+      "bodySha256": "39cfd54d84198afb2e9a61abf5cf2de1cc8fb87f6e27418c7a8e6769d781c151",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 2,
+          "code": "転"
+        },
+        {
+          "number": 6,
+          "code": "落"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261016-08-05",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=08&rno=5",
+      "bodySha256": "160d6ef70831569e6b4c747b2996a4342d8e8380d17776f0822fff6c24951e1c",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "duplicate_numeric_finish_rank_5",
+      "rawOfficialTerminalMarkers": [],
+      "rosterMismatch": false,
+      "rawOfficialFinishRanks": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        5
+      ]
+    },
+    {
+      "raceId": "boat-20261016-09-12",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=09&rno=12",
+      "bodySha256": "99d29b1503c3ebb15549473e0a45a448bf2e05337faab29c6e9b9edcdcef5fe1",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 3,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261016-14-01",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=14&rno=1",
+      "bodySha256": "9d06101ea4d96bee2fe3ddaaa6eba34be95ef13d56a3c50071858cd6b1b79d06",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 5,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261016-14-02",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=14&rno=2",
+      "bodySha256": "393244c43c519831a96a75f580652a15398707eccb5ce6fe213510e27b4829e5",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 2,
+          "code": "エ"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261016-14-05",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=14&rno=5",
+      "bodySha256": "939f964208b08c32a398ac6cddf0c77cf604fe829c06260f976d058e379f6037",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 1,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261016-14-07",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=14&rno=7",
+      "bodySha256": "316f66cdcc56118e699ec72b468a0e20c22dd305c514c1d089b6ea09d0d0710f",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 2,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261017-09-12",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261017&jcd=09&rno=12",
+      "bodySha256": "fdf0f05623672f27f00e69e9a32c6796a03a6c18a1e259a870a5c4e74a93c704",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 6,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261017-10-03",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261017&jcd=10&rno=3",
+      "bodySha256": "50f01be106a330cb386746071ed289361f5f3bb3fcccc1ff787180b77d3a9165",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 3,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261017-10-09",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261017&jcd=10&rno=9",
+      "bodySha256": "32bfd8f53510c39a96c68ac2557b9c4e2900afea4e98e0cb8eb94ecf29e82211",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 3,
+          "code": "沈"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261017-10-11",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261017&jcd=10&rno=11",
+      "bodySha256": "40b5533c0cd0741439405e075238fe2d1905aeead506a4ae5e151045d5bcbc45",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 6,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261017-14-09",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261017&jcd=14&rno=9",
+      "bodySha256": "c4728d42ceb1d7940026b25a56f5abfce7289a1cff9cf541671b0e57eaedc6bb",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 4,
+          "code": "失"
+        },
+        {
+          "number": 2,
+          "code": "欠"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261017-16-01",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261017&jcd=16&rno=1",
+      "bodySha256": "76cc93a222f7092b2d6fbf637d8039cbba46e04d8c8e2f71141ff0433ec22872",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 6,
+          "code": "沈"
+        },
+        {
+          "number": 5,
+          "code": "妨"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261018-16-11",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261018&jcd=16&rno=11",
+      "bodySha256": "02e10ec48d6b7d915d2d9631e30809bd03bcf65af6c2e312d43debcbaa6b710c",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 2,
+          "code": "エ"
+        },
+        {
+          "number": 6,
+          "code": "妨"
+        }
+      ],
+      "rosterMismatch": false
+    },
+    {
+      "raceId": "boat-20261018-23-11",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261018&jcd=23&rno=11",
+      "bodySha256": "ddc104a1e8cf4a5e55067790e992dd860465cdc03546af197d70f390e873a462",
+      "reason": "official_strict_parser_unsupported",
+      "diagnosticClassification": "unsupported_terminal_markers",
+      "rawOfficialTerminalMarkers": [
+        {
+          "number": 1,
+          "code": "転"
+        },
+        {
+          "number": 2,
+          "code": "落"
+        },
+        {
+          "number": 3,
+          "code": "妨"
+        }
+      ],
+      "rosterMismatch": false
+    }
+  ],
+  "verifiedRefunds": [
+    {
+      "raceId": "boat-20261011-09-03",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261011&jcd=09&rno=3",
+      "bodySha256": "cb090b71243e0a4d094c632b49db57c9caeeedadb19043459743bfa1583df603",
+      "refundNumbers": [
+        1
+      ]
+    },
+    {
+      "raceId": "boat-20261014-11-03",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261014&jcd=11&rno=3",
+      "bodySha256": "f98a90f1427a5c416605073db4ab4f8e1b2de0ad8b7598c01ac2a747f047712f",
+      "refundNumbers": [
+        2
+      ]
+    },
+    {
+      "raceId": "boat-20261014-19-11",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261014&jcd=19&rno=11",
+      "bodySha256": "c4fa0e6c6c64b8c7fd1c2b1fdcfc6bf7b14c8ba3121c94753164b2a3ac245d6b",
+      "refundNumbers": [
+        1
+      ]
+    },
+    {
+      "raceId": "boat-20261015-02-12",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261015&jcd=02&rno=12",
+      "bodySha256": "8368e2a3d6f1e8c2a5d16a9a66866f3fb2831b816cf833c15a45e438a0c3f6fb",
+      "refundNumbers": [
+        4
+      ]
+    },
+    {
+      "raceId": "boat-20261016-19-10",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=19&rno=10",
+      "bodySha256": "9e689ee31440cf70e7142f049ff33489de3e8d68d0837d0e696380ef5d91e484",
+      "refundNumbers": [
+        1
+      ]
+    },
+    {
+      "raceId": "boat-20261016-20-05",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=20&rno=5",
+      "bodySha256": "ed7ebe36cbd9a44e1c0ab2372e8254db750bef8355be9c8bdadc5ae3ef35958b",
+      "refundNumbers": [
+        1
+      ]
+    },
+    {
+      "raceId": "boat-20261016-20-06",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261016&jcd=20&rno=6",
+      "bodySha256": "1a108b84457c2c65d76475e219f3edeb0fba447576f991f08e6c00855d834894",
+      "refundNumbers": [
+        1
+      ]
+    },
+    {
+      "raceId": "boat-20261017-01-03",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261017&jcd=01&rno=3",
+      "bodySha256": "69086e4d740fa7812dc6164f5adaa55c46bdc78e6cac5f88f1a777f91ebcd287",
+      "refundNumbers": [
+        1
+      ]
+    },
+    {
+      "raceId": "boat-20261017-09-08",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261017&jcd=09&rno=8",
+      "bodySha256": "a7a0b8a96ad2001ba74bd77ea9f8cdf8acc56c2e787ddc354b8aca24dbb8f95a",
+      "refundNumbers": [
+        6
+      ]
+    },
+    {
+      "raceId": "boat-20261017-14-11",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261017&jcd=14&rno=11",
+      "bodySha256": "80b021694e35f113c47a6c4a849ae662efb3964965c1b7712e8262c8380cb79b",
+      "refundNumbers": [
+        1
+      ]
+    },
+    {
+      "raceId": "boat-20261018-02-11",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261018&jcd=02&rno=11",
+      "bodySha256": "72df52499f29312eda87dd83daca8ec6299ab665fd96a1ecfde10ce2d0ee0fc0",
+      "refundNumbers": [
+        5
+      ]
+    },
+    {
+      "raceId": "boat-20261018-16-06",
+      "sourceUrl": "https://www.boatrace.jp/owpc/pc/race/raceresult?hd=20261018&jcd=16&rno=6",
+      "bodySha256": "a272d4576ffa8069b4e3b7804fc294f0fbce8e6dbc33cd120e0b940479c856d0",
+      "refundNumbers": [
+        1
+      ]
+    }
+  ]
+}
