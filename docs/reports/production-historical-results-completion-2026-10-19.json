@@ -1,0 +1,366 @@
+{
+  "asOf": "2026-10-18T20:42:10.988Z",
+  "scope": {
+    "fixedManifestSha256": "b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0",
+    "fixedRaceCount": 638
+  },
+  "production": {
+    "canonicalVerifiedV2": 638,
+    "failed": 0,
+    "finished": 638,
+    "withNumericResults": 638,
+    "refundWithoutPitProvenance": 13,
+    "refundWithPitProvenance": 11,
+    "zeroNumericResults": 0
+  },
+  "sourceChecks": {
+    "dbResultProofMismatches": 0,
+    "dbWinTrifectaPayoutProofMismatches": 0,
+    "exactCachedBodyAndAcquisitionTimeMatches": 624,
+    "otherCanonicalEvidence": [
+      {
+        "raceId": "boat-20261014-24-10",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261015-12-12",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261016-01-02",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261016-01-08",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261016-02-05",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261016-02-08",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261016-03-05",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261016-08-05",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261016-14-02",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261017-02-09",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261017-04-09",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261017-08-10",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261017-09-10",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      },
+      {
+        "raceId": "boat-20261018-16-11",
+        "shaMatchesCache": false,
+        "fetchedAtMatchesCache": false
+      }
+    ],
+    "otherCanonicalEvidenceBodyRehashedInAudit": false,
+    "officialIdentityHashShapeAndPostRaceAcquisitionValidated": 638,
+    "metadataMismatches": [],
+    "independentCachedStrictParserOutcomeMatches": 638,
+    "independentOutcomeComparisonFields": [
+      "results",
+      "win/trifecta payouts",
+      "terminalEntries",
+      "refundNumbers",
+      "nonRefundableNumbers"
+    ],
+    "independentCachedOutcomeMismatches": 0
+  },
+  "outcomeRaceCounts": {
+    "terminal": 68,
+    "refund": 24,
+    "tiedNumericRanks": 1
+  },
+  "previouslyUnsupported": {
+    "count": 32,
+    "canonicalVerifiedV2": 32,
+    "rows": [
+      {
+        "raceId": "boat-20261012-03-10",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261012-16-11",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261012-23-02",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261013-11-03",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261013-14-08",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261013-14-12",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261014-14-10",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261014-24-10",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261015-02-08",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261015-04-05",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261015-04-07",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261015-12-12",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261015-21-01",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261015-22-03",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261016-01-02",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261016-02-05",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261016-02-08",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261016-03-05",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261016-08-05",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": false,
+        "tie": true
+      },
+      {
+        "raceId": "boat-20261016-09-12",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261016-14-01",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261016-14-02",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261016-14-05",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261016-14-07",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261017-09-12",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261017-10-03",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261017-10-09",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261017-10-11",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261017-14-09",
+        "quality": "verified-official-outcome-v2",
+        "refund": true,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261017-16-01",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261018-16-11",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      },
+      {
+        "raceId": "boat-20261018-23-11",
+        "quality": "verified-official-outcome-v2",
+        "refund": false,
+        "terminal": true,
+        "tie": false
+      }
+    ]
+  },
+  "ledgerStatuses": {
+    "normal": {
+      "statuses": {},
+      "openRaceIds": []
+    },
+    "experimental": {
+      "statuses": {
+        "lost": 12,
+        "void": 7
+      },
+      "openRaceIds": []
+    },
+    "historical": {
+      "statuses": {
+        "lost": 85,
+        "void": 29
+      },
+      "openRaceIds": []
+    }
+  },
+  "issues": [],
+  "limits": [
+    "Source-result completion does not imply every virtual ticket is settled.",
+    "Refund proofs without valid PIT provenance remain ineligible for refund settlement.",
+    "No model promotion, prediction regeneration or bet-record mutation was performed by this audit."
+  ]
+}
