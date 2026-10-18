@@ -6,6 +6,15 @@ import { estimateWorkerWriteUnits, reserveWriteBudgets, utcDate } from './writeB
 import { boatArchiveEvidenceValid } from './boatArchiveEvidence.js';
 
 const FIXED_BACKFILL_SHA='b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0';
+function compatibleStoredTerminal(old:string|null|undefined,official:string,number:number,parsed:{refundNumbers:number[];nonRefundableNumbers:number[]}) {
+  if(old===null||old===undefined||old===official)return true;
+  const aliases:Record<string,string>={'転':'転覆','沈':'沈没','落':'落水','エ':'エンスト','不':'不完走','妨':'妨害失格','失':'失格','欠':'欠場','F':'Ｆ','L':'Ｌ'};
+  if(aliases[old]===official)return true;
+  if(/^S[012]$/.test(old))return parsed.nonRefundableNumbers.includes(number)&&['失格','転覆','沈没','落水','エンスト','不完走','妨害失格'].includes(official);
+  if(/^K[01]$/.test(old))return official==='欠場'&&parsed.refundNumbers.includes(number);
+  if(/^L[01]$/.test(old))return official==='Ｌ'&&parsed.refundNumbers.includes(number);
+  return false;
+}
 export const RESULTS_SOURCE = 'boatrace-results-worker-v1';
 // Preserve the existing worst-case request envelope (eight target races, with
 // one retry each) while allowing successful pages to advance farther. These
@@ -346,12 +355,14 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         if(!row||race.betting_cutoff_source!=='boatrace-racelist-cutoff-v1'){
           if(!explicitBackfill)throw new Error('refund archive missing');
         } else {
+        try {
         const archive=JSON.parse(row.archive_json);
         if(archive.capturedAt!==row.captured_at||!boatArchiveEvidenceValid(archive,race,savedEntries))throw new Error('refund archive rejected');
         const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(row.archive_json));
         refundArchiveProof={archiveJson:row.archive_json,archiveId:row.id,archiveCapturedAt:row.captured_at,archiveSha256:Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join(''),refundNumbers:parsed.refundNumbers};
         // Bind the validated immutable archive to the existing atomic source guard.
         labelArchiveId=row.id;
+        } catch { if(!explicitBackfill)throw new Error('refund archive rejected'); }
         }
       }
       const [existingResults,existingPayouts]=await Promise.all([
@@ -362,7 +373,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       // Don't silently repair/correct prior trusted evidence or settled tickets.
       if(existingResults.some(x=>!parsed.results.some(y=>y.number===x.number&&y.finishOrder===x.finish_order))
           ||existingPayouts.some(x=>!parsed.payouts.some(y=>y.betType===x.bet_type&&y.selection===x.selection&&y.payout===x.payout))
-          ||parsed.terminalEntries.some(x=>{const old=entries.find(e=>e.number===x.number)?.finishCode;return old!==null&&old!==x.finishCode&&!(old==='転'&&x.finishCode==='転覆');})
+          ||parsed.terminalEntries.some(x=>{const old=entries.find(e=>e.number===x.number)?.finishCode;return !compatibleStoredTerminal(old,x.finishCode,x.number,parsed);})
           ||parsed.results.some(x=>!!entries.find(e=>e.number===x.number)?.finishCode)) throw new Error('existing result evidence conflict');
       // Reserve for the verified result, payout, race status and run-log rows
       // only once source and stored evidence are both accepted.

@@ -540,6 +540,38 @@ describe('purchased real boat results',()=>{
     expect(await collectResults(DB,replayNow,{mode:'manual',labelOnly:true,historicalLabelRaceIds:[raceId],backfillRunId:'b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0',cachedFetchedAt:()=>now.toISOString(),fetch:fetchPage,sleep:async()=>{}})).toMatchObject({verified:1});
     expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? ORDER BY number').all(raceId)).toEqual(before);
   });
+  it('saves fixed-manifest refund source without claiming an invalid PIT archive or permitting refund settlement',async()=>{
+    const replayNow=new Date('2026-10-19T00:00:00Z');vi.useFakeTimers();vi.setSystemTime(replayNow);
+    const raceId=seed();sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
+    sqlite.prepare("UPDATE races SET betting_cutoff_at='2026-10-11T03:00:00Z',betting_cutoff_source='boatrace-racelist-cutoff-v1' WHERE id=?").run(raceId);
+    sqlite.prepare("INSERT INTO boatrace_prerace_capture_archives(id,race_id,race_date,captured_at,archive_json,data_origin) VALUES(?,?,?,'2026-10-11T02:58:00Z','{}','real')").run(`${raceId}:invalid`,raceId,raceDate);
+    const html=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'F']})
+      .replace('<div class="numberSet1_row"></div><div class="numberSet1_row"></div>','<div class="numberSet1_row"><span class="numberSet1_number">6</span></div>');
+    expect(await collectResults(DB,replayNow,{mode:'manual',labelOnly:true,historicalLabelRaceIds:[raceId],backfillRunId:'b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0',cachedFetchedAt:()=>now.toISOString(),fetch:async()=>new Response(html),sleep:async()=>{}})).toMatchObject({verified:1});
+    const proof=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs WHERE id=?').get(`boat-result:${raceId}`) as any).reason);
+    expect(proof.refundNumbers).toEqual([6]);expect(proof.archiveId).toBeUndefined();expect(proof.archiveSha256).toBeUndefined();
+    expect(await loadVerifiedRefundOutcome(DB,{id:raceId,race_date:raceDate,venue_id:'09',race_no:1,betting_cutoff_at:'2026-10-11T03:00:00Z'})).toBeNull();
+  });
+  it.each(['S0','S1','S2'])('accepts only official nonrefund terminal evidence for stored %s while preserving raw features',async(code)=>{
+    const replayNow=new Date('2026-10-19T00:00:00Z');vi.useFakeTimers();vi.setSystemTime(replayNow);
+    const raceId=seed();sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
+    sqlite.prepare("UPDATE entries SET features_json=json_set(features_json,'$.finish_code',?) WHERE race_id=? AND number=6").run(code,raceId);
+    const html=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']});
+    expect(await collectResults(DB,replayNow,{mode:'manual',labelOnly:true,historicalLabelRaceIds:[raceId],backfillRunId:'b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0',cachedFetchedAt:()=>now.toISOString(),fetch:async()=>new Response(html),sleep:async()=>{}})).toMatchObject({verified:1});
+    expect(JSON.parse((sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number=6').get(raceId) as any).features_json).finish_code).toBe(code);
+  });
+  it.each(['F','S9','K0'])('rejects incompatible stored terminal %s for a nonrefund capsize',async(code)=>{
+    vi.useFakeTimers();vi.setSystemTime(now);const raceId=seed();
+    sqlite.prepare("UPDATE entries SET features_json=json_set(features_json,'$.finish_code',?) WHERE race_id=? AND number=6").run(code,raceId);
+    expect(await collectResults(DB,now,{fetch:async()=>new Response(boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']}))})).toMatchObject({verified:0,failed:1});
+  });
+  it('rejects stored S0 when the official source instead verifies an F refund',async()=>{
+    const replayNow=new Date('2026-10-19T00:00:00Z');vi.useFakeTimers();vi.setSystemTime(replayNow);const raceId=seed();
+    sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
+    sqlite.prepare("UPDATE entries SET features_json=json_set(features_json,'$.finish_code','S0') WHERE race_id=? AND number=6").run(raceId);
+    const html=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'F']}).replace('<div class="numberSet1_row"></div><div class="numberSet1_row"></div>','<div class="numberSet1_row"><span class="numberSet1_number">6</span></div>');
+    expect(await collectResults(DB,replayNow,{mode:'manual',labelOnly:true,historicalLabelRaceIds:[raceId],backfillRunId:'b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0',cachedFetchedAt:()=>now.toISOString(),fetch:async()=>new Response(html),sleep:async()=>{}})).toMatchObject({verified:0,failed:1});
+  });
   it('bounds historical label replay to explicit IDs, preserves acquisition time and PIT entries',async()=>{
     const replayNow=new Date('2026-10-19T00:00:00Z');vi.useFakeTimers();vi.setSystemTime(replayNow);
     const raceId=seedT60Archive(),excluded=seedT60Archive(2);
