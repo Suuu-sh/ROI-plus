@@ -1,7 +1,7 @@
 import { normalHistorySnapshot, resetNormalHistory, validSnapshot } from './services/resetNormalHistory.js';
 import { fetchPurchaseOdds, purchaseOddsContext, type PurchaseOdds, type PurchaseOddsContext } from './services/purchaseOdds.js';
 import { finalTrifectaOdds } from './services/finalTrifectaOdds.js';
-import { loadTrifectaSettlementEvidence, loadVerifiedRefundOutcome, verifiedNoRefundCapsize, verifiedNoRefundCapsizeRecord, verifiedOfficialRefundOutcomeSql, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './services/trifectaSettlement.js';
+import { officialTerminalEntries, verifiedOfficialTerminalOutcomeSql, loadTrifectaSettlementEvidence, loadVerifiedRefundOutcome, verifiedNoRefundCapsize, verifiedNoRefundCapsizeRecord, verifiedOfficialRefundOutcomeSql, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './services/trifectaSettlement.js';
 import { collectionIssues } from './services/collectionIssues.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
@@ -51,10 +51,10 @@ const PAPER_COMPARISON_PHASES = {
 // A full field is represented by either an official numeric finish or an
 // explicit non-finisher code parsed from the official K result file.
 const terminalFinishCodeSql = `(json_valid(e.features_json) AND (
-  json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走')
+  json_extract(e.features_json,'$.finish_code') IN ('沈没','妨害失格','Ｆ','Ｌ','F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走')
   OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))`;
 const isTerminalFinishCode = (value: unknown): boolean =>
-  typeof value === 'string' && (['F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走'].includes(value)
+  typeof value === 'string' && (['沈没','妨害失格','Ｆ','Ｌ','F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走'].includes(value)
     || /^K\d$/.test(value));
 async function hasVerifiedCapsizeNoRefund(db: Db, race: {id:string;race_date:string;venue_id:string;race_no:number}, number: number): Promise<boolean> {
   return verifiedNoRefundCapsize(db,race,number);
@@ -425,9 +425,9 @@ async function settleOpen(db: Db) {
         if(!['win','trifecta'].includes(b.bet_type))continue;
         const selected=String(b.selection).split('-').map(Number);
         const isRefund=selected.some(number=>refundOutcome.refundNumbers.includes(number));
-        const officialPayout=refundOutcome.payouts.find((row:any)=>row.betType===b.bet_type);
-        if(!officialPayout)continue;
-        const won=!isRefund&&String(b.selection)===officialPayout.selection;
+        const officialPayout=refundOutcome.payouts.find((row:any)=>row.betType===b.bet_type&&row.selection===String(b.selection));
+        if(!refundOutcome.payouts.some((row:any)=>row.betType===b.bet_type))continue;
+        const won=!isRefund&&!!officialPayout;
         const status=isRefund?'void':won?'won':'lost';
         const payout=isRefund?Number(b.stake):won?payoutYen(Number(b.stake),Number(officialPayout.payout)):0;
         const finalOdds=isRefund?1:won?Number(officialPayout.payout)/100:null;
@@ -440,6 +440,9 @@ async function settleOpen(db: Db) {
         }
         continue;
       }
+      const refundRecord=await first<any>(db,"SELECT reason FROM collection_runs WHERE id=? AND source=? AND sport='boat'",`boat-result:${b.race_id}`,RESULTS_SOURCE);
+      let declaredRefund:any;try{declaredRefund=JSON.parse(refundRecord?.reason??'{}').refundNumbers}catch{}
+      if(Array.isArray(declaredRefund)&&declaredRefund.length)continue;
     }
     const integrity = await first<any>(db, `SELECT
       (SELECT COUNT(*) FROM entries e WHERE e.race_id=? AND e.data_origin=?) entry_count,
@@ -465,6 +468,20 @@ async function settleOpen(db: Db) {
       (SELECT CASE WHEN json_valid(e.features_json) THEN json_extract(e.features_json,'$.finish_code') END FROM entries e WHERE e.race_id=? AND e.data_origin=? AND CAST(e.number AS TEXT)=? LIMIT 1) selected_finish_code`,
       b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,
       b.race_id,b.data_origin,b.race_id,b.data_origin,b.race_id,b.data_origin,b.bet_type,b.race_id,b.data_origin,b.race_id,b.data_origin,b.selection);
+    if(integrity&&b.bet_type==='win'&&b.race_origin==='real'){
+      const [record,sourceEntries,sourceResults]=await Promise.all([
+        first<any>(db,"SELECT target_date,status,reason FROM collection_runs WHERE id=? AND source=? AND sport='boat'",`boat-result:${b.race_id}`,RESULTS_SOURCE),
+        all<any>(db,"SELECT number,features_json FROM entries WHERE race_id=? AND data_origin='real' ORDER BY number",b.race_id),
+        all<any>(db,"SELECT number FROM results WHERE race_id=? AND data_origin='real'",b.race_id),
+      ]);
+      const mapped=officialTerminalEntries(record,{id:b.race_id,race_date:b.race_date,venue_id:b.venue_id,race_no:b.race_no},sourceEntries.map(entry=>{
+        let finishCode:string|null=null;try{finishCode=JSON.parse(entry.features_json??'{}').finish_code??null}catch{}
+        return {number:Number(entry.number),finishCode};
+      }));
+      integrity.terminal_entry_count=mapped.filter(entry=>isTerminalFinishCode(entry.finishCode)&&!sourceResults.some(row=>Number(row.number)===entry.number)).length;
+      integrity.terminal_result_conflict_count=mapped.filter(entry=>isTerminalFinishCode(entry.finishCode)&&sourceResults.some(row=>Number(row.number)===entry.number)).length;
+      integrity.selected_finish_code=mapped.find(entry=>String(entry.number)===String(b.selection))?.finishCode??null;
+    }
     if (!integrity || integrity.entry_count <= 0
         || (b.bet_type !== 'trifecta' && integrity.result_count + integrity.terminal_entry_count !== integrity.entry_count)
         || integrity.terminal_result_conflict_count > 0
@@ -479,10 +496,12 @@ async function settleOpen(db: Db) {
         all<any>(db, 'SELECT number,features_json FROM entries WHERE race_id=? AND data_origin=? ORDER BY number', b.race_id, b.data_origin),
       ]);
       const trifectaPayouts = await all<any>(db, "SELECT selection,payout FROM payouts WHERE race_id=? AND data_origin=? AND bet_type='trifecta' AND payout>0", b.race_id, b.data_origin);
-      const mappedEntries=entries.map((entry:any)=>{
+      let mappedEntries=entries.map((entry:any)=>{
         let finishCode:string|null=null;try{const parsed=JSON.parse(entry.features_json??'{}');if(typeof parsed.finish_code==='string')finishCode=parsed.finish_code;}catch{/* malformed metadata stays unknown */}
         return {number:Number(entry.number),finishCode};
       });
+      const terminalRecord=await first<any>(db,"SELECT target_date,status,reason FROM collection_runs WHERE id=? AND source=? AND sport='boat'",`boat-result:${b.race_id}`,RESULTS_SOURCE);
+      mappedEntries=officialTerminalEntries(terminalRecord,{id:b.race_id,race_date:b.race_date,venue_id:b.venue_id,race_no:b.race_no},mappedEntries);
       const verifiedTerminalNumbers:number[]=[];
       for(const entry of mappedEntries){
         if(isTerminalFinishCode(entry.finishCode)&&String(b.selection).split('-').includes(String(entry.number))
@@ -502,9 +521,7 @@ async function settleOpen(db: Db) {
     // this exact ticket was refunded. Do not turn missing refund evidence into
     // a loss; keep that bet open while other, fully evidenced picks can settle.
     if (b.bet_type === 'win' && isTerminalFinishCode(integrity.selected_finish_code) && !pay) {
-      // Only a parsed after-start capsize plus an empty official refund table
-      // proves this ticket lost. Other terminal outcomes remain unresolved.
-      if (integrity.selected_finish_code !== '転覆' && integrity.selected_finish_code !== '転') continue;
+      // The source-bound official no-refund policy must cover this exact lane.
       if (!await hasVerifiedCapsizeNoRefund(db,{id:b.race_id,race_date:b.race_date,venue_id:b.venue_id,race_no:b.race_no},Number(b.selection))) continue;
     }
     const values = settleValues(b.stake, pay?.payout ?? null, !!pay);
@@ -534,15 +551,9 @@ async function settleExperimentalOpen(db: Db) {
    AND NOT EXISTS(SELECT 1 FROM entries e JOIN results x ON x.race_id=e.race_id AND x.number=e.number AND x.data_origin=e.data_origin
      WHERE e.race_id=r.id AND e.data_origin='real' AND ${terminalFinishCodeSql})
    AND (SELECT COUNT(DISTINCT x.number) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
-   AND (SELECT COUNT(DISTINCT x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
    AND COALESCE((SELECT MIN(x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real'),0)=1
-   AND (SELECT MAX(x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
-   AND (SELECT COUNT(*) FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0)=1
-   AND EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
-     AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||
-       (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||
-       (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3))
-   AND ${verifiedSelectedTerminalOutcomeSql}) OR ${verifiedOfficialRefundOutcomeSql})
+   AND (SELECT COUNT(*) FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0)>0
+   AND ${verifiedSelectedTerminalOutcomeSql}) OR ${verifiedOfficialRefundOutcomeSql} OR ${verifiedOfficialTerminalOutcomeSql})
    ORDER BY b.placed_at,b.id`);
 
  const races=[...new Map(open.map((b:any)=>[String(b.race_id),{id:String(b.race_id),race_date:String(b.race_date),venue_id:String(b.venue_id),race_no:Number(b.race_no)}])).values()];
@@ -551,27 +562,29 @@ async function settleExperimentalOpen(db: Db) {
  const refundOutcomeCache=new Map<string,Promise<any>>();
  for(const bet of open){
    let sourceProof:any;try{sourceProof=JSON.parse(evidence.proofs.get(String(bet.race_id))?.reason??'{}')}catch{sourceProof=null;}
-   if(sourceProof?.quality==='verified-official-refund-outcome-v1'){
+   if(['verified-official-refund-outcome-v1','verified-official-outcome-v2'].includes(sourceProof?.quality)&&sourceProof?.refundNumbers?.length){
      let pending=refundOutcomeCache.get(String(bet.race_id));
      if(!pending){pending=loadVerifiedRefundOutcome(db,{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no,betting_cutoff_at:bet.betting_cutoff_at});refundOutcomeCache.set(String(bet.race_id),pending);}
      const refund=await pending;
      if(refund){
        const selection=String(bet.selection).split('-').map(Number),isRefund=selection.some(n=>refund.refundNumbers.includes(n));
-       const official=refund.payouts.find((row:any)=>row.betType==='trifecta');
-       if(!official)continue;
-       const won=!isRefund&&String(bet.selection)===official.selection,status=isRefund?'void':won?'won':'lost';
+       const official=refund.payouts.find((row:any)=>row.betType==='trifecta'&&row.selection===String(bet.selection));
+       if(!refund.payouts.some((row:any)=>row.betType==='trifecta'))continue;
+       const won=!isRefund&&!!official,status=isRefund?'void':won?'won':'lost';
        const payout=isRefund?Number(bet.stake):won?payoutYen(Number(bet.stake),official.payout):0;
        settlements.push({bet,status,payout,credit:isRefund?Number(bet.stake):payout});
        continue;
      }
+     continue; // Explicit refund evidence must validate; never fall through to ordinary losses.
    }
    const order=evidence.results.get(String(bet.race_id))??[];
    const entries=evidence.entries.get(String(bet.race_id))??[];
    const payouts=evidence.payouts.get(String(bet.race_id))??[];
-   const mappedEntries=entries.map((entry:any)=>{
+   let mappedEntries=entries.map((entry:any)=>{
      let finishCode:string|null=null;try{const parsed=JSON.parse(entry.features_json??'{}');if(typeof parsed.finish_code==='string')finishCode=parsed.finish_code;}catch{/* malformed metadata stays unknown */}
      return {number:Number(entry.number),finishCode};
    });
+   mappedEntries=officialTerminalEntries(evidence.proofs.get(String(bet.race_id)),{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no},mappedEntries);
    const verifiedTerminalNumbers:number[]=[];
    for(const entry of mappedEntries){
      if(isTerminalFinishCode(entry.finishCode)&&String(bet.selection).split('-').includes(String(entry.number))

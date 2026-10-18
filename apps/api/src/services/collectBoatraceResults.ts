@@ -5,6 +5,7 @@ import { USER_AGENT } from './boatraceOdds.js';
 import { estimateWorkerWriteUnits, reserveWriteBudgets, utcDate } from './writeBudget.js';
 import { boatArchiveEvidenceValid } from './boatArchiveEvidence.js';
 
+const FIXED_BACKFILL_SHA='b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0';
 export const RESULTS_SOURCE = 'boatrace-results-worker-v1';
 // Preserve the existing worst-case request envelope (eight target races, with
 // one retry each) while allowing successful pages to advance farther. These
@@ -16,7 +17,7 @@ const BODY_LIMIT = 512 * 1024;
 const RESULT_FETCH_TIMEOUT_MS = 30_000;
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 export type ResultsRequestBudget = { used: number; max: number };
-type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string; betting_cutoff_at?: string|null; betting_cutoff_source?: string|null };
+type RaceTarget = { id: string; venue_id: string; race_no: number; race_date: string; post_time?:string; betting_cutoff_at?: string|null; betting_cutoff_source?: string|null };
 export type CollectResultsOptions = {
   // Set only by the authenticated, explicitly confirmed manual route.
   mode?: 'hourly' | 'manual';
@@ -25,6 +26,12 @@ export type CollectResultsOptions = {
   requestBudget?: ResultsRequestBudget;
   // Explicitly collect labels only for races with validated archived PIT inputs.
   labelOnly?: boolean;
+  // Explicit offline administrative backfill only; no public route supplies this.
+  historicalLabelRaceIds?: string[];
+  // Internal one-off replay lock, scoped to the fixed manifest digest.
+  backfillRunId?: string;
+  // Cached responses retain their original acquisition time, never replay time.
+  cachedFetchedAt?: (url: string) => string | undefined;
   // Canonical complete R2 archive races selected by the bounded archive cursor.
   // These are lower priority than open bets and share the existing request budget.
   archiveRaceIds?: string[];
@@ -56,15 +63,18 @@ const missingOpenTerminalProofSql = `NOT EXISTS(
       AND EXISTS(SELECT 1 FROM json_each(cp.reason,'$.terminalEntries') ti WHERE CAST(json_extract(ti.value,'$.number') AS INTEGER)=te.number AND json_extract(ti.value,'$.finishCode')='転覆'))
 )`;
 
-export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_BATCH_SIZE, labelOnly = false, archiveRaceIds: string[] = []) {
+export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_BATCH_SIZE, labelOnly = false, archiveRaceIds: string[] = [], historicalLabelRaceIds: string[] = [], backfillRunId?:string) {
   // Old open purchases may still need settlement; no history-wide collection.
   // Least recently attempted first prevents an unpublished race starving others.
   const jstDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);
   const archiveIds=archiveRaceIds.filter(id=>/^boat-\d{8}-\d{2}-\d{2}$/.test(id)).slice(0,80)
   // Keep the D1 statement below its 100-bind limit even with all 80 R2 IDs;
   // this membership predicate appears twice in the query.
+  const historicalIds=historicalLabelRaceIds.filter(id=>/^boat-\d{8}-\d{2}-\d{2}$/.test(id)).slice(0,80);
+  const explicitBackfill=backfillRunId===FIXED_BACKFILL_SHA&&historicalIds.length>0;
+  const labelDateSql=historicalIds.length?`r.id IN (SELECT value FROM json_each(?))`:'r.race_date=?';
   const archiveIdSql=archiveIds.length?`r.id IN (SELECT value FROM json_each(?))`:'0'
-  return all<RaceTarget>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date,r.betting_cutoff_at,r.betting_cutoff_source FROM races r
+  return all<RaceTarget>(db, `SELECT r.id,r.venue_id,r.race_no,r.race_date,r.post_time,r.betting_cutoff_at,r.betting_cutoff_source FROM races r
     LEFT JOIN collection_runs cr ON cr.id='boat-result:'||r.id AND cr.source=?
     WHERE r.sport='boat' AND r.data_origin='real' AND r.status IN ('scheduled','closed','finished')
       AND r.post_time IS NOT NULL AND julianday(r.post_time)<=julianday(?)
@@ -78,13 +88,13 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
         OR EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb
           JOIN historical_trifecta_experiment_decisions hd ON hd.id=hb.decision_id AND hd.experiment_key='boat-trifecta-historical-base-v1'
           WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open')))
-        OR (?=1 AND r.race_date=? AND r.betting_cutoff_source='boatrace-racelist-cutoff-v1'
-          AND julianday(r.betting_cutoff_at)<=julianday(?,'-5 minutes')
+        OR (?=1 AND ${labelDateSql} AND (${explicitBackfill?1:0}=1 OR r.betting_cutoff_source='boatrace-racelist-cutoff-v1')
+          AND (${explicitBackfill?1:0}=1 OR julianday(r.betting_cutoff_at)<=julianday(?,'-5 minutes'))
           AND NOT EXISTS(SELECT 1 FROM bets b WHERE b.race_id=r.id AND b.data_origin='real' AND b.status='open')
           AND NOT EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open')
-          AND EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives ar WHERE ar.race_id=r.id AND ar.data_origin='real'
+          AND (${explicitBackfill?1:0}=1 OR EXISTS(SELECT 1 FROM boatrace_prerace_capture_archives ar WHERE ar.race_id=r.id AND ar.data_origin='real'
             AND julianday(ar.captured_at)<=julianday(r.betting_cutoff_at,'-60 seconds')
-            AND json_valid(ar.archive_json) AND json_extract(ar.archive_json,'$.schema')='boat-prerace-capture-v1')
+            AND json_valid(ar.archive_json) AND json_extract(ar.archive_json,'$.schema')='boat-prerace-capture-v1'))
           AND NOT EXISTS(SELECT 1 FROM collection_runs proof WHERE proof.id='boat-result:'||r.id AND proof.source=?
             AND proof.status='success' AND json_valid(proof.reason) AND json_extract(proof.reason,'$.quality')='verified-official-outcome-v2'
             AND json_type(proof.reason,'$.results')='array' AND json_type(proof.reason,'$.payouts')='array'))
@@ -120,7 +130,7 @@ export async function selectResultsTargets(db: Db, now: Date, maximum = TARGET_B
         OR EXISTS(SELECT 1 FROM experimental_paper_bets eb WHERE eb.race_id=r.id AND eb.data_origin='real' AND eb.status='open') THEN 0
       WHEN EXISTS(SELECT 1 FROM historical_trifecta_experiment_bets hb WHERE hb.race_id=r.id AND hb.data_origin='real' AND hb.status='open') THEN 1 ELSE 2 END,
       julianday(cr.started_at) ASC,julianday(r.post_time) ASC,r.id ASC LIMIT ?`, RESULTS_SOURCE,
-    new Date(now.getTime()-5*60_000).toISOString(),Number(labelOnly),Number(labelOnly),jstDate,
+    new Date(now.getTime()-5*60_000).toISOString(),Number(labelOnly),Number(labelOnly),historicalIds.length?JSON.stringify(historicalIds):jstDate,
     new Date(now.getTime()).toISOString(),RESULTS_SOURCE,...(archiveIds.length?[JSON.stringify(archiveIds)]:[]),new Date(now.getTime()-5*60_000).toISOString(),RESULTS_SOURCE,
     Number(labelOnly),...(archiveIds.length?[JSON.stringify(archiveIds)]:[]),Math.max(0, Math.floor(maximum)));
 }
@@ -183,7 +193,8 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
   const window = `${now.toISOString().slice(0,13)}:${String(minute).padStart(2,'0')}`;
   const budget = opts.requestBudget ?? {used:0,max:49};
   const manual=opts.mode==='manual';
-  const lockKey=manual?'boat_results_manual_until':'boat_results_ten_minute';
+  const backfill=manual&&opts.labelOnly===true&&/^[a-f0-9]{64}$/.test(opts.backfillRunId??'')?opts.backfillRunId:null;
+  const lockKey=backfill?`boat_results_backfill:${backfill}`:manual?'boat_results_manual_until':'boat_results_ten_minute';
   const prior=await first<{value:string}>(db,'SELECT value FROM settings WHERE key=?',lockKey);
   if(manual&&prior){
     const until=Date.parse(prior.value);
@@ -197,7 +208,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
   if (!attemptLimit) return skipped;
   const labelOnly=opts.labelOnly===true;
   const archiveRaceIds=(opts.archiveRaceIds??[]).filter(id=>/^boat-\d{8}-\d{2}-\d{2}$/.test(id)).slice(0,80)
-  const targets = await selectResultsTargets(db,now,labelOnly?Math.min(4,attemptLimit):attemptLimit,labelOnly,archiveRaceIds);
+  const targets = await selectResultsTargets(db,now,labelOnly?Math.min(4,attemptLimit):attemptLimit,labelOnly,archiveRaceIds,opts.historicalLabelRaceIds,opts.backfillRunId);
   if (!targets.length) return skipped;
   const lease=manual?new Date(now.getTime()+5*60_000).toISOString():window;
   const fetcher=opts.fetch ?? ((input,init)=>fetch(input,init)),sleep=opts.sleep ?? pause;
@@ -263,7 +274,9 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         UNION ALL SELECT 1 FROM historical_trifecta_experiment_bets WHERE race_id=? AND data_origin='real' LIMIT 1`,race.id,race.id,race.id);
       const preserveEntries=labelOnly||archiveOnly;
       let labelArchiveId:string|null=null;
-      if(labelOnly){
+      const explicitBackfill=labelOnly&&opts.backfillRunId===FIXED_BACKFILL_SHA&&opts.historicalLabelRaceIds?.slice(0,80).includes(race.id);
+      const manifestAuthority=explicitBackfill?{manifestRaceId:race.id,manifestSha256:FIXED_BACKFILL_SHA}:{};
+      if(labelOnly&&!explicitBackfill){
         reason='archived-prerace-evidence-unavailable';
         const archiveRow=await first<{id:string;captured_at:string;archive_json:string}>(db,"SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin='real' AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1",race.id,new Date(Date.parse(race.betting_cutoff_at??'')-60_000).toISOString());
         if(!race.betting_cutoff_at||race.betting_cutoff_source!=='boatrace-racelist-cutoff-v1'||!archiveRow)throw new Error('archive evidence missing');
@@ -290,6 +303,8 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
       }
       if(!body){reason=fetchFailure?.code ?? 'official-result-unavailable';throw new Error('official result unavailable');}
       sha256=body.sha256;
+      const fetchedAt=opts.cachedFetchedAt?.(url) ?? new Date().toISOString();
+      if(!Number.isFinite(Date.parse(fetchedAt))||Date.parse(fetchedAt)>Date.now()||Date.parse(fetchedAt)<Date.parse(race.betting_cutoff_at??race.race_date))throw new Error('invalid cached acquisition time');
       reason='official-page-identity-or-outcome-rejected';
       const expected={url,raceDate:race.race_date,venueCode:race.venue_id,raceNo:race.race_no,entries};
       let parsed:ReturnType<typeof parseBoatraceResults>;
@@ -311,7 +326,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         const archiveSha256=Array.from(new Uint8Array(archiveHashBytes),b=>b.toString(16).padStart(2,'0')).join('');
         const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:[],payouts:[],labelOnly:false,labelArchiveId:null,archiveRaceId,
           refundArchiveId:archiveRow.id,refundArchiveCapturedAt:archiveRow.captured_at,refundArchiveJson:archiveRow.archive_json});
-        const proof={raceId:race.id,url,sha256,fetchedAt:new Date().toISOString(),quality:'verified-official-refund-outcome-v1',refundTablePresent:true,
+        const proof={raceId:race.id,url,sha256,fetchedAt,quality:'verified-official-refund-outcome-v1',refundTablePresent:true,
           refundNumbers:refund.refundNumbers,payouts:refund.payouts,archiveId:archiveRow.id,archiveCapturedAt:archiveRow.captured_at,archiveSha256};
         const refundCount=refund.refundNumbers.length+refund.payouts.length;
         if(!await reserveWriteBudgets(db,utcDate(now),[{units:estimateWorkerWriteUnits(2),category:'essential'}])){reason='daily-write-budget-exhausted';throw new Error('daily write budget exhausted');}
@@ -323,6 +338,21 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         if(!refundWrites.at(-1)?.meta?.changes)throw new Error('source state changed');
         records+=refundCount;verified++;
         continue;
+      }
+      let refundArchiveProof:Record<string,unknown>|undefined;
+      if(parsed.refundNumbers.length){
+        reason='refund-outcome-archive-unavailable';
+        const row=await first<{id:string;captured_at:string;archive_json:string}>(db,"SELECT id,captured_at,archive_json FROM boatrace_prerace_capture_archives WHERE race_id=? AND data_origin='real' AND julianday(captured_at)<=julianday(?) ORDER BY julianday(captured_at) DESC LIMIT 1",race.id,new Date(Date.parse(race.betting_cutoff_at??'')-60_000).toISOString());
+        if(!row||race.betting_cutoff_source!=='boatrace-racelist-cutoff-v1'){
+          if(!explicitBackfill)throw new Error('refund archive missing');
+        } else {
+        const archive=JSON.parse(row.archive_json);
+        if(archive.capturedAt!==row.captured_at||!boatArchiveEvidenceValid(archive,race,savedEntries))throw new Error('refund archive rejected');
+        const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(row.archive_json));
+        refundArchiveProof={archiveJson:row.archive_json,archiveId:row.id,archiveCapturedAt:row.captured_at,archiveSha256:Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join(''),refundNumbers:parsed.refundNumbers};
+        // Bind the validated immutable archive to the existing atomic source guard.
+        labelArchiveId=row.id;
+        }
       }
       const [existingResults,existingPayouts]=await Promise.all([
         all<{number:number;finish_order:number}>(db,"SELECT number,finish_order FROM results WHERE race_id=? AND data_origin='real'",race.id),
@@ -361,9 +391,9 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
           break;
         }
       }
-      const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId,archiveRaceId});
+      const guardData=JSON.stringify({race,entries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId,archiveRaceId,...manifestAuthority,...(refundArchiveProof?{refundArchiveId:refundArchiveProof.archiveId,refundArchiveCapturedAt:refundArchiveProof.archiveCapturedAt,refundArchiveJson:refundArchiveProof.archiveJson}: {})});
       const guardedEntries=preserveEntries?entries:entries.map(e=>({...e,finishCode:parsed.terminalEntries.find(x=>x.number===e.number)?.finishCode??e.finishCode}));
-      const guardAfterTerminal=JSON.stringify({race,entries:guardedEntries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId,archiveRaceId});
+      const guardAfterTerminal=JSON.stringify({race,entries:guardedEntries,cutoff:new Date(now.getTime()-5*60_000).toISOString(),results:parsed.results,payouts:parsed.payouts,labelOnly,labelArchiveId,archiveRaceId,...manifestAuthority,...(refundArchiveProof?{refundArchiveId:refundArchiveProof.archiveId,refundArchiveCapturedAt:refundArchiveProof.archiveCapturedAt,refundArchiveJson:refundArchiveProof.archiveJson}: {})});
       const statements:Statement[]=[];
       statements.push(db.prepare(`INSERT INTO results(race_id,number,finish_order,data_origin)
         SELECT ?,json_extract(value,'$.number'),json_extract(value,'$.finishOrder'),'real' FROM json_each(?) WHERE ${currentSourceGuard}
@@ -377,7 +407,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
         .bind(JSON.stringify(parsed.terminalEntries),race.id,JSON.stringify(parsed.terminalEntries),guardData));
       statements.push(db.prepare(`UPDATE races SET status='finished',updated_at=? WHERE id=? AND ${currentSourceGuard}`).bind(new Date().toISOString(),race.id,guardAfterTerminal));
       const count=parsed.results.length+parsed.payouts.length+parsed.terminalEntries.length;
-      statements.push(logStatement(db,race,startedAt,'success',count,{raceId:race.id,url,sha256,quality:'verified-official-outcome-v2',fetchedAt:new Date().toISOString(),results:parsed.results,payouts:parsed.payouts,...(finalMarket?{finalMarket}:{}),refundTablePresent:parsed.refundTablePresent,nonRefundableNumbers:parsed.nonRefundableNumbers,...(parsed.nonRefundableNumbers.length?{refundPolicy:'official-post-start-capsize-v1',terminalEntries:parsed.terminalEntries}:{})},guardAfterTerminal));
+      statements.push(logStatement(db,race,startedAt,'success',count,{raceId:race.id,url,sha256,quality:'verified-official-outcome-v2',fetchedAt:opts.cachedFetchedAt?fetchedAt:new Date().toISOString(),results:parsed.results,payouts:parsed.payouts,...(finalMarket?{finalMarket}:{}),refundTablePresent:parsed.refundTablePresent,...(parsed.refundNumbers.length?{refundNumbers:parsed.refundNumbers}:{}),...manifestAuthority,...(refundArchiveProof?{archiveId:refundArchiveProof.archiveId,archiveCapturedAt:refundArchiveProof.archiveCapturedAt,archiveSha256:refundArchiveProof.archiveSha256,refundNumbers:parsed.refundNumbers}:{}),nonRefundableNumbers:parsed.nonRefundableNumbers,...(parsed.terminalEntries.length?{terminalEntries:parsed.terminalEntries}:{}),...(parsed.nonRefundableNumbers.length?{refundPolicy:'official-classified-terminal-v1'}:{})},guardAfterTerminal));
       reason='source-state-changed';
       const writes=await db.batch(statements);
       const logged=writes.at(-1) as {meta?:{changes?:number}}|undefined;
@@ -395,7 +425,7 @@ export async function collectResults(db: Db, now: Date, opts: CollectResultsOpti
   return {status:records?(failed?'partial' as const:'success' as const):'failed' as const,records,verified,targets:processedTargets,attempted,failed,fetchFailures,batches};
   } finally {
     if(manual&&lockClaimed)await db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?')
-      .bind(new Date(Date.now()+60_000).toISOString(),lockKey,lease).run().catch(()=>undefined);
+      .bind(new Date(Date.now()+(backfill?0:60_000)).toISOString(),lockKey,lease).run().catch(()=>undefined);
   }
 }
 function logStatement(db:Db,race:RaceTarget,startedAt:string,status:string,records:number,evidence:Record<string,unknown>,guardData?:string) {
@@ -419,7 +449,8 @@ const currentSourceGuard = `EXISTS(SELECT 1 FROM races current JOIN (SELECT ? da
       WHERE ra.id=json_extract(gate.data,'$.refundArchiveId') AND ra.race_id=current.id AND ra.data_origin='real'
         AND ra.captured_at=json_extract(gate.data,'$.refundArchiveCapturedAt')
         AND ra.archive_json=json_extract(gate.data,'$.refundArchiveJson')))
-    AND (EXISTS(SELECT 1 FROM bets b WHERE b.race_id=current.id AND b.data_origin='real' AND b.status='open' AND b.sport='boat' AND b.bet_type IN ('win','trifecta')
+    AND ((json_extract(gate.data,'$.manifestRaceId')=current.id AND json_extract(gate.data,'$.manifestSha256')='${FIXED_BACKFILL_SHA}' AND current.post_time=json_extract(gate.data,'$.race.post_time'))
+      OR EXISTS(SELECT 1 FROM bets b WHERE b.race_id=current.id AND b.data_origin='real' AND b.status='open' AND b.sport='boat' AND b.bet_type IN ('win','trifecta')
       AND NOT EXISTS(SELECT 1 FROM data_repair_audit_marks m WHERE m.record_type='bet' AND m.record_id=b.id))
       OR EXISTS(SELECT 1 FROM experimental_paper_bets eb
         JOIN experimental_paper_decisions ed ON ed.id=eb.decision_id AND ed.experiment_key='boat-trifecta-small-sample-v1'

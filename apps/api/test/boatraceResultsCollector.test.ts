@@ -98,7 +98,7 @@ describe('purchased real boat results',()=>{
     expect(sqlite.prepare('SELECT number,finish_order FROM results ORDER BY finish_order').all()).toHaveLength(4);
     expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number IN (5,6) ORDER BY number').all(raceId)).toHaveLength(2);
     const provenance=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs').get() as {reason:string}).reason);
-    expect(provenance).toMatchObject({raceId,url:`https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=09&hd=20261011`,quality:'verified-official-outcome-v2',sha256:expect.stringMatching(/^[a-f0-9]{64}$/),refundTablePresent:true,refundPolicy:'official-post-start-capsize-v1',nonRefundableNumbers:[5,6],terminalEntries:[{number:5,finishCode:'転覆'},{number:6,finishCode:'転覆'}]});
+    expect(provenance).toMatchObject({raceId,url:`https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=09&hd=20261011`,quality:'verified-official-outcome-v2',sha256:expect.stringMatching(/^[a-f0-9]{64}$/),refundTablePresent:true,refundPolicy:'official-classified-terminal-v1',nonRefundableNumbers:[5,6],terminalEntries:[{number:5,finishCode:'転覆'},{number:6,finishCode:'転覆'}]});
     const settled=await settleOpen(DB);
     expect(sqlite.prepare('SELECT id,status FROM bets ORDER BY id').all()).toEqual([
       {id:`${raceId}-bet`,status:'lost'}, {id:`${raceId}-terminal-bet`,status:'lost'},
@@ -188,7 +188,7 @@ describe('purchased real boat results',()=>{
     const raceId=seed();sqlite.prepare("UPDATE bets SET selection='6' WHERE id=?").run(`${raceId}-bet`);
     const source=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'転']});
     const page=source.replace(/<div class="table1"><table><thead><tr><th>返還<\/th><\/tr><\/thead><tbody>[\s\S]*?<\/tbody><\/table><\/div>/,'');
-    expect(await collectResults(DB,now,{fetch:async()=>new Response(page)})).toMatchObject({status:'success',verified:1});
+    expect(await collectResults(DB,now,{fetch:async()=>new Response(page)})).toMatchObject({status:'failed',verified:0});
     const provenance=JSON.parse((sqlite.prepare('SELECT reason FROM collection_runs').get() as {reason:string}).reason);
     expect(provenance.nonRefundableNumbers??[]).toEqual([]);
     expect(await settleOpen(DB)).toBe(0);
@@ -520,6 +520,37 @@ describe('purchased real boat results',()=>{
     expect((await strictExport.json() as any).labels.map((x:any)=>x.raceId)).toEqual([raceId]);
     expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(terminalRace)).toMatchObject({n:5});
     expect(sqlite.prepare("SELECT features_json FROM entries WHERE race_id=? AND number=6").get(terminalRace)).toMatchObject({features_json:expect.not.stringContaining('finish_code')});
+  });
+  it('preserves numeric evidence on a mixed refund and archives its verified refund provenance',async()=>{
+    vi.useFakeTimers();vi.setSystemTime(now);const raceId=seedT60Archive();
+    sqlite.prepare("INSERT INTO results(race_id,number,finish_order,data_origin) VALUES(?,1,1,'real')").run(raceId);
+    const html=boatraceResultPage({raceDate,venueCode:'09',raceNo:1,finishOrder:[1,2,5,3,4,'F']})
+      .replace('<div class="numberSet1_row"></div><div class="numberSet1_row"></div>', '<div class="numberSet1_row"><span class="numberSet1_number">6</span></div>');
+    expect(await collectResults(DB,now,{mode:'manual',labelOnly:true,fetch:async()=>new Response(html),sleep:async()=>{}})).toMatchObject({verified:1});
+    const row=sqlite.prepare('SELECT reason FROM collection_runs WHERE id=?').get(`boat-result:${raceId}`) as any;
+    expect(JSON.parse(row.reason)).toMatchObject({quality:'verified-official-outcome-v2',refundNumbers:[6],archiveId:expect.any(String),archiveSha256:expect.stringMatching(/^[a-f0-9]{64}$/)});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(raceId)).toMatchObject({n:5});
+    expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? AND number=6').get(raceId)).toMatchObject({features_json:expect.not.stringContaining('finish_code')});
+  });
+  it('permits only fixed-manifest internal authority for a past unarchived result without rewriting entries',async()=>{
+    const replayNow=new Date('2026-10-19T00:00:00Z');vi.useFakeTimers();vi.setSystemTime(replayNow);
+    const raceId=seed();sqlite.prepare('DELETE FROM bets WHERE race_id=?').run(raceId);
+    const before=sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? ORDER BY number').all(raceId);
+    expect(await collectResults(DB,replayNow,{mode:'manual',labelOnly:true,historicalLabelRaceIds:[raceId],backfillRunId:'0'.repeat(64),fetch:fetchPage})).toMatchObject({targets:0});
+    expect(await collectResults(DB,replayNow,{mode:'manual',labelOnly:true,historicalLabelRaceIds:[raceId],backfillRunId:'b02be73490197fdaae9df9a919b78de0f828a9cbdfaf66589cbd39a0a805efb0',cachedFetchedAt:()=>now.toISOString(),fetch:fetchPage,sleep:async()=>{}})).toMatchObject({verified:1});
+    expect(sqlite.prepare('SELECT features_json FROM entries WHERE race_id=? ORDER BY number').all(raceId)).toEqual(before);
+  });
+  it('bounds historical label replay to explicit IDs, preserves acquisition time and PIT entries',async()=>{
+    const replayNow=new Date('2026-10-19T00:00:00Z');vi.useFakeTimers();vi.setSystemTime(replayNow);
+    const raceId=seedT60Archive(),excluded=seedT60Archive(2);
+    expect(await selectResultsTargets(DB,replayNow,4,true)).toEqual([]);
+    const result=await collectResults(DB,replayNow,{mode:'manual',labelOnly:true,historicalLabelRaceIds:[raceId],
+      cachedFetchedAt:()=>now.toISOString(),fetch:fetchPage,sleep:async()=>{}});
+    expect(result).toMatchObject({verified:1,attempted:1});
+    const proof=sqlite.prepare('SELECT reason FROM collection_runs WHERE id=?').get(`boat-result:${raceId}`) as any;
+    expect(JSON.parse(proof.reason).fetchedAt).toBe(now.toISOString());
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM results WHERE race_id=?').get(excluded)).toMatchObject({n:0});
+    expect(sqlite.prepare('SELECT COUNT(*) n FROM bets').get()).toMatchObject({n:0});
   });
   it('keeps the flag off by default and collects every ten-minute boundary',async()=>{
     seed();vi.useFakeTimers();vi.setSystemTime(now);const fetcher=vi.fn(fetchPage);vi.stubGlobal('fetch',fetcher);

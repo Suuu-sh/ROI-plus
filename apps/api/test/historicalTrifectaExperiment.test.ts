@@ -1,3 +1,4 @@
+import { loadVerifiedRefundOutcome } from '../src/services/trifectaSettlement.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import Sqlite from 'better-sqlite3'
 import { readFileSync, readdirSync } from 'node:fs'
@@ -52,7 +53,7 @@ function createFixture(actualArrival: string) {
       odds: entries.flatMap(a => entries.filter(b => b !== a).flatMap(b => entries.filter(c => c !== a && c !== b).map(c => ({ selection: `${a.lane}-${b.lane}-${c.lane}`, odds: 200 })))) },
   }
   sqlite.prepare(`INSERT INTO boatrace_prerace_capture_archives(id,race_id,race_date,captured_at,archive_json,data_origin) VALUES(?,?,?,?,?,'real')`)
-    .run('hist-archive', raceId, '2026-10-15', archivedAt, JSON.stringify(archive))
+    .run(`${raceId}:capture:fixture`, raceId, '2026-10-15', archivedAt, JSON.stringify(archive))
   return { sqlite, DB: new D1SqliteAdapter(sqlite), raceId, now, target }
 }
 
@@ -87,6 +88,44 @@ describe('historical BASE dedicated T-60 virtual experiment', () => {
 
     const performance = await historicalTrifectaExperimentPerformance(f.DB)
     expect(performance.summary).toMatchObject({ decisions: 1, placed_races: 1, abstained_races: 0, bets: 2, total_stake: 200, open_bets: 2 })
+    f.sqlite.close()
+  })
+
+  it('verifies mixed refund evidence against immutable archive and existing numeric rows',async()=>{
+    const f=createFixture('2026-10-15T02:40:00+09:00')
+    const archive:any=f.sqlite.prepare("SELECT * FROM boatrace_prerace_capture_archives WHERE id='hist-race:capture:fixture'").get()
+    const archiveId=archive.id
+
+    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(archive.archive_json))
+    const archiveSha256=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')
+    const results=[1,2,3,4,5].map((number,i)=>({number,finishOrder:i+1}))
+    for(const r of results)f.sqlite.prepare("INSERT INTO results(race_id,number,finish_order,data_origin) VALUES(?,?,?,'real')").run(f.raceId,r.number,r.finishOrder)
+    const payouts=[{betType:'win',selection:'1',payout:200},{betType:'trifecta',selection:'1-2-3',payout:1700}]
+    for(const p of payouts)f.sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin) VALUES(?,?,?,?,'real')").run(f.raceId,p.betType,p.selection,p.payout)
+    f.sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin) VALUES(?,'quinella','1-2',500,'real')").run(f.raceId)
+    const proof={quality:'verified-official-outcome-v2',raceId:f.raceId,url:'https://www.boatrace.jp/owpc/pc/race/raceresult?rno=1&jcd=01&hd=20261015',sha256:sha,fetchedAt:new Date().toISOString(),refundTablePresent:true,refundNumbers:[6],results,payouts,archiveId,archiveCapturedAt:archive.captured_at,archiveSha256}
+    f.sqlite.prepare("INSERT INTO collection_runs(id,source,sport,target_date,started_at,status,reason) VALUES(?,'boatrace-results-worker-v1','boat','2026-10-15',CURRENT_TIMESTAMP,'success',?)").run(`boat-result:${f.raceId}`,JSON.stringify(proof))
+    const race:any=f.sqlite.prepare('SELECT * FROM races WHERE id=?').get(f.raceId)
+    expect(await loadVerifiedRefundOutcome(f.DB,race)).toEqual({refundNumbers:[6],payouts})
+    f.sqlite.prepare("UPDATE payouts SET payout=1 WHERE race_id=? AND bet_type='win'").run(f.raceId)
+    expect(await loadVerifiedRefundOutcome(f.DB,race)).toBeNull()
+    f.sqlite.close()
+  })
+
+  it('settles both official tied winning orders with individual payouts exactly once',async()=>{
+    const f=createFixture('2026-10-15T02:40:00+09:00')
+    f.sqlite.prepare("UPDATE races SET status='finished' WHERE id=?").run(f.raceId)
+    for(const [i,rank] of [1,2,2,4,5,6].entries())f.sqlite.prepare("INSERT INTO results(race_id,number,finish_order,data_origin) VALUES(?,?,?,'real')").run(f.raceId,i+1,rank)
+    for(const [selection,payout] of [['1-2-3',800],['1-3-2',1200]])f.sqlite.prepare("INSERT INTO payouts(race_id,bet_type,selection,payout,data_origin) VALUES(?,'trifecta',?,?,'real')").run(f.raceId,selection,payout)
+    f.sqlite.prepare(`INSERT INTO historical_trifecta_experiment_decisions
+      (id,experiment_key,race_id,model_id,decision_at,outcome,total_stake,snapshot_json)
+      VALUES('tie-decision','boat-trifecta-historical-base-v1',?,'boat-trifecta-historical-base-20261014','2026-10-15T00:00:00Z','placed',300,'{}')`).run(f.raceId)
+    for(const [i,selection] of ['1-2-3','1-3-2','1-4-2'].entries())f.sqlite.prepare(`INSERT INTO historical_trifecta_experiment_bets
+      (id,decision_id,race_id,model_id,selection,stake,probability,prob_std,odds_at_bet,expected_roi,placed_at,status,data_origin)
+      VALUES(?,'tie-decision',?,'boat-trifecta-historical-base-20261014',?,100,0.1,0.01,20,1,'2026-10-15T00:00:00Z','open','real')`).run(`tie-${i}`,f.raceId,selection)
+    expect(await settleHistoricalTrifectaExperimentOpen(f.DB)).toBe(3)
+    expect(f.sqlite.prepare("SELECT status,payout FROM historical_trifecta_experiment_bets ORDER BY id").all()).toEqual([{status:'won',payout:800},{status:'won',payout:1200},{status:'lost',payout:0}])
+    expect(await settleHistoricalTrifectaExperimentOpen(f.DB)).toBe(0)
     f.sqlite.close()
   })
 

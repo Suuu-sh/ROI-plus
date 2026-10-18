@@ -5,7 +5,7 @@ import { predictHistoricalTrifecta, historicalTrifectaModelMetadata, HISTORICAL_
 import { primaryPaperTiming } from './paperTiming.js'
 import { sizeExperimentalPortfolioResult } from './experimentalSizing.js'
 import { HISTORICAL_ARCHIVE_SCHEMA, type HistoricalObservation } from './historicalTrifectaArchive.js'
-import { loadTrifectaSettlementEvidence, loadVerifiedRefundOutcome, verifiedOfficialRefundOutcomeSql, verifiedNoRefundCapsizeRecord, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './trifectaSettlement.js'
+import { officialTerminalEntries, verifiedOfficialTerminalOutcomeSql, loadTrifectaSettlementEvidence, loadVerifiedRefundOutcome, verifiedOfficialRefundOutcomeSql, verifiedNoRefundCapsizeRecord, verifiedSelectedTerminalOutcomeSql, verifiedTrifectaOutcome } from './trifectaSettlement.js'
 
 const CUTOFF_SOURCE = 'boatrace-racelist-cutoff-v1'
 const MODEL_TRAINED_AT = Date.parse('2026-10-13T16:21:26.363521Z')
@@ -195,15 +195,10 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
         json_extract(e.features_json,'$.finish_code') IN ('F','L','K','欠場','欠','失格','転覆','転','妨害','落水','エンスト','不完走')
         OR json_extract(e.features_json,'$.finish_code') GLOB 'K[0-9]'))
     AND (SELECT COUNT(DISTINCT x.number) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
-    AND (SELECT COUNT(DISTINCT x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
+
     AND COALESCE((SELECT MIN(x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real'),0)=1
-    AND (SELECT MAX(x.finish_order) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')=(SELECT COUNT(*) FROM results x WHERE x.race_id=r.id AND x.data_origin='real')
-    AND (SELECT COUNT(*) FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0)=1
-    AND EXISTS(SELECT 1 FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0
-      AND p.selection=(SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=1)||'-'||
-        (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=2)||'-'||
-        (SELECT CAST(x.number AS TEXT) FROM results x WHERE x.race_id=r.id AND x.data_origin='real' AND x.finish_order=3))
-    AND ${verifiedSelectedTerminalOutcomeSql}) OR ${verifiedOfficialRefundOutcomeSql})
+    AND (SELECT COUNT(*) FROM payouts p WHERE p.race_id=r.id AND p.data_origin='real' AND p.bet_type='trifecta' AND p.payout>0)>0
+    AND ${verifiedSelectedTerminalOutcomeSql}) OR ${verifiedOfficialRefundOutcomeSql} OR ${verifiedOfficialTerminalOutcomeSql})
     ORDER BY b.placed_at,b.id`)
   const races=[...new Map(open.map((b:any)=>[String(b.race_id),{id:String(b.race_id),race_date:String(b.race_date),venue_id:String(b.venue_id),race_no:Number(b.race_no)}])).values()]
   const evidence=await loadTrifectaSettlementEvidence(db,races)
@@ -211,19 +206,20 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
   const refundOutcomeCache=new Map<string,Promise<any>>()
   for (const bet of open) {
     let sourceProof:any;try{sourceProof=JSON.parse(evidence.proofs.get(String(bet.race_id))?.reason??'{}')}catch{sourceProof=null}
-    if(sourceProof?.quality==='verified-official-refund-outcome-v1'){
+    if(['verified-official-refund-outcome-v1','verified-official-outcome-v2'].includes(sourceProof?.quality)&&sourceProof?.refundNumbers?.length){
       let pending=refundOutcomeCache.get(String(bet.race_id))
       if(!pending){pending=loadVerifiedRefundOutcome(db,{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no,betting_cutoff_at:bet.betting_cutoff_at});refundOutcomeCache.set(String(bet.race_id),pending)}
       const refund=await pending
       if(refund){
         const isRefund=String(bet.selection).split('-').some(n=>refund.refundNumbers.includes(Number(n)))
-        const official=refund.payouts.find((row:any)=>row.betType==='trifecta')
-        if(!official)continue
-        const won=!isRefund&&String(bet.selection)===official.selection,status=isRefund?'void':won?'won':'lost'
+        const official=refund.payouts.find((row:any)=>row.betType==='trifecta'&&row.selection===String(bet.selection))
+        if(!refund.payouts.some((row:any)=>row.betType==='trifecta'))continue
+        const won=!isRefund&&!!official,status=isRefund?'void':won?'won':'lost'
         const payout=isRefund?Number(bet.stake):won?Math.floor(Number(bet.stake)*official.payout/100):0
         settlements.push({bet,payout,status,credit:isRefund?Number(bet.stake):payout,finalOdds:isRefund?null:won?official.payout/100:null})
         continue
       }
+      continue // Explicit refund evidence must validate before any settlement.
     }
     const results = evidence.results.get(String(bet.race_id))??[]
     const entries = evidence.entries.get(String(bet.race_id))??[]
@@ -231,12 +227,13 @@ export async function settleHistoricalTrifectaExperimentOpen(db: Db) {
     const payouts = evidence.payouts.get(String(bet.race_id))??[]
     if (entryNumbers.length !== 6 || entryNumbers.some((n, i) => n !== i + 1)
       || new Set(resultNumbers).size !== results.length || resultNumbers.some(n => !entryNumbers.includes(n))) continue
-    const mappedEntries=entries.map(e => ({
+    let mappedEntries=entries.map(e => ({
       number: Number(e.number), finishCode: parseFeatures(e.features_json)?.finish_code ?? null,
     }))
+    mappedEntries=officialTerminalEntries(evidence.proofs.get(String(bet.race_id)),{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no},mappedEntries)
     const verifiedTerminalNumbers:number[]=[]
     for(const entry of mappedEntries){
-      if(entry.finishCode==='転覆'&&String(bet.selection).split('-').includes(String(entry.number))
+      if(entry.finishCode&&String(bet.selection).split('-').includes(String(entry.number))
         &&verifiedNoRefundCapsizeRecord(evidence.proofs.get(String(bet.race_id)),{id:bet.race_id,race_date:bet.race_date,venue_id:bet.venue_id,race_no:bet.race_no},entry.number))verifiedTerminalNumbers.push(entry.number)
     }
     const outcome = verifiedTrifectaOutcome(String(bet.selection), mappedEntries,

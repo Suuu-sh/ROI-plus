@@ -11,6 +11,7 @@ export type BoatraceResults = {
   results: Array<{ number: number; finishOrder: number }>;
   terminalEntries: Array<{ number: number; finishCode: string }>;
   refundTablePresent: boolean;
+  refundNumbers: number[];
   nonRefundableNumbers: number[];
   payouts: Array<{ betType: 'win' | 'trifecta'; selection: string; payout: number }>;
 };
@@ -31,19 +32,19 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   // Exclude table headers: the official result template always has a static
   // "返還" heading, including normal races. Only body evidence is meaningful.
   const nonHeaderText = html.replace(/<thead\b[^>]*>[\s\S]*?<\/thead>/gi, '');
-  if (/中止|不成立|同着/.test(text(nonHeaderText))) fail();
+  if (/中止|不成立/.test(text(nonHeaderText))) fail();
   const refundTables = [...html.matchAll(/<table\b[^>]*>[\s\S]*?<\/table>/gi)].map(match => match[0])
     .filter(table => /<th\b[^>]*>\s*返還\s*<\/th>/i.test(table));
-  let refundTableEmpty = refundTables.length === 1;
-  for (const table of refundTables) {
-    const bodies = [...table.matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)];
-    const rows = bodies.flatMap(body => [...body[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)]);
-    if (!rows.length) refundTableEmpty = false;
-    for (const row of rows) {
-        const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map(cell => cell[1]);
-        if (cells.some(cell => text(cell) !== '')) { refundTableEmpty = false; fail(); }
-    }
+  if (refundTables.length !== 1) fail();
+  const refundNumbers: number[] = [];
+  const refundBodies = [...refundTables[0].matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)];
+  if (!refundBodies.length) fail();
+  for (const body of refundBodies) for (const cell of body[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)) {
+    const values = [...cell[1].matchAll(/<span\b[^>]*\bnumberSet1_number\b[^>]*>([\s\S]*?)<\/span>/gi)];
+    if (text(cell[1].replace(/<span\b[^>]*\bnumberSet1_number\b[^>]*>[\s\S]*?<\/span>/gi, ''))) fail();
+    for (const value of values) { const number = digit(text(value[1])); if (!number) fail(); refundNumbers.push(number); }
   }
+  if (new Set(refundNumbers).size !== refundNumbers.length) fail();
 
   // Require three independent indicators that the response is the selected
   // result page: venue image, active date, and selected race in its schedule.
@@ -75,8 +76,8 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   });
   if (!finishTable) fail();
   // Individual non-finisher markers are validated row-by-row below. Race-wide
-  // cancellation, refund, and dead-heat cases remain outside this contract.
-  if (/中止|不成立|返還|同着/.test(text(finishTable))) fail();
+  // cancellation remains outside this contract; refunds require table evidence.
+  if (/中止|不成立|返還/.test(text(finishTable))) fail();
   const finishRows: Array<{ number: number; finishOrder: number | null; finishCode: string | null; racerId: string }> = [];
   for (const body of finishTable.matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)) {
     const rows = [...body[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
@@ -98,8 +99,9 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   const terminalRows = finishRows.filter((row): row is typeof row & { finishCode: string } => row.finishCode !== null);
   if (finishRows.length !== 6 || new Set(finishRows.map(row => row.number)).size !== 6
       || terminalRows.length > 5 || numericRows.length !== 6 - terminalRows.length
-      || new Set(numericRows.map(row => row.finishOrder)).size !== numericRows.length
-      || !Array.from({length:numericRows.length},(_,i)=>i+1).every(rank=>numericRows.some(row=>row.finishOrder===rank))) fail();
+      || !numericRows.every(row => row.finishOrder === 1 + numericRows.filter(other => other.finishOrder < row.finishOrder).length)) fail();
+  if (refundNumbers.some(number => !terminalRows.some(row => row.number === number))
+    || terminalRows.some(row => ['Ｆ', 'Ｌ', '欠場'].includes(row.finishCode) !== refundNumbers.includes(row.number))) fail();
   const expectedByNumber = new Map(expected.entries.map(entry => [entry.number, entry]));
   if (finishRows.some(row => {
     const entry = expectedByNumber.get(row.number);
@@ -107,17 +109,27 @@ export function parseBoatraceResults(html: string, expected: BoatraceResultExpec
   })) fail();
 
   const payouts = parsePayouts(html);
-  const winner = numericRows.find(row => row.finishOrder === 1)!.number;
-  const win = payouts.find(payout => payout.betType === 'win');
-  if (!win || win.selection !== String(winner) || win.payout <= 0) fail();
-  const trifecta = payouts.find(payout => payout.betType === 'trifecta');
-  const firstThree = [1, 2, 3].map(rank => numericRows.find(row => row.finishOrder === rank)!.number).join('-');
-  if (trifecta && trifecta.selection !== firstThree) fail();
-  const nonRefundableNumbers = refundTableEmpty && terminalRows.length > 0 && terminalRows.every(row => row.finishCode === '転覆')
-    ? terminalRows.map(row => row.number) : [];
-  return { results: numericRows.map(({ number, finishOrder }) => ({ number, finishOrder: finishOrder! })),
-    terminalEntries: terminalRows.map(({number,finishCode})=>({number,finishCode:finishCode!})),
-    refundTablePresent: refundTables.length === 1, nonRefundableNumbers, payouts };
+  const wins = numericRows.filter(row => row.finishOrder === 1).map(row => String(row.number));
+  const winPayouts = payouts.filter(payout => payout.betType === 'win');
+  if (winPayouts.length !== wins.length || wins.some(selection => !winPayouts.some(p => p.selection === selection))) fail();
+  // A dead heat preserves competition ranks; enumerate only the legal top-three
+  // orders, never manufacture an ordering between tied boats.
+  const legalTrifectas: string[] = [];
+  for (const a of numericRows) for (const b of numericRows) for (const c of numericRows) {
+    if (new Set([a.number,b.number,c.number]).size !== 3) continue;
+    const selected = [a,b,c];
+    if (selected.some((row,i) => selected.slice(0,i).some(prior => prior.finishOrder > row.finishOrder))) continue;
+    if (numericRows.some(row => !selected.includes(row) && row.finishOrder < c.finishOrder)) continue;
+    legalTrifectas.push(selected.map(row=>row.number).join('-'));
+  }
+  const trifectas = payouts.filter(payout=>payout.betType === 'trifecta');
+  if (trifectas.some(p=>!legalTrifectas.includes(p.selection))
+    || (trifectas.length && (trifectas.length !== legalTrifectas.length || legalTrifectas.some(selection=>!trifectas.some(p=>p.selection===selection))))) fail();
+  const nonRefundableNumbers = terminalRows.filter(row=>!refundNumbers.includes(row.number)).map(row=>row.number);
+  return { results: numericRows.map(({ number, finishOrder }) => ({ number, finishOrder })),
+    terminalEntries: terminalRows.map(({number,finishCode})=>({number,finishCode})),
+    refundTablePresent: true, refundNumbers: refundNumbers.sort((a,b)=>a-b), nonRefundableNumbers, payouts };
+
 }
 
 /** Parse explicit refunds and official payouts without creating result labels. */
@@ -136,6 +148,11 @@ export function parseBoatraceRefundOutcome(html: string, expected: BoatraceResul
     return labels.includes('着')&&labels.includes('枠')&&labels.includes('ボートレーサー');
   });
   if(finishTables.length>1)fail();
+  if (finishTables.length === 1) {
+    const parsed = parseBoatraceResults(html, expected);
+    if (!parsed.refundNumbers.length) fail();
+    return {refundNumbers:parsed.refundNumbers,payouts:parsed.payouts};
+  }
   const refundTables=tables.filter(table=>/<th\b[^>]*>\s*返還\s*<\/th>/i.test(table));
   if(refundTables.length!==1)fail();
   const bodies=[...refundTables[0].matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi)];
@@ -152,28 +169,7 @@ export function parseBoatraceRefundOutcome(html: string, expected: BoatraceResul
   if(trifecta.length!==1||win.length!==1
     ||trifecta[0].selection.split('-')[0]!==win[0].selection
     ||trifecta[0].selection.split('-').some(value=>refundNumbers.includes(Number(value))))fail();
-  if(finishTables.length)validateRefundFinishTable(finishTables[0],expected,refundNumbers,trifecta[0].selection);
   return {refundNumbers:refundNumbers.sort((a,b)=>a-b),payouts};
-}
-
-function validateRefundFinishTable(table:string,expected:BoatraceResultExpected,refundNumbers:number[],trifectaSelection:string):void{
-  const byNumber=new Map(expected.entries.map(entry=>[entry.number,entry.racerId]));
-  if(byNumber.size!==6||expected.entries.some(entry=>!Number.isInteger(entry.number)||entry.number<1||entry.number>6||!/^\d{4,5}$/.test(entry.racerId)))fail();
-  const rows:Array<{number:number;rank:number|null;racerId:string;refund:boolean}>=[];
-  for(const body of table.matchAll(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/gi))for(const row of body[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){
-    const cells=[...row[1].matchAll(/<td\b([^>]*)>([\s\S]*?)<\/td>/gi)];
-    if(cells.length!==4)fail();
-    const rankText=text(cells[0][2]),number=digit(text(cells[1][2]));
-    const rank=digit(rankText),refund=/^[FＦLＬ]$/.test(rankText);
-    const racerSpan=[...cells[2][2].matchAll(/<span\b([^>]*)>([\s\S]*?)<\/span>/gi)].find(match=>/\bis-fs12\b/.test(match[1]));
-    const racerId=racerSpan?text(racerSpan[2]):'';
-    if(!number||(!rank&&!refund)||!/^\d{4,5}$/.test(racerId))fail();
-    rows.push({number,rank,refund,racerId});
-  }
-  if(rows.length!==6||new Set(rows.map(row=>row.number)).size!==6||rows.some(row=>byNumber.get(row.number)!==row.racerId
-    ||row.refund!==refundNumbers.includes(row.number)))fail();
-  const topRanks=[1,2,3].map(rank=>rows.find(row=>row.rank===rank)?.number);
-  if(topRanks.some(Boolean)&&(topRanks.some(number=>!number)||topRanks.join('-')!==trifectaSelection))fail();
 }
 
 function validateSelectedResultTab(html:string,expectedDate:string,venueCode:string,raceNo:number):void {
@@ -199,10 +195,8 @@ function validateSelectedResultTab(html:string,expectedDate:string,venueCode:str
 // Official result pages use short markers in the finish column. Keep the
 // mapping explicit; these are terminal entrants, not inferred rank positions.
 function terminalFinishCode(value: string): string | null {
-  // Keep exceptional-result support deliberately narrow: only the official
-  // capsize marker has an implemented, provenance-backed no-refund path.
-  if (value === '転') return '転覆';
-  return null;
+  const codes: Record<string,string> = { '転':'転覆', '沈':'沈没', '落':'落水', 'エ':'エンスト', '不':'不完走', '妨':'妨害失格', '失':'失格', '欠':'欠場', 'F':'Ｆ', 'Ｆ':'Ｆ', 'L':'Ｌ', 'Ｌ':'Ｌ' };
+  return codes[value] ?? null;
 }
 
 function parsePayouts(html: string): BoatraceResults['payouts'] {
@@ -219,10 +213,10 @@ function parsePayouts(html: string): BoatraceResults['payouts'] {
     const betTypeText = text(rows[0][0]);
     if (betTypeText !== '単勝' && betTypeText !== '3連単') continue;
     if (rows[0].length !== 4) fail();
-    for (const continuation of rows.slice(1)) {
-      if (continuation.length !== 3 || continuation.some(cell => text(cell) !== '')) fail();
-    }
-    const cells = rows[0];
+    for (const [index, row] of rows.entries()) {
+    const cells = index === 0 ? row : ['', ...row];
+    if (index > 0 && (row.length !== 3)) fail();
+    if (index > 0 && row.every(cell => text(cell) === '')) continue;
     const selection = [...cells[1].matchAll(/<span\b[^>]*\bclass\s*=\s*["'][^"']*\bnumberSet1_number\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/gi)]
       .map(m => digit(text(m[1])));
     const rawPayout = cells[2].match(/<span\b[^>]*\bis-payout1\b[^>]*>([\s\S]*?)<\/span>/i)?.[1];
@@ -233,8 +227,9 @@ function parsePayouts(html: string): BoatraceResults['payouts'] {
     const payout = Number(amount);
     if (!Number.isSafeInteger(payout) || payout <= 0) fail();
     payouts.push({ betType: betTypeText === '単勝' ? 'win' : 'trifecta', selection: selection.join('-'), payout });
+    }
   }
-  if (payouts.filter(p => p.betType === 'win').length !== 1 || payouts.filter(p => p.betType === 'trifecta').length > 1) fail();
+  if (!payouts.some(p => p.betType === 'win') || new Set(payouts.map(p=>p.betType+':'+p.selection)).size !== payouts.length) fail();
   return payouts;
 }
 
