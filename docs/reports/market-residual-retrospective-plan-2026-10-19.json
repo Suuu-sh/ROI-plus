@@ -1,0 +1,14 @@
+{
+  "schema": "market-residual-retrospective-split-v1",
+  "lockedAt": "2026-10-18T18:26:45Z",
+  "trainingDates": ["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17"],
+  "retrospectiveHeldoutDates": ["2026-10-18"],
+  "testLabelsReadBeforeLock": false,
+  "fitBeforeTestLabelRead": true,
+  "hyperparameterSearch": false,
+  "baselines": ["saved-current-forecast", "normalized-inverse-decision-odds-market"],
+  "candidate": "existing-fixed-19-feature-market-residual-protocol",
+  "policy": {"minProbability": 0.1, "maxOdds": 50, "monthlyGrossStakeCap": 10000, "perRaceCap": 1000, "recyclePayouts": false},
+  "prospective": false,
+  "limitation": "Artifact created after Oct18 decisions. Heldout is out-of-training and previously unviewed, not prospective or independent validation. Existing strict future evaluator unchanged."
+}

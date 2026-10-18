@@ -1,0 +1,72 @@
+{
+  "forecastRowBindingAudit": {
+    "asOf": "2026-10-18T18:26:45Z",
+    "modelId": "boat-trifecta-exp-noweather-20261013-10559e2c79ce",
+    "artifactSha256": "386ff046f73d0f604a293d2c7318acc794857d9448f1addaf3f164863a91bdda",
+    "decisionsSha256": "ee934d873ddce5b46f9558aabe1a70cd99f00f441046b8180f0094c4c10d2dac",
+    "matchedRows": 46800,
+    "matchedRaces": 390,
+    "artifactMismatchCount": 0,
+    "featureSchemaMismatchCount": 0,
+    "originMismatchCount": 0
+  },
+  "schema": "roi-historical-source-inventory-v1",
+  "asOf": "2026-10-18T18:26:45Z",
+  "source": "read-only persisted D1 decisions, forecasts, immutable capture archives, verified collector proof and current D1 result/payout rows",
+  "sourceDecisionCount": 419,
+  "uniqueRaceCount": 419,
+  "modelId": "boat-trifecta-exp-noweather-20261013-10559e2c79ce",
+  "artifactSha256": "386ff046f73d0f604a293d2c7318acc794857d9448f1addaf3f164863a91bdda",
+  "trainedAt": "2026-10-13T04:05:54.477577+00:00",
+  "dates": {
+    "2026-10-14": 87,
+    "2026-10-15": 19,
+    "2026-10-16": 147,
+    "2026-10-17": 166
+  },
+  "decisionOutcomes": {
+    "abstained": 291,
+    "placed": 128
+  },
+  "decisionReasons": {
+    "no_conservative_positive_edge": 205,
+    "placed": 128,
+    "minimum_virtual_stake_not_reached": 50,
+    "experimental_forecast_missing_or_invalid": 29,
+    "official_archive_missing_or_stale": 7
+  },
+  "completeForecastCount": 390,
+  "completePurchaseMarketCount": 383,
+  "validatedForecastSourceCount": 381,
+  "verifiedOutcomeAvailableAsOfCount": 265,
+  "userDeclaredTestPurchaseDate": "2026-10-13",
+  "excludedTestDateCount": 0,
+  "completeCalendarMonths": 0,
+  "monthlyPositiveProfitFrequency": null,
+  "limitations": [
+    "Saved decision population only; not all historical races have point-in-time decision markets and forecasts.",
+    "Current model was trained 2026-10-13; prior historical features cannot be scored as contemporaneous forecasts.",
+    "Fixed historical BASE R2 archive uses a different model and is not pooled.",
+    "Outcome trust is persisted verified collector SHA/proof plus D1 six-lane/payout equality; original HTML bodies were not re-fetched or rehashed.",
+    "Market source SHA is persisted provenance, not a cryptographic signature.",
+    "No inferred or final odds substitution; no missing probability or outcome imputation.",
+    "No full calendar month or positive-month frequency estimate."
+  ],
+  "files": {
+    "decisions": {
+      "sha256": "ee934d873ddce5b46f9558aabe1a70cd99f00f441046b8180f0094c4c10d2dac"
+    },
+    "captures": {
+      "sha256": "ebe5dddc723200b634993bd9e83e5f7b7d958f26182cefe992f010917104be3c"
+    },
+    "outcomes": {
+      "sha256": "474aa23bab0daad91124d6f62f42b851ffdecff46c9b4ad3d67f839ed1525a15"
+    },
+    "normalizedInput": {
+      "sha256": "8c03cdde8398b9de3a2f28f63e3cbdc0ead89001d3bb06196705c4c9f5c6cc78"
+    },
+    "forecastBinding": {
+      "sha256": "8394af15a8c46bd2e4fc5c8b6ea830597366b9289c4196a39b430afdc58fbced"
+    }
+  }
+}
