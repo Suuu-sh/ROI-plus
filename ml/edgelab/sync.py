@@ -1,10 +1,12 @@
 """Send normalized D1 rows to the EdgeLab ingest API."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
 import time
+import uuid
 from datetime import date
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -30,6 +32,17 @@ ENDPOINTS = {
 # first, and model lifecycle state must arrive before predictions.
 SEND_ORDER = ("venues", "races", "prerace_observations", "models", "results", "payouts", "entries",
               "predictions", "ticket_predictions", "odds_snapshots", "collection_runs")
+_SMALL_INGEST_CHUNKS = {"races", "results", "payouts", "entries"}
+_ROW_CHECKED_INGESTS = {"races", "results", "payouts", "entries", "odds_snapshots",
+                        "predictions", "ticket_predictions", "prerace_observations"}
+
+
+def _ingest_chunk_size(table: str) -> int:
+    if table in _SMALL_INGEST_CHUNKS:
+        return 10
+    if table in _ROW_CHECKED_INGESTS:
+        return 50
+    return 500
 
 
 class WriteBudgetRefused(RuntimeError):
@@ -324,7 +337,8 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
             values = rows[table]
             if table not in ENDPOINTS:
                 raise ValueError(f"unsupported ingest table: {table}")
-            chunks = [values[i:i + 500] for i in range(0, len(values), 500)] or [[]]
+            chunk_size = _ingest_chunk_size(table)
+            chunks = [values[i:i + chunk_size] for i in range(0, len(values), chunk_size)] or [[]]
             for index, chunk in enumerate(chunks):
                 suffix = f"-{index + 1}" if len(chunks) > 1 else ""
                 path = out / f"{ENDPOINTS[table]}{suffix}.json"
@@ -337,6 +351,8 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
     if not base_url or not token:
         raise RuntimeError("EDGELAB_API_URL and INGEST_TOKEN are required")
     result: dict[str, Any] = {}
+    sync_id = uuid.uuid4().hex
+    ingest_diagnostics: list[dict[str, Any]] = []
     for table in sorted(rows, key=lambda name: SEND_ORDER.index(name) if name in SEND_ORDER else len(SEND_ORDER)):
         values = rows[table]
         if table not in ENDPOINTS:
@@ -344,17 +360,30 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
         if not values:
             continue
         responses = []
-        # These endpoints perform several sequential D1 lookups per row. Keep
-        # their chunks small to bound lookup, batch, and D1 write amplification.
-        row_checked_tables = {"races", "results", "payouts", "entries", "odds_snapshots",
-                              "predictions", "ticket_predictions", "prerace_observations"}
-        chunk_size = 10 if table in {"races", "payouts", "entries"} else 50 if table in row_checked_tables else 500
+        # Results perform many sequential D1 checks per row; keep chunks at ten
+        # to bound request latency and the cost of an idempotent retry.
+        chunk_size = _ingest_chunk_size(table)
+        total_chunks = (len(values) + chunk_size - 1) // chunk_size
         for start in range(0, len(values), chunk_size):
-            payload = json.dumps(values[start:start + chunk_size], ensure_ascii=False).encode("utf-8")
+            chunk = values[start:start + chunk_size]
+            payload = json.dumps(chunk, ensure_ascii=False).encode("utf-8")
+            payload_sha256 = hashlib.sha256(payload).hexdigest()
+            chunk_index = start // chunk_size + 1
+            chunk_id = f"{sync_id}:{table}:{chunk_index}"
+            attempt_ids: list[str] = []
             req = Request(f"{base_url}/api/ingest/{ENDPOINTS[table]}", data=payload,
                           headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
                                    "User-Agent": "EdgeLab-ML/0.1"}, method="POST")
             for attempt in range(2):
+                attempt_number = attempt + 1
+                attempt_id = f"{chunk_id}:attempt-{attempt_number}"
+                attempt_ids.append(attempt_id)
+                diagnostic = (
+                    f"chunk_id={chunk_id} attempt_id={attempt_id} "
+                    f"attempt={attempt_number}/2 chunk={chunk_index}/{total_chunks} "
+                    f"attempt_ids={','.join(attempt_ids)} row_count={len(chunk)} "
+                    f"payload_sha256={payload_sha256}"
+                )
                 try:
                     with urlopen(req, timeout=30) as response:
                         body = response.read().decode("utf-8", "replace")
@@ -372,16 +401,24 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
                             raise RuntimeError(f"ingest {table} returned an invalid result")
                         responses.append({"status": response.status, "upserted": upserted,
                                           "changed": changed, "noop": changed == 0})
+                        ingest_diagnostics.append({
+                            "sync_id": sync_id, "table": table, "chunk_id": chunk_id,
+                            "chunk_index": chunk_index, "chunk_count": total_chunks,
+                            "attempt_ids": attempt_ids, "attempt_count": len(attempt_ids),
+                            "row_count": len(chunk), "payload_sha256": payload_sha256,
+                            "outcome": "acknowledged",
+                        })
                     break
                 except HTTPError as exc:
                     safe_code = _safe_ingest_error_code(exc)
                     if exc.code == 429:
                         if safe_code not in {"d1_write_budget_unavailable", "d1_write_budget_exhausted"}:
-                            raise RuntimeError(f"ingest {table} failed: HTTP 429") from exc
+                            raise RuntimeError(f"ingest {table} failed: HTTP 429; {diagnostic}") from exc
                         # Never retry blindly: the reservation status may have
                         # changed and a partial prior sync must remain visible.
                         raise WriteBudgetRefused(
-                            f"ingest {table} refused: daily D1 write budget unavailable or exhausted (HTTP 429)",
+                            f"ingest {table} refused: daily D1 write budget unavailable or exhausted "
+                            f"(HTTP 429); {diagnostic}",
                             table=table, completed_chunks=responses.copy(),
                             chunk=start // chunk_size + 1,
                             total_chunks=(len(values) + chunk_size - 1) // chunk_size) from exc
@@ -391,7 +428,7 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
                         time.sleep(2)
                         continue
                     suffix = f" (code: {safe_code})" if safe_code else ""
-                    raise RuntimeError(f"ingest {table} failed: HTTP {exc.code}{suffix}") from exc
+                    raise RuntimeError(f"ingest {table} failed: HTTP {exc.code}{suffix}; {diagnostic}") from exc
                 except (URLError, TimeoutError) as exc:
                     reason = exc.reason if isinstance(exc, URLError) else exc
                     transient_timeout = isinstance(reason, (TimeoutError, socket.timeout))
@@ -401,7 +438,9 @@ def sync_rows(rows: Mapping[str, list[dict[str, Any]]], *, dry_run: bool = False
                         # API upserts idempotently and reserves only changed rows.
                         time.sleep(2)
                         continue
-                    raise RuntimeError(f"ingest {table} failed: {type(exc).__name__}") from exc
+                    raise RuntimeError(f"ingest {table} failed: {type(exc).__name__}; {diagnostic}") from exc
         if responses:
             result[table] = responses[0] if len(responses) == 1 else responses
+    if ingest_diagnostics:
+        result["_ingest_diagnostics"] = ingest_diagnostics
     return result
