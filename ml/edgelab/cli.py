@@ -16,6 +16,41 @@ from typing import Any
 from edgelab.storage import DEFAULT_STORE, load_rows, merge_rows, save_rows
 
 
+EXPECTED_PENDING_K_RESULTS_REASON = "same-day K results pending before first verified B cutoff"
+
+
+def _is_expected_pending_same_day_k(run: dict[str, Any], target_date: str) -> bool:
+    return (run.get("target_date") == target_date and run.get("source") == "mbrace-boat"
+            and run.get("status") == "partial" and not run.get("error")
+            and run.get("reason") == EXPECTED_PENDING_K_RESULTS_REASON)
+
+
+class _PendingKResultsBeforeFirstCutoff(Exception):
+    """A verified same-day K file has no results before the official first cutoff."""
+
+
+def _verified_b_first_cutoff(races: list[dict[str, Any]], source: dict[str, Any] | None,
+                             expected_date: str) -> datetime | None:
+    """Use only an exact-byte-verified B schedule with complete same-day cutoff fields."""
+    if not source or not races:
+        return None
+    cutoffs: list[datetime] = []
+    for race in races:
+        if (race.get("race_date") != expected_date or not race.get("id")
+                or not isinstance(race.get("post_time"), str)):
+            return None
+        try:
+            cutoff = datetime.fromisoformat(race["post_time"].replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+            return None
+        if cutoff.astimezone(ZoneInfo("Asia/Tokyo")).date().isoformat() != expected_date:
+            return None
+        cutoffs.append(cutoff.astimezone(timezone.utc))
+    return min(cutoffs) if cutoffs else None
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -371,7 +406,11 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     from edgelab.learning import score_feedback
     learning_report = score_feedback(rows)
     collection_runs = [run for run in payload["collection_runs"] if run.get("sport") == "boat"]
-    collection_ready = all(run.get("status") in {"success", "skipped"} for run in collection_runs)
+    same_day_results_pending = any(_is_expected_pending_same_day_k(run, day)
+                                   for run in collection_runs)
+    collection_ready = all(run.get("status") in {"success", "skipped"}
+                           or _is_expected_pending_same_day_k(run, day)
+                           for run in collection_runs)
     forecast_reason = prediction_error
     if forecast_reason is None and not ticket_predictions:
         forecast_reason = "no upcoming real races with verified cutoffs produced v2 trifecta predictions at this cutoff"
@@ -379,6 +418,7 @@ def run_daily(day: str, cutoff: str) -> dict[str, Any]:
     return {"date": day, "cutoff": cutoff, "prediction_as_of": inference_as_of,
             "collected_dates": [previous, day],
             "daily_collection_success": collection_ready,
+            "same_day_results_pending": same_day_results_pending,
             "forecast_ready": forecast_ready,
             "forecast_status": "ready" if forecast_ready else "not_ready",
             "forecast_reason": forecast_reason,
@@ -506,13 +546,15 @@ def _make_training_rows(store: dict[str, list[dict[str, Any]]], sport: str, *,
 def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                  refresh_k_dates: set[str] | None = None) -> int:
     from edgelab.collectors.boatrace import fetch_boatrace_file, read_lzh, read_source_file_metadata
-    from edgelab.parsers.boatrace_b import parse_b
+    from edgelab.parsers.boatrace_b import _date_from_text, parse_b
     from edgelab.parsers.boatrace_k import parse_k
 
     store = load_rows()
     requests = 0
     for day in _date_range(start, end):
         started, rows, errors, existing = _now(), {}, [], False
+        verified_b_first_cutoff = None
+        pending_k_results = False
         for kind, parser in (("B", parse_b), ("K", parse_k)):
             try:
                 cache = Path("data/raw/boatrace") / f"{kind.lower()}{day:%y%m%d}.lzh"
@@ -532,11 +574,27 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                     validator = None
                     if refresh_k:
                         def validator(content: str, *, expected_date=day.isoformat(), parse=parser):
+                            source_date = _date_from_text(content, None)
                             parsed = parse(content, race_date=expected_date)
-                            race_ids = {str(r.get("id")) for r in parsed.get("races", []) if r.get("id")}
-                            if (not race_ids or not any(str(r.get("race_id")) in race_ids
-                                                        for r in parsed.get("results", []))
-                                    or any(r.get("race_date") != expected_date for r in parsed.get("races", []))):
+                            parsed_races = parsed.get("races", [])
+                            race_ids = {str(r.get("id")) for r in parsed_races if r.get("id")}
+                            result_rows = parsed.get("results", [])
+                            entry_rows = parsed.get("entries", [])
+                            payout_rows = parsed.get("payouts", [])
+                            if ((source_date is not None and source_date != expected_date)
+                                    or any(r.get("race_date") != expected_date for r in parsed_races)):
+                                raise ValueError("refreshed K file has no valid same-day race results")
+                            has_linked_result = any(str(r.get("race_id")) in race_ids for r in result_rows)
+                            if not has_linked_result:
+                                now_at_check = _coerce_dt(_now())
+                                current_jst_day = now_at_check.astimezone(
+                                    ZoneInfo("Asia/Tokyo")).date().isoformat()
+                                if (not result_rows and not entry_rows and not payout_rows
+                                        and source_date == expected_date
+                                        and expected_date == current_jst_day
+                                        and verified_b_first_cutoff is not None
+                                        and now_at_check < verified_b_first_cutoff):
+                                    raise _PendingKResultsBeforeFirstCutoff
                                 raise ValueError("refreshed K file has no valid same-day race results")
                     path = fetch_boatrace_file(kind, day, refresh=refresh_k, validator=validator)
                     if path is None:
@@ -557,6 +615,8 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                     # files without a matching sidecar remain explicitly unproven.
                     if (source and parsed_races and race_ids
                             and all(row.get("race_date") == day.isoformat() for row in parsed_races)):
+                        verified_b_first_cutoff = _verified_b_first_cutoff(
+                            parsed_races, source, day.isoformat())
                         for entry in parsed.get("entries", []):
                             if entry.get("race_id") in race_ids and entry.get("data_origin") == "real":
                                 entry["available_at"] = source["fetchedAt"]
@@ -579,6 +639,10 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
                         result["available_at"] = observed_at
                 for table, values in parsed.items():
                     rows.setdefault(table, []).extend(values)
+            except _PendingKResultsBeforeFirstCutoff:
+                # Keep the K cache untouched and result/payout rows absent. This
+                # is an expected pending result, not a successful result collection.
+                pending_k_results = True
             except Exception as exc:  # each date gets a durable failure record
                 errors.append(f"{kind}: {type(exc).__name__}: {exc}")
         # Restore the official B schedule after parsing K results; the result
@@ -589,13 +653,15 @@ def collect_boat(start: str, end: str, *, max_requests: int | None = None,
             if race.get("status") == "finished" and race.get("id") in scheduled:
                 race["post_time"] = scheduled[race["id"]]
         merge_rows(store, rows)
-        status = "failed" if errors and not rows else "partial" if errors else "skipped" if not rows and existing else "success"
+        status = ("failed" if errors and not rows else "partial" if errors or pending_k_results
+                  else "skipped" if not rows and existing else "success")
         store.setdefault("collection_runs", []).append({
             "id": str(uuid.uuid4()), "source": "mbrace-boat", "sport": "boat",
             "target_date": day.isoformat(), "started_at": started, "finished_at": _now(),
             "status": status, "records": sum(len(v) for k, v in rows.items() if k != "races"),
             "error": "; ".join(errors) or None,
-            "reason": "official file not present (no meeting)" if status == "skipped" else None,
+            "reason": (EXPECTED_PENDING_K_RESULTS_REASON if pending_k_results else
+                       "official file not present (no meeting)" if status == "skipped" else None),
         })
     save_rows(store)
     # Preserve failed-run telemetry and allow the following workflow sync step
